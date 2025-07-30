@@ -6,14 +6,13 @@ const section1 = require('./sections/section1-setup.cjs');
 const { app, progress, express, ...helpers } = section1;
 
 // === Section 2: Basic routes & static serving ===
-const registerBasicRoutes = require('./sections/section2-basic-routes.cjs');
-registerBasicRoutes(app, express, progress);
+require('./sections/section2-basic-routes.cjs').registerBasicRoutes(app, progress);
 
 // === Section 3: Voices API ===
 require('./sections/section3-voices-endpoint.cjs').registerVoicesEndpoint(app);
 
 // === Section 4: Script generator ===
-require('./sections/section4-generate-script-endpoint.cjs').registerScriptEndpoint(app, helpers.openai);
+require('./sections/section4-generate-script-endpoint.cjs').registerGenerateScriptEndpoint(app, helpers.openai);
 
 // === Section 5: Video generator ===
 require('./sections/section5-generate-video-endpoint.cjs').registerGenerateVideoEndpoint(app, {
