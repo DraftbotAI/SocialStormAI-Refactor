@@ -10,10 +10,13 @@
 console.log('\n========== [SECTION 8] Contact Form Endpoint ==========');
 
 function registerContactEndpoint(app) {
+  console.log('[SECTION8][INIT] registerContactEndpoint called');
   if (!app) throw new Error('[SECTION8][FATAL] No app instance provided!');
 
   app.post('/api/contact', async (req, res) => {
-    console.log('[SECTION8][REQ] POST /api/contact');
+    const timestamp = new Date().toISOString();
+    console.log(`[SECTION8][REQ] POST /api/contact @ ${timestamp}`);
+
     try {
       const { name = '', email = '', message = '' } = req.body || {};
       console.log('[SECTION8][CONTACT INPUT] Name:', name, '| Email:', email, '| Message:', message);
@@ -23,7 +26,7 @@ function registerContactEndpoint(app) {
         return res.json({ success: false, error: "Please fill out all fields." });
       }
 
-      // Here you could add: Email sending, DB save, queue, etc.
+      // Example: Here you could add email sending, DB save, queue, etc.
       console.log(`[SECTION8][CONTACT] Message received from: ${name} <${email}> | Message: ${message}`);
 
       res.json({ success: true, status: "Message received!" });
@@ -38,4 +41,5 @@ function registerContactEndpoint(app) {
   console.log('[SECTION8][INFO] /api/contact endpoint registered.');
 }
 
-module.exports = { registerContactEndpoint };
+console.log('[SECTION8][EXPORT] registerContactEndpoint exported');
+module.exports = registerContactEndpoint;
