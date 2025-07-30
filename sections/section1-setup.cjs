@@ -1,4 +1,4 @@
-/* ===========================================================
+/* =============================================================
    SECTION 1: SETUP & DEPENDENCIES (Modular)
    -----------------------------------------------------------
    - Loads env, modules, API keys, and paths
@@ -365,23 +365,6 @@ function pickMusicForMood(scriptOrMood, workDir) {
   }
 }
 
-function cleanupJob(jobId) {
-  try {
-    console.log(`[SECTION1][CLEANUP] Starting cleanup for job: ${jobId}`);
-    if (progress[jobId]) {
-      delete progress[jobId];
-      console.log(`[SECTION1][CLEANUP] Progress entry deleted for job: ${jobId}`);
-    }
-    const jobDir = path.join(__dirname, '..', 'renders', jobId);
-    if (fs.existsSync(jobDir)) {
-      fsExtra.removeSync(jobDir);
-      console.log(`[SECTION1][CLEANUP] Removed temp folder: ${jobDir}`);
-    }
-  } catch (err) {
-    console.warn(`[SECTION1][WARN] Cleanup failed for job ${jobId}:`, err);
-  }
-}
-
 // === SPLIT SCRIPT TO SCENES FUNCTION ===
 function splitScriptToScenes(script) {
   console.log(`[SECTION1][HELPER][splitScriptToScenes] Splitting script into scenes, length: ${script ? script.length : 0}`);
@@ -433,6 +416,5 @@ module.exports = {
   standardizeVideo,
   getVideoInfo,
   pickMusicForMood,
-  cleanupJob,
-  splitScriptToScenes,
+  splitScriptToScenes, // No cleanupJob export here anymore!
 };
