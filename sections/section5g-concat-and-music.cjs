@@ -1,7 +1,7 @@
 // ===========================================================
 // SECTION 5G: FINAL VIDEO ASSEMBLER & MUSIC/OUTRO
 // Concats scenes, adds music, appends outro, validates output.
-// MAX LOGGING AT EVERY STEP
+// SUPER MAX LOGGING AT EVERY STEP — NO SILENT FAILURES
 // ===========================================================
 
 const fs = require('fs');
@@ -10,21 +10,57 @@ const ffmpeg = require('fluent-ffmpeg');
 
 console.log('[5G][INIT] Final video assembler loaded.');
 
+// Helper: Check for file existence/size before any operation
+function assertFile(file, minSize = 10240, label = 'FILE') {
+  if (!fs.existsSync(file)) {
+    throw new Error(`[5G][${label}][ERR] File does not exist: ${file}`);
+  }
+  const sz = fs.statSync(file).size;
+  if (sz < minSize) {
+    throw new Error(`[5G][${label}][ERR] File too small (${sz} bytes): ${file}`);
+  }
+}
+
+// Helper: Log file info and probe results
+async function logFileProbe(file, label = 'PROBE') {
+  try {
+    const stats = fs.statSync(file);
+    console.log(`[5G][${label}][INFO] File: ${file} | Size: ${stats.size} bytes`);
+    await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(file, (err, md) => {
+        if (err) {
+          console.error(`[5G][${label}][FFPROBE][ERR] ${file}`, err);
+          reject(err);
+        } else {
+          const format = md.format || {};
+          const streams = md.streams || [];
+          const v = streams.find(s => s.codec_type === 'video');
+          const a = streams.find(s => s.codec_type === 'audio');
+          console.log(`[5G][${label}][FFPROBE] duration=${format.duration} streams: video=${!!v} audio=${!!a} width=${v?.width} height=${v?.height}`);
+          resolve();
+        }
+      });
+    });
+  } catch (err) {
+    console.error(`[5G][${label}][FFPROBE][ERR2] ${file}`, err);
+  }
+}
+
 /**
  * Concatenate all scene files into a single video.
- * @param {Array<string>} sceneFiles - Ordered array of .mp4s (scenes)
- * @param {string} workDir - Temporary working directory (for lists, outputs)
- * @returns {Promise<string>} Path to concat .mp4
  */
 async function concatScenes(sceneFiles, workDir) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
   sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i+1}: ${file}`));
   const listFile = path.resolve(workDir, 'list.txt');
-  fs.writeFileSync(
-    listFile,
-    sceneFiles.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n')
-  );
+  fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
   const concatFile = path.resolve(workDir, 'concat.mp4');
+
+  // Extra probe/log before concat
+  for (let i = 0; i < sceneFiles.length; i++) {
+    try { assertFile(sceneFiles[i], 10240, `CONCAT_SCENE_${i+1}`); } catch(e) { console.error(e.message); }
+    await logFileProbe(sceneFiles[i], `CONCAT_SCENE_${i+1}`);
+  }
 
   return new Promise((resolve, reject) => {
     ffmpeg()
@@ -32,16 +68,21 @@ async function concatScenes(sceneFiles, workDir) {
       .inputOptions(['-f concat', '-safe 0'])
       .outputOptions(['-c:v libx264', '-c:a aac', '-movflags +faststart'])
       .save(concatFile)
-      .on('end', () => {
-        if (!fs.existsSync(concatFile) || fs.statSync(concatFile).size < 10240) {
-          console.error(`[5G][CONCAT][ERR] Output missing/too small after concat: ${concatFile}`);
-          return reject(new Error('Concat output missing or too small!'));
+      .on('end', async () => {
+        try {
+          assertFile(concatFile, 10240, 'CONCAT_OUT');
+          await logFileProbe(concatFile, 'CONCAT_OUT');
+          console.log(`[5G][CONCAT] Scenes concatenated: ${concatFile}`);
+          resolve(concatFile);
+        } catch (e) {
+          console.error(`[5G][CONCAT][ERR] ${e.message}`);
+          reject(e);
         }
-        console.log(`[5G][CONCAT] Scenes concatenated: ${concatFile}`);
-        resolve(concatFile);
       })
-      .on('error', (err) => {
-        console.error(`[5G][CONCAT][ERR] FFmpeg error during concat:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][CONCAT][FFMPEG][ERR]`, err);
+        if (stderr) console.error(`[5G][CONCAT][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][CONCAT][STDOUT]\n${stdout}`);
         reject(err);
       });
   });
@@ -49,9 +90,6 @@ async function concatScenes(sceneFiles, workDir) {
 
 /**
  * Ensures a video file has an audio stream; if not, adds silent audio.
- * @param {string} videoPath
- * @param {string} workDir
- * @returns {Promise<string>} Path to audio-fixed .mp4
  */
 async function ensureAudioStream(videoPath, workDir) {
   console.log(`[5G][AUDIOFIX] ensureAudioStream called: ${videoPath}`);
@@ -62,13 +100,14 @@ async function ensureAudioStream(videoPath, workDir) {
     });
     audioStreamExists = (metadata.streams || []).some(s => s.codec_type === 'audio');
     console.log(`[5G][AUDIOFIX] Audio stream exists: ${audioStreamExists}`);
+    await logFileProbe(videoPath, 'AUDIOFIX_ORIG');
   } catch (err) {
     console.error('[5G][AUDIOFIX][ERR] ffprobe failed:', err);
   }
   if (audioStreamExists) return videoPath;
 
   // Add silent audio if missing
-  const fixedPath = path.resolve(workDir, 'concat-audio.mp4');
+  const fixedPath = path.resolve(workDir, `audiofix-${path.basename(videoPath)}`);
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
@@ -76,16 +115,23 @@ async function ensureAudioStream(videoPath, workDir) {
       .inputOptions(['-f lavfi'])
       .outputOptions(['-shortest', '-c:v copy', '-c:a aac', '-y'])
       .save(fixedPath)
-      .on('end', () => {
-        if (!fs.existsSync(fixedPath) || fs.statSync(fixedPath).size < 10240) {
-          console.error(`[5G][AUDIOFIX][ERR] Output missing/too small after silent audio: ${fixedPath}`);
-          return reject(new Error('Audio-fix output missing or too small!'));
+      .on('end', async () => {
+        try {
+          assertFile(fixedPath, 10240, 'AUDIOFIX_OUT');
+          await logFileProbe(fixedPath, 'AUDIOFIX_OUT');
+          // Optionally overwrite original if you want
+          // fs.renameSync(fixedPath, videoPath);
+          console.log(`[5G][AUDIOFIX] Silent audio added: ${fixedPath}`);
+          resolve(fixedPath);
+        } catch (e) {
+          console.error(`[5G][AUDIOFIX][ERR] ${e.message}`);
+          reject(e);
         }
-        console.log(`[5G][AUDIOFIX] Silent audio added: ${fixedPath}`);
-        resolve(fixedPath);
       })
-      .on('error', (err) => {
-        console.error(`[5G][AUDIOFIX][ERR] FFmpeg error during audio-fix:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][AUDIOFIX][FFMPEG][ERR]`, err);
+        if (stderr) console.error(`[5G][AUDIOFIX][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][AUDIOFIX][STDOUT]\n${stdout}`);
         reject(err);
       });
   });
@@ -93,27 +139,15 @@ async function ensureAudioStream(videoPath, workDir) {
 
 /**
  * Overlays music on a video using FFmpeg amix filter.
- * @param {string} videoPath - Input .mp4 (must have audio)
- * @param {string} musicPath - Input music .mp3/.wav
- * @param {string} outPath - Output .mp4
- * @returns {Promise<string>} Path to music-mixed .mp4
  */
 async function overlayMusic(videoPath, musicPath, outPath) {
   console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
 
-  // (Optional: Log input durations for easier debugging)
   try {
-    const videoInfo = await new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(videoPath, (err, md) => err ? reject(err) : resolve(md));
-    });
-    const musicInfo = await new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(musicPath, (err, md) => err ? reject(err) : resolve(md));
-    });
-    const videoDuration = (videoInfo.format && videoInfo.format.duration) || 0;
-    const musicDuration = (musicInfo.format && musicInfo.format.duration) || 0;
-    console.log(`[5G][MUSIC][DURATION] video: ${videoDuration}s, music: ${musicDuration}s`);
+    await logFileProbe(videoPath, 'MUSIC_VIDEO');
+    await logFileProbe(musicPath, 'MUSIC_MUSIC');
   } catch (e) {
-    console.warn('[5G][MUSIC][DURATION][WARN] Could not probe input durations.');
+    console.warn('[5G][MUSIC][PROBE][WARN] Could not probe input durations.');
   }
 
   return new Promise((resolve, reject) => {
@@ -123,16 +157,21 @@ async function overlayMusic(videoPath, musicPath, outPath) {
       .complexFilter('[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2[mixa]')
       .outputOptions(['-map', '0:v', '-map', '[mixa]', '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y'])
       .save(outPath)
-      .on('end', () => {
-        if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 10240) {
-          console.error(`[5G][MUSIC][ERR] Output missing/too small after music overlay: ${outPath}`);
-          return reject(new Error('Music overlay output missing or too small!'));
+      .on('end', async () => {
+        try {
+          assertFile(outPath, 10240, 'MUSIC_OUT');
+          await logFileProbe(outPath, 'MUSIC_OUT');
+          console.log(`[5G][MUSIC] Music overlay complete: ${outPath}`);
+          resolve(outPath);
+        } catch (e) {
+          console.error(`[5G][MUSIC][ERR] ${e.message}`);
+          reject(e);
         }
-        console.log(`[5G][MUSIC] Music overlay complete: ${outPath}`);
-        resolve(outPath);
       })
-      .on('error', (err) => {
-        console.error(`[5G][MUSIC][ERR] FFmpeg error during music overlay:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][MUSIC][FFMPEG][ERR]`, err);
+        if (stderr) console.error(`[5G][MUSIC][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][MUSIC][STDOUT]\n${stdout}`);
         reject(err);
       });
   });
@@ -140,54 +179,64 @@ async function overlayMusic(videoPath, musicPath, outPath) {
 
 /**
  * Appends outro to the video via FFmpeg concat.
- * @param {string} mainPath - Main video path (.mp4)
- * @param {string} outroPath - Outro video path (.mp4)
- * @param {string} outPath - Output final .mp4
- * @param {string} workDir - Working dir for temp list
- * @returns {Promise<void>}
  */
 async function appendOutro(mainPath, outroPath, outPath, workDir) {
   console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outPath}"`);
+  await logFileProbe(mainPath, 'OUTRO_MAIN');
+  await logFileProbe(outroPath, 'OUTRO_OUTRO');
+
   const listFile = path.resolve(workDir, 'list2.txt');
   fs.writeFileSync(listFile, [
     `file '${mainPath.replace(/'/g, "'\\''")}'`,
     `file '${outroPath.replace(/'/g, "'\\''")}'`
   ].join('\n'));
+
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(listFile)
       .inputOptions(['-f concat', '-safe 0'])
       .outputOptions(['-c:v libx264', '-c:a aac', '-movflags +faststart'])
       .save(outPath)
-      .on('end', () => {
-        if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 10240) {
-          console.error(`[5G][OUTRO][ERR] Output missing/too small after outro append: ${outPath}`);
-          return reject(new Error('Outro output missing or too small!'));
+      .on('end', async () => {
+        try {
+          assertFile(outPath, 10240, 'OUTRO_OUT');
+          await logFileProbe(outPath, 'OUTRO_OUT');
+          console.log(`[5G][OUTRO] Outro appended: ${outPath}`);
+          resolve();
+        } catch (e) {
+          console.error(`[5G][OUTRO][ERR] ${e.message}`);
+          reject(e);
         }
-        console.log(`[5G][OUTRO] Outro appended: ${outPath}`);
-        resolve();
       })
-      .on('error', (err) => {
-        console.error(`[5G][OUTRO][ERR] FFmpeg error during outro append:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][OUTRO][FFMPEG][ERR]`, err);
+        if (stderr) console.error(`[5G][OUTRO][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][OUTRO][STDOUT]\n${stdout}`);
         reject(err);
       });
   });
 }
 
 /**
- * Bulletproofs (validates) a set of scene videos against a reference.
- * Can be expanded for codec/pixel_fmt checks.
- * @param {Array<string>} sceneFiles
- * @param {Object} refInfo - Reference info (width, height, codec, pix_fmt)
- * @param {function} getVideoInfo - Async video info probe
- * @param {function} standardizeVideo - Async video format fixer
- * @returns {Promise<void>}
+ * Bulletproofs (validates/fixes) a set of scene videos.
+ * - Ensures video/audio stream, ref shape/format.
+ * - If audio is missing, runs ensureAudioStream.
+ * - If invalid, throws or optionally repairs.
  */
-async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo) {
+async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo, workDir = '/tmp') {
   console.log('[5G][BULLETPROOF] bulletproofScenes called.');
   for (let i = 0; i < sceneFiles.length; i++) {
+    const origPath = sceneFiles[i];
     try {
-      const info = await getVideoInfo(sceneFiles[i]);
+      await logFileProbe(origPath, `BULLETPROOF_SCENE_${i+1}`);
+      assertFile(origPath, 10240, `BULLETPROOF_SCENE_${i+1}`);
+
+      // Ensure audio stream (fix if needed)
+      let fixedPath = origPath;
+      fixedPath = await ensureAudioStream(fixedPath, workDir);
+
+      // Get video/audio info
+      const info = await getVideoInfo(fixedPath);
       const v = (info.streams || []).find(s => s.codec_type === 'video');
       const a = (info.streams || []).find(s => s.codec_type === 'audio');
       const needsFix =
@@ -197,17 +246,20 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
         v.height !== refInfo.height ||
         v.pix_fmt !== refInfo.pix_fmt ||
         !a;
+
       if (needsFix) {
-        const fixedPath = sceneFiles[i].replace(/\.mp4$/, '-fixed.mp4');
-        await standardizeVideo(sceneFiles[i], fixedPath, refInfo);
-        fs.renameSync(fixedPath, sceneFiles[i]);
-        console.log(`[5G][BULLETPROOF] Fixed scene ${i + 1} video: ${sceneFiles[i]}`);
+        console.warn(`[5G][BULLETPROOF][WARN] Scene ${i+1} format mismatch or missing stream. Attempting to standardize.`);
+        const fixedOut = origPath.replace(/\.mp4$/, '-fixed.mp4');
+        await standardizeVideo(fixedPath, fixedOut, refInfo);
+        fs.renameSync(fixedOut, origPath);
+        console.log(`[5G][BULLETPROOF] Standardized scene ${i+1}: ${origPath}`);
       } else {
-        console.log(`[5G][BULLETPROOF] Scene ${i + 1} validated OK`);
+        console.log(`[5G][BULLETPROOF] Scene ${i+1} validated OK`);
       }
     } catch (err) {
-      console.error(`[5G][BULLETPROOF][ERR] Validation failed for scene ${i + 1}`, err);
-      throw err;
+      console.error(`[5G][BULLETPROOF][ERR] Validation failed for scene ${i+1}`, err);
+      // Optionally: Replace with fallback scene here (ken burns, blank, etc)
+      throw err; // or continue to skip if you want
     }
   }
   console.log('[5G][BULLETPROOF] All scenes validated.');
