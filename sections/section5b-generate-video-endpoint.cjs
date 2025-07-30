@@ -73,6 +73,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 5 + i * 5, status: `Finding clip for scene ${i + 1}` };
           console.log(`[5B][SCENE] Scene ${i + 1}: "${scene}"`);
 
+          // Use the findClipForScene helper from deps
           const clipPath = await findClipForScene(scene, i, scenes, scenes[0]);
           if (!clipPath) {
             throw new Error(`[5B][ERR] No clip found for scene ${i + 1}`);

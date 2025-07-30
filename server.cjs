@@ -25,12 +25,17 @@ registerGenerateScriptEndpoint(app, section1.openai);
 console.log('[SERVER][INFO] Loading Section 5 (Video Generator)...');
 // --------------- UPDATED: now points to 5b, not original 5 ---------------
 const registerGenerateVideoEndpoint = require('./sections/section5b-generate-video-endpoint.cjs');
+// Import clip matcher explicitly for passing to 5b
+const { findClipForScene } = require('./sections/section5d-clip-matcher.cjs');
+
 registerGenerateVideoEndpoint(app, {
     ...section1,
     progress,
     voices: section1.voices,
-    POLLY_VOICE_IDS: section1.POLLY_VOICE_IDS
+    POLLY_VOICE_IDS: section1.POLLY_VOICE_IDS,
+    findClipForScene, // <-- Added here to fix "not a function" error
 });
+
 
 // === Section 6: Thumbnails ===
 console.log('[SERVER][INFO] Loading Section 6 (Thumbnail Generator)...');
