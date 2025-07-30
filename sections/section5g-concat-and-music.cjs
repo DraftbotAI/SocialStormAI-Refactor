@@ -10,6 +10,18 @@ const ffmpeg = require('fluent-ffmpeg');
 
 console.log('[5G][INIT] Final video assembler loaded.');
 
+// === STATIC ASSET PATH HELPERS ===
+
+// Always use these helpers for static asset files (no more hard-coded paths!)
+function getOutroPath() {
+  // Edit these folder/file names if your structure changes.
+  const outroPath = path.join(__dirname, '..', 'public', 'video', 'outro.mp4');
+  console.log('[5G][PATH][OUTRO] Using outro path:', outroPath);
+  return outroPath;
+}
+
+// You can add more helpers for other static files here if needed.
+
 // Helper: Check for file existence/size before any operation
 function assertFile(file, minSize = 10240, label = 'FILE') {
   if (!fs.existsSync(file)) {
@@ -179,6 +191,10 @@ async function overlayMusic(videoPath, musicPath, outPath) {
  * Appends outro to the video via FFmpeg concat.
  */
 async function appendOutro(mainPath, outroPath, outPath, workDir) {
+  // If outroPath is not passed, always resolve it here:
+  if (!outroPath) {
+    outroPath = getOutroPath();
+  }
   console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outPath}"`);
   await logFileProbe(mainPath, 'OUTRO_MAIN');
   await logFileProbe(outroPath, 'OUTRO_OUTRO');
@@ -283,4 +299,5 @@ module.exports = {
   overlayMusic,
   appendOutro,
   bulletproofScenes,
+  getOutroPath, // export for testing/other use if needed
 };
