@@ -10,8 +10,8 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
 
-// R2 dependencies
-const { s3Client, PutObjectCommand } = require('./section1-setup.cjs'); // update path if needed
+// R2 dependencies (S3 SDK)
+const { s3Client, PutObjectCommand } = require('./section1-setup.cjs'); // make sure this is correct
 
 const {
   concatScenes,
@@ -30,22 +30,36 @@ console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
  * @param {string} jobId
  */
 async function uploadToR2(localFilePath, jobId) {
+  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos'; // FIXED: Matches your .env
+  const accountDomain = process.env.R2_PUBLIC_DOMAIN || '<your-account-id>.r2.cloudflarestorage.com'; // set in .env!
+  const r2Key = `videos/${jobId}/final-with-outro.mp4`;
+
+  console.log(`[5B][R2 UPLOAD][START] Attempting upload for job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
   try {
+    // Check file exists
+    if (!fs.existsSync(localFilePath)) {
+      throw new Error(`[5B][R2 UPLOAD][ERR] File does not exist: ${localFilePath}`);
+    }
     const fileBuffer = fs.readFileSync(localFilePath);
-    const r2Key = `videos/${jobId}/final-with-outro.mp4`;
-    await s3Client.send(new PutObjectCommand({
-      Bucket: 'socialstorm-videos',
+
+    // Upload to R2
+    const r2Resp = await s3Client.send(new PutObjectCommand({
+      Bucket: bucket,
       Key: r2Key,
       Body: fileBuffer,
       ContentType: 'video/mp4'
     }));
-    // Replace with your actual Cloudflare account ID or custom domain if using a CNAME
-    const publicUrl = `https://<your-account-id>.r2.cloudflarestorage.com/socialstorm-videos/${r2Key}`;
-    console.log(`[5B][R2 UPLOAD] Uploaded video for job ${jobId} to R2: ${publicUrl}`);
+
+    // Log R2 response for debug
+    console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
+
+    // Compute public URL (always using env var, never hardcoded)
+    const publicUrl = `https://${accountDomain}/${bucket}/${r2Key}`;
+    console.log(`[5B][R2 UPLOAD][SUCCESS] File available at: ${publicUrl}`);
     return publicUrl;
   } catch (err) {
-    console.error(`[5B][R2 UPLOAD][ERR] Failed to upload video for job ${jobId}:`, err);
-    throw err;
+    console.error(`[5B][R2 UPLOAD][FAIL] Upload failed for job=${jobId} localFilePath=${localFilePath}:`, err);
+    throw err; // force job to show failure
   }
 }
 // ===========================================================
