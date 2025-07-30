@@ -71,7 +71,7 @@ Description: Real hidden rooms and strange facts about the world’s most famous
 Tags: secrets landmarks mystery history viral
       `.trim();
 
-      // === OpenAI v4+ call ===
+      // === OpenAI v4+ call ====
       const completion = await openai.chat.completions.create({
         model: "gpt-4-1106-preview",
         temperature: 0.84,
