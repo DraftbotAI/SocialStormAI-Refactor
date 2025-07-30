@@ -1,7 +1,7 @@
 // ===========================================================
 // SECTION 5B: GENERATE VIDEO ENDPOINT (Job Controller)
 // The /api/generate-video route handler. Full job orchestration.
-// MAX LOGGING EVERYWHERE
+// MAX LOGGING EVERYWHERE, User-friendly status messages!
 // Enhanced: Mega-scene (hook+main) support
 // ===========================================================
 
@@ -64,7 +64,7 @@ function registerGenerateVideoEndpoint(app, deps) {
       console.error('[5B][FATAL] No progress tracker found!');
       return res.status(500).json({ error: 'Internal progress tracker missing.' });
     }
-    progress[jobId] = { percent: 0, status: 'starting' };
+    progress[jobId] = { percent: 0, status: 'Starting up...' };
     console.log(`[5B][INFO] New job started: ${jobId}`);
     res.json({ jobId });
 
@@ -73,7 +73,7 @@ function registerGenerateVideoEndpoint(app, deps) {
       const workDir = path.join(__dirname, '..', 'jobs', jobId);
       try {
         fs.mkdirSync(workDir, { recursive: true });
-        progress[jobId] = { percent: 2, status: 'created work dir' };
+        progress[jobId] = { percent: 2, status: 'Setting up your project...' };
         console.log(`[5B][WORKDIR] [${jobId}] Created: ${workDir}`);
 
         // === 1. Parse and split script into scenes ===
@@ -127,7 +127,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         for (let i = 0; i < scenes.length; i++) {
           const scene = scenes[i];
           const isMegaScene = !!scene.isMegaScene;
-          progress[jobId] = { percent: 5 + i * 5, status: `Finding clip for scene ${i + 1}` };
+          progress[jobId] = { percent: 5 + i * 5, status: `Finding the perfect video for step ${i + 1}...` };
           console.log(`[5B][SCENE] [${jobId}] Processing scene ${i + 1} / ${scenes.length} (megaScene: ${isMegaScene})`);
 
           // Main subject for mega-scene: always from scene 1+2
@@ -146,7 +146,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           console.log(`[5B][MATCH] [${jobId}] Scene ${i + 1}: Subject for matching: "${subject}"`);
           let clipPath = null;
           try {
-            // --- THIS IS THE CRITICAL UPDATE: Pass workDir and jobId! ---
             clipPath = await findClipForScene({
               subject,
               sceneIdx: i,
@@ -154,8 +153,8 @@ function registerGenerateVideoEndpoint(app, deps) {
               mainTopic,
               isMegaScene,
               usedClips,
-              workDir,   // must now always pass workDir
-              jobId      // must now always pass jobId
+              workDir,
+              jobId
             });
           } catch (e) {
             console.error(`[5B][CLIP][ERR] [${jobId}] findClipForScene failed for scene ${i + 1}:`, e);
@@ -169,9 +168,9 @@ function registerGenerateVideoEndpoint(app, deps) {
           // --- AUDIO GENERATION ---
           let audioPath;
           if (isMegaScene) {
-            // Mega-scene: merge two lines into one audio
             audioPath = path.join(workDir, `scene${i + 1}-mega-audio.mp3`);
             try {
+              progress[jobId] = { percent: 12 + i * 5, status: `Recording your viral intro...` };
               await createMegaSceneAudio(scene.texts, voice, audioPath, provider, workDir);
               console.log(`[5B][AUDIO] [${jobId}] Mega-scene audio created: ${audioPath}`);
             } catch (e) {
@@ -181,6 +180,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           } else {
             audioPath = path.join(workDir, `scene${i + 1}-audio.mp3`);
             try {
+              progress[jobId] = { percent: 14 + i * 5, status: `Voicing scene ${i + 1}...` };
               await createSceneAudio(scene.texts[0], voice, audioPath, provider);
               console.log(`[5B][AUDIO] [${jobId}] Scene ${i + 1} audio generated: ${audioPath}`);
             } catch (e) {
@@ -195,6 +195,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           // --- MUXING (combine) video and audio for the scene ---
           const muxedScenePath = path.join(workDir, `scene${i + 1}.mp4`);
           try {
+            progress[jobId] = { percent: 16 + i * 5, status: `Syncing voice and visuals for step ${i + 1}...` };
             if (isMegaScene) {
               await muxMegaSceneWithNarration(clipPath, audioPath, muxedScenePath);
               console.log(`[5B][MUX] [${jobId}] Mega-scene muxed: ${muxedScenePath}`);
@@ -208,12 +209,13 @@ function registerGenerateVideoEndpoint(app, deps) {
           }
           sceneFiles.push(muxedScenePath);
         }
-        progress[jobId] = { percent: 40, status: 'All scenes muxed' };
+        progress[jobId] = { percent: 40, status: 'Stitching your video together...' };
         console.log(`[5B][SCENES] [${jobId}] All scenes muxed:`, sceneFiles);
 
         // === 3. Bulletproof video scenes (codec/size) ===
         let refInfo = null;
         try {
+          progress[jobId] = { percent: 44, status: 'Checking video quality...' };
           refInfo = await getVideoInfo(sceneFiles[0]);
         } catch (e) {
           console.error(`[5B][BULLETPROOF][ERR] [${jobId}] Failed to get video info:`, e);
@@ -221,6 +223,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
         try {
           await bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo);
+          progress[jobId] = { percent: 48, status: 'Perfecting your video quality...' };
           console.log(`[5B][BULLETPROOF] [${jobId}] All scenes bulletproofed.`);
         } catch (e) {
           console.error(`[5B][BULLETPROOF][ERR] [${jobId}] bulletproofScenes failed:`, e);
@@ -230,8 +233,8 @@ function registerGenerateVideoEndpoint(app, deps) {
         // === 4. Concatenate all scene files ===
         let concatPath;
         try {
+          progress[jobId] = { percent: 60, status: 'Combining everything into one amazing video...' };
           concatPath = await concatScenes(sceneFiles, workDir);
-          progress[jobId] = { percent: 60, status: 'Scenes concatenated' };
           console.log(`[5B][CONCAT] [${jobId}] Scenes concatenated: ${concatPath}`);
         } catch (e) {
           console.error(`[5B][CONCAT][ERR] [${jobId}] concatScenes failed:`, e);
@@ -241,8 +244,8 @@ function registerGenerateVideoEndpoint(app, deps) {
         // === 5. Ensure audio (add silence if needed) ===
         let withAudioPath;
         try {
+          progress[jobId] = { percent: 70, status: 'Finalizing your audio...' };
           withAudioPath = await ensureAudioStream(concatPath, workDir);
-          progress[jobId] = { percent: 70, status: 'Audio checked' };
           console.log(`[5B][AUDIO] [${jobId}] Audio stream ensured: ${withAudioPath}`);
         } catch (e) {
           console.error(`[5B][AUDIO][ERR] [${jobId}] ensureAudioStream failed:`, e);
@@ -253,14 +256,16 @@ function registerGenerateVideoEndpoint(app, deps) {
         let musicPath = withAudioPath;
         if (music) {
           try {
+            progress[jobId] = { percent: 80, status: 'Adding background music...' };
             const chosenMusic = pickMusicForMood ? await pickMusicForMood(script, workDir) : null;
             if (chosenMusic) {
               const musicOutput = path.join(workDir, 'with-music.mp4');
               await overlayMusic(withAudioPath, chosenMusic, musicOutput);
               musicPath = musicOutput;
-              progress[jobId] = { percent: 80, status: 'Music overlayed' };
+              progress[jobId] = { percent: 82, status: 'Background music ready!' };
               console.log(`[5B][MUSIC] [${jobId}] Music overlayed: ${chosenMusic}`);
             } else {
+              progress[jobId] = { percent: 80, status: 'No music found, skipping...' };
               console.warn(`[5B][MUSIC][WARN] [${jobId}] No background music found/skipped.`);
             }
           } catch (e) {
@@ -268,6 +273,7 @@ function registerGenerateVideoEndpoint(app, deps) {
             throw e;
           }
         } else {
+          progress[jobId] = { percent: 80, status: 'Music skipped (user setting).' };
           console.log(`[5B][MUSIC][SKIP] [${jobId}] Music overlay skipped (music disabled).`);
         }
 
@@ -277,29 +283,32 @@ function registerGenerateVideoEndpoint(app, deps) {
           const outroPath = path.resolve(__dirname, '..', 'public', 'video', 'outro.mp4');
           if (fs.existsSync(outroPath)) {
             try {
+              progress[jobId] = { percent: 90, status: 'Adding your outro...' };
               const outroOutput = path.join(workDir, 'final-with-outro.mp4');
               await appendOutro(musicPath, outroPath, outroOutput, workDir);
               finalPath = outroOutput;
-              progress[jobId] = { percent: 90, status: 'Outro appended' };
+              progress[jobId] = { percent: 92, status: 'Outro added! Wrapping up...' };
               console.log(`[5B][OUTRO] [${jobId}] Outro appended: ${outroPath}`);
             } catch (e) {
               console.error(`[5B][OUTRO][ERR] [${jobId}] appendOutro failed:`, e);
               throw e;
             }
           } else {
+            progress[jobId] = { percent: 90, status: 'Finalizing your masterpiece...' };
             console.warn(`[5B][OUTRO][WARN] [${jobId}] Outro file missing: ${outroPath}`);
           }
         } else {
+          progress[jobId] = { percent: 90, status: 'Outro skipped (user setting).' };
           console.log(`[5B][OUTRO][SKIP] [${jobId}] Outro append skipped (outro disabled).`);
         }
 
         // === 8. Job Complete! ===
-        progress[jobId] = { percent: 100, status: 'complete', output: finalPath };
+        progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: finalPath };
         console.log(`[5B][SUCCESS] [${jobId}] Video job complete! Output at: ${finalPath}`);
 
       } catch (err) {
         console.error(`[5B][FATAL][JOB] [${jobId}] Video job failed:`, err);
-        progress[jobId] = { percent: 100, status: 'failed', error: err.message || err.toString() };
+        progress[jobId] = { percent: 100, status: 'Something went wrong. Please try again or contact support.', error: err.message || err.toString() };
       } finally {
         if (cleanupJob) {
           try {
