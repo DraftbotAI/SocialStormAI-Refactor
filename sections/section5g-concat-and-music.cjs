@@ -12,17 +12,14 @@ console.log('[5G][INIT] Final video assembler loaded.');
 
 // === STATIC ASSET PATH HELPERS ===
 
-// Always use these helpers for static asset files (no more hard-coded paths!)
 function getOutroPath() {
-  // Edit these folder/file names if your structure changes.
   const outroPath = path.join(__dirname, '..', 'public', 'video', 'outro.mp4');
   console.log('[5G][PATH][OUTRO] Using outro path:', outroPath);
   return outroPath;
 }
 
-// You can add more helpers for other static files here if needed.
+// --- File Existence and Probe Utilities ---
 
-// Helper: Check for file existence/size before any operation
 function assertFile(file, minSize = 10240, label = 'FILE') {
   if (!fs.existsSync(file)) {
     throw new Error(`[5G][${label}][ERR] File does not exist: ${file}`);
@@ -33,7 +30,6 @@ function assertFile(file, minSize = 10240, label = 'FILE') {
   }
 }
 
-// Helper: Log file info and probe results
 async function logFileProbe(file, label = 'PROBE') {
   try {
     const stats = fs.statSync(file);
@@ -58,8 +54,11 @@ async function logFileProbe(file, label = 'PROBE') {
   }
 }
 
+// === FINAL VIDEO LOGIC ===
+
 /**
- * Concatenate all scene files into a single video.
+ * Concatenate all scene files (each with voice) into a single video.
+ * Ensures proper aspect ratio and audio.
  */
 async function concatScenes(sceneFiles, workDir) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
@@ -68,17 +67,24 @@ async function concatScenes(sceneFiles, workDir) {
   fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
   const concatFile = path.resolve(workDir, 'concat.mp4');
 
-  // Extra probe/log before concat
+  // Pre-concat check for all scene files
   for (let i = 0; i < sceneFiles.length; i++) {
     try { assertFile(sceneFiles[i], 10240, `CONCAT_SCENE_${i+1}`); } catch(e) { console.error(e.message); }
     await logFileProbe(sceneFiles[i], `CONCAT_SCENE_${i+1}`);
   }
 
+  // Concat all scenes, ensure audio stream for each
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(listFile)
       .inputOptions(['-f concat', '-safe 0'])
-      .outputOptions(['-c:v libx264', '-c:a aac', '-movflags +faststart'])
+      .outputOptions([
+        '-c:v libx264',
+        '-c:a aac',
+        '-movflags +faststart',
+        '-preset veryfast',
+        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1' // always vertical 9:16
+      ])
       .save(concatFile)
       .on('end', async () => {
         try {
@@ -118,7 +124,6 @@ async function ensureAudioStream(videoPath, workDir) {
   }
   if (audioStreamExists) return videoPath;
 
-  // Add silent audio if missing
   const fixedPath = path.resolve(workDir, `audiofix-${path.basename(videoPath)}`);
   return new Promise((resolve, reject) => {
     ffmpeg()
@@ -148,7 +153,7 @@ async function ensureAudioStream(videoPath, workDir) {
 }
 
 /**
- * Overlays music on a video using FFmpeg amix filter.
+ * Overlay music on the FINAL video with correct volume mixing.
  */
 async function overlayMusic(videoPath, musicPath, outPath) {
   console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
@@ -160,12 +165,24 @@ async function overlayMusic(videoPath, musicPath, outPath) {
     console.warn('[5G][MUSIC][PROBE][WARN] Could not probe input durations.');
   }
 
+  // Proper volume: voice=1.0, music=0.16
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
       .input(musicPath)
-      .complexFilter('[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=2[mixa]')
-      .outputOptions(['-map', '0:v', '-map', '[mixa]', '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y'])
+      .complexFilter([
+        '[0:a]volume=1.0[a0]',
+        '[1:a]volume=0.16[a1]',
+        '[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]'
+      ])
+      .outputOptions([
+        '-map', '0:v',
+        '-map', '[aout]',
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-shortest',
+        '-y'
+      ])
       .save(outPath)
       .on('end', async () => {
         try {
@@ -188,10 +205,9 @@ async function overlayMusic(videoPath, musicPath, outPath) {
 }
 
 /**
- * Appends outro to the video via FFmpeg concat.
+ * Append outro (video+audio) to the final video.
  */
 async function appendOutro(mainPath, outroPath, outPath, workDir) {
-  // If outroPath is not passed, always resolve it here:
   if (!outroPath) {
     outroPath = getOutroPath();
   }
@@ -232,19 +248,14 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
 }
 
 /**
- * Bulletproofs (validates/fixes) a set of scene videos.
- * - Ensures video/audio stream, ref shape/format.
- * - If audio is missing, runs ensureAudioStream.
- * - If invalid, throws or optionally repairs.
+ * Bulletproof scenes: ensure proper video/audio format, shape, stream.
  */
 async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo, workDir = '/tmp') {
   console.log('[5G][BULLETPROOF] bulletproofScenes called.');
-  // Defensive defaults for refInfo!
   if (!refInfo || typeof refInfo !== 'object') {
     console.error('[5G][BULLETPROOF][FATAL] refInfo missing or not an object! Using default safe values.');
     refInfo = {};
   }
-  // Always use defensive defaults so ffmpeg never gets undefined!
   if (!refInfo.codec_name) { console.warn('[5G][BULLETPROOF][WARN] Missing codec_name, defaulting to h264'); refInfo.codec_name = 'h264'; }
   if (!refInfo.width)      { console.warn('[5G][BULLETPROOF][WARN] Missing width, defaulting to 1080'); refInfo.width = 1080; }
   if (!refInfo.height)     { console.warn('[5G][BULLETPROOF][WARN] Missing height, defaulting to 1920'); refInfo.height = 1920; }
@@ -266,7 +277,6 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
       const info = await getVideoInfo(fixedPath);
       const v = (info.streams || []).find(s => s.codec_type === 'video');
       const a = (info.streams || []).find(s => s.codec_type === 'audio');
-      // Defensive: ensure no property is undefined
       const needsFix =
         !v ||
         (v.codec_name !== refInfo.codec_name) ||
@@ -286,8 +296,7 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
       }
     } catch (err) {
       console.error(`[5G][BULLETPROOF][ERR] Validation failed for scene ${i+1}`, err);
-      // Optionally: Replace with fallback scene here (ken burns, blank, etc)
-      throw err; // or continue to skip if you want
+      throw err;
     }
   }
   console.log('[5G][BULLETPROOF] All scenes validated.');
@@ -299,5 +308,5 @@ module.exports = {
   overlayMusic,
   appendOutro,
   bulletproofScenes,
-  getOutroPath, // export for testing/other use if needed
+  getOutroPath,
 };

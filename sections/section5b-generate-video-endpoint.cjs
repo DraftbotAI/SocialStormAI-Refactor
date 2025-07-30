@@ -11,7 +11,8 @@ const path = require('path');
 const fs = require('fs');
 
 // R2 dependencies (S3 SDK)
-const { s3Client, PutObjectCommand } = require('./section1-setup.cjs'); // make sure this is correct
+// This should be imported correctly from your setup file which exports s3Client and PutObjectCommand.
+const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
 
 const {
   concatScenes,
@@ -30,13 +31,13 @@ console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
  * @param {string} jobId
  */
 async function uploadToR2(localFilePath, jobId) {
-  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos'; // FIXED: Matches your .env
-  const accountDomain = process.env.R2_PUBLIC_DOMAIN || '<your-account-id>.r2.cloudflarestorage.com'; // set in .env!
+  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
+  // Use your PUBLIC domain (either .r2.dev or your CNAME) from .env!
+  const accountDomain = process.env.R2_PUBLIC_DOMAIN || 'videos.socialstormai.com';
   const r2Key = `videos/${jobId}/final-with-outro.mp4`;
 
   console.log(`[5B][R2 UPLOAD][START] Attempting upload for job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
   try {
-    // Check file exists
     if (!fs.existsSync(localFilePath)) {
       throw new Error(`[5B][R2 UPLOAD][ERR] File does not exist: ${localFilePath}`);
     }
@@ -50,16 +51,22 @@ async function uploadToR2(localFilePath, jobId) {
       ContentType: 'video/mp4'
     }));
 
-    // Log R2 response for debug
     console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
 
-    // Compute public URL (always using env var, never hardcoded)
-    const publicUrl = `https://${accountDomain}/${bucket}/${r2Key}`;
+    // Always use PUBLIC domain! (CNAME or .r2.dev, NOT default endpoint)
+    // Do not duplicate the bucket name in the path.
+    let publicUrl;
+    if (accountDomain.includes('r2.dev')) {
+      publicUrl = `https://${accountDomain}/${r2Key}`;
+    } else {
+      // Custom domain (CNAME) setup should point at bucket root.
+      publicUrl = `https://${accountDomain}/${r2Key}`;
+    }
     console.log(`[5B][R2 UPLOAD][SUCCESS] File available at: ${publicUrl}`);
     return publicUrl;
   } catch (err) {
     console.error(`[5B][R2 UPLOAD][FAIL] Upload failed for job=${jobId} localFilePath=${localFilePath}:`, err);
-    throw err; // force job to show failure
+    throw err;
   }
 }
 // ===========================================================
@@ -75,7 +82,6 @@ function registerGenerateVideoEndpoint(app, deps) {
     throw new Error('[5B][FATAL] No dependencies passed in!');
   }
 
-  // Destructure helpers/state from deps for clarity + MAX logging
   const {
     splitScriptToScenes,
     findClipForScene,
@@ -365,7 +371,7 @@ function registerGenerateVideoEndpoint(app, deps) {
       } finally {
         if (cleanupJob) {
           try {
-            cleanupJob(jobId); // Now uses delayed cleanup for progress entry
+            cleanupJob(jobId);
             console.log(`[5B][CLEANUP] [${jobId}] Cleanup scheduled (delayed progress removal).`);
           } catch (e) {
             console.warn(`[5B][CLEANUP][WARN] [${jobId}] Cleanup failed:`, e);

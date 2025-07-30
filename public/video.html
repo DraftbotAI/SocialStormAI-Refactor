@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Create Video - SocialStorm AI</title>
   <style>
+    /* ===========================
+       SECTION 2: CSS Styles
+       =========================== */
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -809,8 +812,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!text) return "";
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
   }
-
-  // =============== PROGRESS BAR LOGIC ================
+  // =============== PROGRESS BAR AND VIDEO GENERATION ================
   let pollingInterval = null;
   let simInterval = null;
   let simulatedPercent = 0;
@@ -826,7 +828,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const progressBar = document.getElementById('progressBar');
     const progressStatus = document.getElementById('progressStatus');
     const metaBox = document.getElementById('metaDataBox');
+
     log('VIDEO', 'Generate Video clicked', { script, voice });
+
     if (!script) {
       out.textContent = 'Generate script first.';
       logWarn('VIDEO', 'No script for video');
@@ -837,6 +841,7 @@ document.addEventListener('DOMContentLoaded', function() {
       logWarn('VIDEO', 'No voice selected');
       return;
     }
+
     out.textContent = '';
     progressBarWrap.style.display = 'block';
     progressBar.style.width = '0%';
@@ -883,7 +888,7 @@ document.addEventListener('DOMContentLoaded', function() {
         payload.paidUser = true;
         payload.removeWatermark = document.getElementById('removeBrandingSwitch').checked;
       }
-      payload.addMusic = document.getElementById('addMusicSwitch').checked;
+      payload.music = document.getElementById('addMusicSwitch').checked;
 
       log('VIDEO', 'Sending /api/generate-video', payload);
       const res  = await fetch('/api/generate-video', {
@@ -896,14 +901,13 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!data.jobId) throw new Error('Failed to start video generation.');
 
       let finished = false;
-      let videoKey = null;
 
       pollingInterval = setInterval(async () => {
         try {
           const resp = await fetch(`/api/progress/${data.jobId}`);
           const p = await resp.json();
 
-          // Update progress UI - use server percent if higher than simulated
+          // Update progress UI - show whichever is higher: simulated or server
           let displayPercent = Math.max(simulatedPercent, p.percent || 0);
           if (displayPercent >= 100) displayPercent = 100;
           progressBar.style.width = `${displayPercent}%`;
@@ -911,41 +915,44 @@ document.addEventListener('DOMContentLoaded', function() {
           progressStatus.textContent = p.status || '';
           log('VIDEO', 'Progress update', p);
 
-          // Update metadata live
+          // Update metadata live if present
           if (p.viralTitle || p.viralDesc || p.viralTags) {
             showMetaData(p.viralTitle, p.viralDesc, p.viralTags);
           }
 
-          if (p.percent >= 100 && (p.key || (typeof p.status === "string" && p.status.toLowerCase().startsWith('failed')) || (typeof p.status === "string" && p.status.toLowerCase().startsWith('done')) )) {
+          // When job completes or fails:
+          if (p.percent >= 100 && (p.key || (typeof p.status === "string" && (p.status.toLowerCase().startsWith('failed') || p.status.toLowerCase().startsWith('done'))))) {
             clearInterval(pollingInterval);
             pollingInterval = null;
             if (simInterval) clearInterval(simInterval);
             simInterval = null;
             finished = true;
+
             if (p.key) {
               log('VIDEO', 'Video finished, loading video', p.key);
 
               player.pause();
               player.removeAttribute('src');
               player.load();
-              // Updated: Load video directly from Cloudflare R2 path if returned as a key
-              // Use /video/:key endpoint to stream from backend
+
+              // Load video from backend streaming endpoint
               player.src = `/video/${p.key}`;
               player.setAttribute('crossorigin', 'anonymous');
               player.style.display = 'block';
+
               setTimeout(() => {
                 player.load();
-                player.muted  = false;
+                player.muted = false;
                 player.volume = 1.0;
                 progressStatus.textContent = 'Click ▶︎ to play your video.';
                 downloadBtn.style.display = 'inline-block';
                 shareBtn.style.display = 'inline-block';
                 progressBar.style.width = '100%';
                 progressBar.textContent = '100%';
+
                 setTimeout(() => { progressBarWrap.style.display = 'none'; }, 2000);
                 showThumbUpsell();
               }, 200);
-
             } else {
               out.textContent = p.status || 'Generation failed.';
               progressBarWrap.style.display = 'none';
@@ -967,6 +974,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   };
 
+  // ============ DOWNLOAD BUTTON LOGIC ===========
   function makeFileNameFromIdea() {
     let idea = document.getElementById('ideaInput').value.trim();
     if (!idea) idea = "SocialStormAI-Video";
@@ -1027,6 +1035,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   };
 
+  // ============ SHARE BUTTON LOGIC ===========
   document.getElementById('shareBtn').onclick = async () => {
     const player = document.getElementById('videoPlayer');
     const url = player.src;
@@ -1042,6 +1051,7 @@ document.addEventListener('DOMContentLoaded', function() {
     window.location.href = mailtoLink;
   };
 
+  // ============ THUMBNAIL UPSELL ===========
   function showThumbUpsell() {
     if (isProUser) {
       document.getElementById('thumbIncluded').style.display = 'block';
@@ -1054,6 +1064,7 @@ document.addEventListener('DOMContentLoaded', function() {
     log('THUMBNAIL', 'Thumbnail upsell displayed');
   }
 
+  // ============ CHATBOT BUBBLE ===========
   function setupSparkie() {
     const bub = document.getElementById('chatbot-bubble');
     bub.onclick = function() {
@@ -1062,6 +1073,5 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 });
-</script>
-</body>
-</html>
+
+
