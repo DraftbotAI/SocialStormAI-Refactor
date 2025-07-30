@@ -14,21 +14,22 @@ registerBasicRoutes(app, express, progress);
 // === Section 3: Voices API ===
 console.log('[SERVER][INFO] Loading Section 3 (Voices API)...');
 const registerVoicesEndpoint = require('./sections/section3-voices-endpoint.cjs');
-registerVoicesEndpoint(app); // Only pass app, NOT section1
+registerVoicesEndpoint(app);
 
 // === Section 4: Script generator ===
 console.log('[SERVER][INFO] Loading Section 4 (Script Generator)...');
 const registerGenerateScriptEndpoint = require('./sections/section4-generate-script-endpoint.cjs');
-registerGenerateScriptEndpoint(app, section1.openai); // Pass app and openai
+registerGenerateScriptEndpoint(app, section1.openai);
 
 // === Section 5: Video generator ===
 console.log('[SERVER][INFO] Loading Section 5 (Video Generator)...');
-const registerGenerateVideoEndpoint = require('./sections/section5-generate-video-endpoint.cjs');
+// --------------- UPDATED: now points to 5b, not original 5 ---------------
+const registerGenerateVideoEndpoint = require('./sections/section5b-generate-video-endpoint.cjs');
 registerGenerateVideoEndpoint(app, {
     ...section1,
     progress,
-    voices: section1.voices,               // If present in section1
-    POLLY_VOICE_IDS: section1.POLLY_VOICE_IDS // If present in section1
+    voices: section1.voices,
+    POLLY_VOICE_IDS: section1.POLLY_VOICE_IDS
 });
 
 // === Section 6: Thumbnails ===
