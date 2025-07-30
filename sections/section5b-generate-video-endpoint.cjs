@@ -84,6 +84,23 @@ function registerGenerateVideoEndpoint(app, deps) {
         const scenes = splitScriptToScenes(script);
         console.log(`[5B][SCENES] [${jobId}] Split into ${scenes.length} scenes.`);
         if (!Array.isArray(scenes) || scenes.length === 0) throw new Error('[5B][ERR] No scenes parsed from script.');
+        // Debug: Log the first scene object structure
+        console.log(`[5B][DEBUG][SCENES STRUCTURE] First scene: ${JSON.stringify(scenes[0], null, 2)}`);
+
+        // Defensive: Validate all scenes before running job
+        for (let i = 0; i < scenes.length; i++) {
+          const scene = scenes[i];
+          if (
+            !scene ||
+            typeof scene !== 'object' ||
+            !Array.isArray(scene.texts) ||
+            !scene.texts[0] ||
+            (typeof scene.texts[0] !== 'string')
+          ) {
+            console.error(`[5B][FATAL][JOB] [${jobId}] Scene ${i + 1} is invalid or missing .texts array:`, JSON.stringify(scene, null, 2));
+            throw new Error(`[5B][FATAL] Scene ${i + 1} is missing .texts array or is not structured correctly!`);
+          }
+        }
 
         // === 2. Find/generate video clip for each scene ===
         const usedClips = [];
@@ -96,7 +113,15 @@ function registerGenerateVideoEndpoint(app, deps) {
           console.log(`[5B][SCENE] [${jobId}] Processing scene ${i + 1} / ${scenes.length} (megaScene: ${isMegaScene})`);
 
           // Main subject for mega-scene: always from scene 1+2
-          const mainTopic = (scenes[0].texts && scenes[0].texts[1]) ? scenes[0].texts[1] : scenes[0].texts[0];
+          let mainTopic = null;
+          if (
+            scenes[0] &&
+            Array.isArray(scenes[0].texts)
+          ) {
+            mainTopic = (scenes[0].texts[1]) ? scenes[0].texts[1] : scenes[0].texts[0];
+          } else {
+            mainTopic = scene.texts[0];
+          }
           let subject = isMegaScene ? mainTopic : (scene.texts[0] || mainTopic);
 
           // --- CLIP MATCHING ---
