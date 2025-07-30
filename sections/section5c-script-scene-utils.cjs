@@ -24,13 +24,17 @@ function splitScriptToScenes(script) {
     console.error('[5C][ERR] No script provided or script not a string.');
     return [];
   }
-  // Split by line, filter empty
-  const lines = script
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => !!line);
 
-  console.log(`[5C][SPLIT] Script split into ${lines.length} non-empty lines.`);
+  // Try splitting by \n, fallback to splitting by period if only one line
+  let lines = script.split('\n').map(line => line.trim()).filter(line => !!line);
+
+  // If it looks like a single giant line, try splitting by sentence
+  if (lines.length < 2) {
+    lines = script.split(/[.?!]\s+/).map(s => s.trim()).filter(Boolean);
+    console.log(`[5C][SPLIT] Fallback: Split by sentence, got ${lines.length} lines.`);
+  } else {
+    console.log(`[5C][SPLIT] Script split into ${lines.length} non-empty lines.`);
+  }
 
   const scenes = [];
 
@@ -41,8 +45,8 @@ function splitScriptToScenes(script) {
       id,
       texts: [lines[0], lines[1]],
       isMegaScene: true,
-      type: 'hook+main',  // semantic label
-      origIndices: [0, 1], // keep original line indices for debugging
+      type: 'hook+main',
+      origIndices: [0, 1],
     });
     console.log(`[5C][MEGA] Created MEGA-SCENE for lines 1+2 [ID: ${id}]`);
     // Add each additional line as its own scene
@@ -72,11 +76,35 @@ function splitScriptToScenes(script) {
     console.warn('[5C][SPLIT] No scenes found in script!');
   }
 
-  console.log(`[5C][SPLIT] Total scenes generated (mega + singles): ${scenes.length}`);
-  scenes.forEach((scene, idx) => {
+  // Defensive: Fix/convert any accidental string scene into object (should not happen now)
+  const finalScenes = scenes.map((scene, idx) => {
+    if (typeof scene === 'string') {
+      console.error(`[5C][FIX][BUG] Scene at ${idx} was a string! Auto-wrapping.`);
+      return {
+        id: `scene${idx + 1}-fixwrap-${uuid.v4()}`,
+        texts: [scene],
+        isMegaScene: false,
+        type: 'auto-wrap',
+        origIndices: [idx]
+      };
+    }
+    // Always ensure texts is an array
+    if (!Array.isArray(scene.texts)) {
+      console.error(`[5C][FIX][BUG] Scene at ${idx} missing .texts! Wrapping.`);
+      return {
+        ...scene,
+        texts: [String(scene.texts || '')],
+      };
+    }
+    return scene;
+  });
+
+  console.log(`[5C][SPLIT] Total scenes generated (mega + singles): ${finalScenes.length}`);
+  finalScenes.forEach((scene, idx) => {
     console.log(`[5C][SCENES][${idx}] ID: ${scene.id}, Mega: ${!!scene.isMegaScene}, Type: ${scene.type}, Lines: ${scene.texts.length}, OrigIndices: ${scene.origIndices.join(',')}`);
   });
-  return scenes;
+
+  return finalScenes;
 }
 
 // === Utility: Guess main subject from all scenes (stub for future AI upgrades) ===

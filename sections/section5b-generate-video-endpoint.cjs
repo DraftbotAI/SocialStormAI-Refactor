@@ -81,8 +81,26 @@ function registerGenerateVideoEndpoint(app, deps) {
         if (!script || !voice) throw new Error('Missing script or voice');
         console.log(`[5B][INPUTS] [${jobId}] Script length: ${script.length} | Voice: ${voice}`);
 
-        const scenes = splitScriptToScenes(script);
+        let scenes = splitScriptToScenes(script);
         console.log(`[5B][SCENES] [${jobId}] Split into ${scenes.length} scenes.`);
+
+        // ---- AUTO-WRAP IF SPLITTER RETURNS STRINGS (DEV PATCH) ----
+        let wrapped = false;
+        scenes = scenes.map((scene, i) => {
+          if (typeof scene === 'string') {
+            wrapped = true;
+            return { texts: [scene], isMegaScene: false };
+          }
+          if (!scene.texts || !Array.isArray(scene.texts)) {
+            wrapped = true;
+            return { texts: [String(scene)], isMegaScene: false };
+          }
+          return scene;
+        });
+        if (wrapped) {
+          console.warn(`[5B][WARN][${jobId}] Some scenes auto-wrapped to expected structure. You should fix Section 5C splitter!`);
+        }
+
         if (!Array.isArray(scenes) || scenes.length === 0) throw new Error('[5B][ERR] No scenes parsed from script.');
         // Debug: Log the first scene object structure
         console.log(`[5B][DEBUG][SCENES STRUCTURE] First scene: ${JSON.stringify(scenes[0], null, 2)}`);
