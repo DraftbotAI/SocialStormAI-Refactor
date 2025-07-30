@@ -103,20 +103,32 @@ console.log('[SECTION1][INFO] Progress tracker initialized.');
 
 // ===================== UTILITY FUNCTIONS =====================
 
+function assertFile(file, label = 'FILE') {
+  try {
+    if (!fs.existsSync(file)) throw new Error(`[SECTION1][${label}][ERR] File does not exist: ${file}`);
+    const sz = fs.statSync(file).size;
+    if (sz < 10240) throw new Error(`[SECTION1][${label}][ERR] File too small (${sz} bytes): ${file}`);
+    return true;
+  } catch (e) {
+    console.error(e.message);
+    return false;
+  }
+}
+
 // Get audio duration in seconds using ffprobe
 const getAudioDuration = (audioPath) => {
   return new Promise((resolve, reject) => {
     console.log(`[SECTION1][HELPER][getAudioDuration] Called with: ${audioPath}`);
     ffmpeg.ffprobe(audioPath, (err, metadata) => {
       if (err) {
-        console.error(`[SECTION1][HELPER][getAudioDuration] ffprobe error for ${audioPath}:`, err);
+        console.error(`[SECTION1][HELPER][getAudioDuration][ERR] ffprobe error for ${audioPath}:`, err);
         return reject(err);
       }
       if (!metadata || !metadata.format || typeof metadata.format.duration !== 'number') {
-        console.error(`[SECTION1][HELPER][getAudioDuration] Invalid metadata for ${audioPath}:`, metadata);
+        console.error(`[SECTION1][HELPER][getAudioDuration][ERR] Invalid metadata for ${audioPath}:`, metadata);
         return reject(new Error('Invalid ffprobe metadata'));
       }
-      console.log(`[SECTION1][HELPER][getAudioDuration] Success. Duration: ${metadata.format.duration}s`);
+      console.log(`[SECTION1][HELPER][getAudioDuration][OK] Duration: ${metadata.format.duration}s`);
       resolve(metadata.format.duration);
     });
   });
@@ -131,12 +143,20 @@ const trimVideo = (inPath, outPath, duration, seek = 0) => {
       .setStartTime(seek)
       .setDuration(duration)
       .output(outPath)
+      .on('start', (cmd) => {
+        console.log(`[SECTION1][HELPER][trimVideo][CMD] ${cmd}`);
+      })
+      .on('stderr', (line) => {
+        console.log(`[SECTION1][HELPER][trimVideo][STDERR] ${line}`);
+      })
       .on('end', () => {
-        console.log(`[SECTION1][HELPER][trimVideo] Trim complete: ${outPath}`);
+        console.log(`[SECTION1][HELPER][trimVideo][END] Complete: ${outPath}`);
         resolve();
       })
-      .on('error', (err) => {
-        console.error(`[SECTION1][HELPER][trimVideo] Error:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[SECTION1][HELPER][trimVideo][ERR] ${err}`);
+        if (stderr) console.error(`[SECTION1][HELPER][trimVideo][FFMPEG][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[SECTION1][HELPER][trimVideo][FFMPEG][STDOUT]\n${stdout}`);
         reject(err);
       })
       .run();
@@ -155,13 +175,21 @@ const normalizeTo9x16Blurred = (inPath, outPath, width, height) => {
         `[blur][main]overlay=(W-w)/2:(H-h)/2,crop=${width}:${height}`
       ])
       .outputOptions(['-c:a copy'])
+      .on('start', (cmd) => {
+        console.log(`[SECTION1][HELPER][normalizeTo9x16Blurred][CMD] ${cmd}`);
+      })
+      .on('stderr', (line) => {
+        console.log(`[SECTION1][HELPER][normalizeTo9x16Blurred][STDERR] ${line}`);
+      })
       .output(outPath)
       .on('end', () => {
-        console.log(`[SECTION1][HELPER][normalizeTo9x16Blurred] Success: ${outPath}`);
+        console.log(`[SECTION1][HELPER][normalizeTo9x16Blurred][END] Success: ${outPath}`);
         resolve();
       })
-      .on('error', (err) => {
-        console.error(`[SECTION1][HELPER][normalizeTo9x16Blurred] Error:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[SECTION1][HELPER][normalizeTo9x16Blurred][ERR] ${err}`);
+        if (stderr) console.error(`[SECTION1][HELPER][normalizeTo9x16Blurred][FFMPEG][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[SECTION1][HELPER][normalizeTo9x16Blurred][FFMPEG][STDOUT]\n${stdout}`);
         reject(err);
       })
       .run();
@@ -177,13 +205,21 @@ const addSilentAudioTrack = (inPath, outPath, duration) => {
       .input('anullsrc=channel_layout=stereo:sample_rate=44100')
       .inputOptions(['-f lavfi'])
       .outputOptions(['-shortest', '-c:v copy', '-c:a aac', '-y'])
+      .on('start', (cmd) => {
+        console.log(`[SECTION1][HELPER][addSilentAudioTrack][CMD] ${cmd}`);
+      })
+      .on('stderr', (line) => {
+        console.log(`[SECTION1][HELPER][addSilentAudioTrack][STDERR] ${line}`);
+      })
       .save(outPath)
       .on('end', () => {
-        console.log(`[SECTION1][HELPER][addSilentAudioTrack] Success: ${outPath}`);
+        console.log(`[SECTION1][HELPER][addSilentAudioTrack][END] Success: ${outPath}`);
         resolve();
       })
-      .on('error', (err) => {
-        console.error(`[SECTION1][HELPER][addSilentAudioTrack] Error:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[SECTION1][HELPER][addSilentAudioTrack][ERR] ${err}`);
+        if (stderr) console.error(`[SECTION1][HELPER][addSilentAudioTrack][FFMPEG][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[SECTION1][HELPER][addSilentAudioTrack][FFMPEG][STDOUT]\n${stdout}`);
         reject(err);
       });
   });
@@ -198,13 +234,21 @@ const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
       .input(videoPath)
       .input(audioPath)
       .outputOptions(['-c:v copy', '-c:a aac', '-shortest', '-y'])
+      .on('start', (cmd) => {
+        console.log(`[SECTION1][HELPER][muxVideoWithNarration][CMD] ${cmd}`);
+      })
+      .on('stderr', (line) => {
+        console.log(`[SECTION1][HELPER][muxVideoWithNarration][STDERR] ${line}`);
+      })
       .save(outPath)
       .on('end', () => {
-        console.log(`[SECTION1][HELPER][muxVideoWithNarration] Success: ${outPath}`);
+        console.log(`[SECTION1][HELPER][muxVideoWithNarration][END] Success: ${outPath}`);
         resolve();
       })
-      .on('error', (err) => {
-        console.error(`[SECTION1][HELPER][muxVideoWithNarration] Error:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[SECTION1][HELPER][muxVideoWithNarration][ERR] ${err}`);
+        if (stderr) console.error(`[SECTION1][HELPER][muxVideoWithNarration][FFMPEG][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[SECTION1][HELPER][muxVideoWithNarration][FFMPEG][STDOUT]\n${stdout}`);
         reject(err);
       });
   });
@@ -213,7 +257,11 @@ const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
 // Standardize video to match reference info
 const standardizeVideo = (inputPath, outPath, refInfo) => {
   return new Promise((resolve, reject) => {
-    console.log(`[SECTION1][HELPER][standardizeVideo] Standardizing ${inputPath} to match reference:`, refInfo);
+    console.log(`[SECTION1][HELPER][standardizeVideo] Standardizing ${inputPath} to match reference:`);
+    console.dir(refInfo, { depth: 5 });
+    if (!assertFile(inputPath, 'STANDARDIZE_INPUT')) {
+      return reject(new Error(`[SECTION1][HELPER][standardizeVideo] Input file missing or too small: ${inputPath}`));
+    }
     const args = [
       '-vf', `scale=${refInfo.width}:${refInfo.height},format=${refInfo.pix_fmt}`,
       '-c:v', 'libx264',
@@ -223,15 +271,23 @@ const standardizeVideo = (inputPath, outPath, refInfo) => {
     ];
     ffmpeg(inputPath)
       .outputOptions(args)
-      .save(outPath)
+      .on('start', (cmd) => {
+        console.log(`[SECTION1][HELPER][standardizeVideo][CMD] ${cmd}`);
+      })
+      .on('stderr', (line) => {
+        console.log(`[SECTION1][HELPER][standardizeVideo][STDERR] ${line}`);
+      })
       .on('end', () => {
-        console.log(`[SECTION1][HELPER][standardizeVideo] Success: ${outPath}`);
+        console.log(`[SECTION1][HELPER][standardizeVideo][END] Success: ${outPath}`);
         resolve();
       })
-      .on('error', (err) => {
-        console.error(`[SECTION1][HELPER][standardizeVideo] Error:`, err);
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[SECTION1][HELPER][standardizeVideo][ERR] ${err}`);
+        if (stderr) console.error(`[SECTION1][HELPER][standardizeVideo][FFMPEG][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[SECTION1][HELPER][standardizeVideo][FFMPEG][STDOUT]\n${stdout}`);
         reject(err);
-      });
+      })
+      .save(outPath);
   });
 };
 
@@ -241,10 +297,10 @@ const getVideoInfo = (filePath) => {
     console.log(`[SECTION1][HELPER][getVideoInfo] Getting info for: ${filePath}`);
     ffmpeg.ffprobe(filePath, (err, metadata) => {
       if (err) {
-        console.error(`[SECTION1][HELPER][getVideoInfo] ffprobe error:`, err);
+        console.error(`[SECTION1][HELPER][getVideoInfo][ERR] ffprobe error:`, err);
         return reject(err);
       }
-      console.log(`[SECTION1][HELPER][getVideoInfo] Info for ${filePath}:`, JSON.stringify(metadata));
+      console.log(`[SECTION1][HELPER][getVideoInfo][OK] Info for ${filePath}:`, JSON.stringify(metadata));
       resolve(metadata);
     });
   });
@@ -275,16 +331,14 @@ function cleanupJob(jobId) {
 }
 
 // === SPLIT SCRIPT TO SCENES FUNCTION ===
-// Placeholder implementation — replace with your real splitter logic!
 function splitScriptToScenes(script) {
-  console.log(`[SECTION1][HELPER][splitScriptToScenes] Splitting script into scenes, length: ${script.length}`);
+  console.log(`[SECTION1][HELPER][splitScriptToScenes] Splitting script into scenes, length: ${script ? script.length : 0}`);
   if (!script || typeof script !== 'string') {
-    console.warn('[SECTION1][HELPER][splitScriptToScenes] Invalid script input.');
+    console.warn('[SECTION1][HELPER][splitScriptToScenes][WARN] Invalid script input.');
     return [];
   }
-  // Simple naive splitter: split by lines with 0 length trimmed lines removed
   const scenes = script.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-  console.log(`[SECTION1][HELPER][splitScriptToScenes] Scenes count: ${scenes.length}`);
+  console.log(`[SECTION1][HELPER][splitScriptToScenes][OK] Scenes count: ${scenes.length}`);
   return scenes;
 }
 
@@ -328,5 +382,5 @@ module.exports = {
   getVideoInfo,
   pickMusicForMood,
   cleanupJob,
-  splitScriptToScenes,  // <-- added this export
+  splitScriptToScenes,
 };
