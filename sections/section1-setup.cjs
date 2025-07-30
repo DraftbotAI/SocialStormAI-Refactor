@@ -103,8 +103,6 @@ console.log('[SECTION1][INFO] Progress tracker initialized.');
 
 // ===================== UTILITY FUNCTIONS =====================
 
-// --- GOD-TIER LOGGING for audio/video helpers ---
-
 // Get audio duration in seconds using ffprobe
 const getAudioDuration = (audioPath) => {
   return new Promise((resolve, reject) => {
@@ -276,6 +274,20 @@ function cleanupJob(jobId) {
   }
 }
 
+// === SPLIT SCRIPT TO SCENES FUNCTION ===
+// Placeholder implementation — replace with your real splitter logic!
+function splitScriptToScenes(script) {
+  console.log(`[SECTION1][HELPER][splitScriptToScenes] Splitting script into scenes, length: ${script.length}`);
+  if (!script || typeof script !== 'string') {
+    console.warn('[SECTION1][HELPER][splitScriptToScenes] Invalid script input.');
+    return [];
+  }
+  // Simple naive splitter: split by lines with 0 length trimmed lines removed
+  const scenes = script.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  console.log(`[SECTION1][HELPER][splitScriptToScenes] Scenes count: ${scenes.length}`);
+  return scenes;
+}
+
 console.log('[SECTION1][COMPLETE] All dependencies, helpers, and logging functions loaded.');
 
 // ===================== EXPORTS =====================
@@ -315,5 +327,6 @@ module.exports = {
   standardizeVideo,
   getVideoInfo,
   pickMusicForMood,
-  cleanupJob
+  cleanupJob,
+  splitScriptToScenes,  // <-- added this export
 };
