@@ -3,11 +3,15 @@
 // The /api/generate-video route handler. Full job orchestration.
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // Enhanced: Mega-scene (hook+main) support
+// Now: Uploads final video to Cloudflare R2 and returns public R2 URL
 // ===========================================================
 
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
+
+// R2 dependencies
+const { s3Client, PutObjectCommand } = require('./section1-setup.cjs'); // update path if needed
 
 const {
   concatScenes,
@@ -18,6 +22,33 @@ const {
 } = require('./section5g-concat-and-music.cjs');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
+
+// ================= R2 UPLOAD HELPER =======================
+/**
+ * Uploads a video file to Cloudflare R2 and returns the public URL
+ * @param {string} localFilePath
+ * @param {string} jobId
+ */
+async function uploadToR2(localFilePath, jobId) {
+  try {
+    const fileBuffer = fs.readFileSync(localFilePath);
+    const r2Key = `videos/${jobId}/final-with-outro.mp4`;
+    await s3Client.send(new PutObjectCommand({
+      Bucket: 'socialstorm-videos',
+      Key: r2Key,
+      Body: fileBuffer,
+      ContentType: 'video/mp4'
+    }));
+    // Replace with your actual Cloudflare account ID or custom domain if using a CNAME
+    const publicUrl = `https://<your-account-id>.r2.cloudflarestorage.com/socialstorm-videos/${r2Key}`;
+    console.log(`[5B][R2 UPLOAD] Uploaded video for job ${jobId} to R2: ${publicUrl}`);
+    return publicUrl;
+  } catch (err) {
+    console.error(`[5B][R2 UPLOAD][ERR] Failed to upload video for job ${jobId}:`, err);
+    throw err;
+  }
+}
+// ===========================================================
 
 function registerGenerateVideoEndpoint(app, deps) {
   console.log('[5B][BOOT] Called registerGenerateVideoEndpoint...');
@@ -302,9 +333,17 @@ function registerGenerateVideoEndpoint(app, deps) {
           console.log(`[5B][OUTRO][SKIP] [${jobId}] Outro append skipped (outro disabled).`);
         }
 
-        // === 8. Job Complete! ===
-        progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: finalPath };
-        console.log(`[5B][SUCCESS] [${jobId}] Video job complete! Output at: ${finalPath}`);
+        // === 8. Upload final video to R2 and finish ===
+        try {
+          progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2...' };
+          const r2VideoUrl = await uploadToR2(finalPath, jobId);
+          progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
+          console.log(`[5B][SUCCESS] [${jobId}] Video job complete! Output at: ${r2VideoUrl}`);
+        } catch (uploadErr) {
+          // Fallback: at least provide local output if upload fails
+          progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
+          console.error(`[5B][FATAL][JOB] [${jobId}] Cloudflare R2 upload failed, local file only:`, uploadErr);
+        }
 
       } catch (err) {
         console.error(`[5B][FATAL][JOB] [${jobId}] Video job failed:`, err);

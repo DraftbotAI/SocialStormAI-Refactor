@@ -1,14 +1,5 @@
-<!-- ============================= -->
-<!-- SECTION 1: DOCTYPE & HTML OPEN -->
-<!-- ============================= -->
-
 <!DOCTYPE html>
 <html lang="en">
-
-<!-- ============================= -->
-<!-- SECTION 2: HEAD & CSS -->
-<!-- ============================= -->
-
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -499,13 +490,7 @@
     }
   </style>
 </head>
-
-<!-- ============================= -->
-<!-- SECTION 3: BODY OPEN & NAVIGATION -->
-<!-- ============================= -->
-
 <body>
-
   <nav>
     <div class="nav-logo" onclick="location.href='index.html'">
       <img src="logo.png" alt="SocialStorm Logo" />
@@ -534,9 +519,7 @@
       <li><button class="btn-primary" onclick="location.href='video.html'">Get Started</button></li>
     </ul>
   </nav>
-
   <main class="page-content">
-
     <section style="width:100%;">
       <h2>Generate Script</h2>
       <textarea id="ideaInput" placeholder="Enter your video idea…"></textarea>
@@ -553,7 +536,6 @@
       <textarea id="scriptTextarea" placeholder="Generated script will appear here…"></textarea>
       <div id="metaDataBox"></div>
     </section>
-
     <section style="width:100%;">
       <h2>Pick a Voice & Generate Video</h2>
       <div id="brandingToggleRow" class="branding-toggle-row" style="display:none;">
@@ -588,7 +570,6 @@
       <button id="downloadBtn" class="btn" style="display:none;margin-top:8px;">Download Video</button>
       <button id="shareBtn" class="btn" style="display:none;margin-left:8px;">Share Video</button>
     </section>
-
     <!-- === Thumbnail Upsell Section === -->
     <div id="thumbnail-upsell">
       <h3>Boost Your Video with Custom Thumbnails!</h3>
@@ -611,7 +592,6 @@
       <p style="margin-top:.6rem;font-size:.97rem;color:#0093ae;">Pro plan includes unlimited thumbnails, instant video delivery, & early access features.</p>
     </div>
   </main>
-
   <div id="chatbot-bubble" title="Chat with Sparkie!">
     <svg viewBox="0 0 64 64">
       <circle cx="32" cy="32" r="30" fill="#00e0fe"/>
@@ -621,15 +601,9 @@
       <polygon class="sparkie-bolt" points="30,18 34,18 32,11"/>
     </svg>
   </div>
-
   <footer>
     &copy; 2025 SocialStorm AI. Built for creators who want to win.
   </footer>
-
-
-
-
-
   <script>
 document.addEventListener('DOMContentLoaded', function() {
   function log(...args) { try { console.log('[LOG]', ...args); } catch(_){} }
@@ -954,6 +928,8 @@ document.addEventListener('DOMContentLoaded', function() {
               player.pause();
               player.removeAttribute('src');
               player.load();
+              // Updated: Load video directly from Cloudflare R2 path if returned as a key
+              // Use /video/:key endpoint to stream from backend
               player.src = `/video/${p.key}`;
               player.setAttribute('crossorigin', 'anonymous');
               player.style.display = 'block';
@@ -1087,3 +1063,5 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 });
 </script>
+</body>
+</html>
