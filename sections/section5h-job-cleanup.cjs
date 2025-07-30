@@ -9,9 +9,23 @@ const path = require('path');
 
 console.log('[5H][INIT] Cleanup & progress module loaded.');
 
+// --- Utility to ensure only this module deletes progress ---
+function safeDeleteProgressEntry(jobId) {
+  if (typeof global.progress === 'object' && global.progress !== null) {
+    if (global.progress[jobId]) {
+      delete global.progress[jobId];
+      console.log(`[5H][CLEANUP] Progress entry deleted for job ${jobId} (delayed 30s).`);
+    } else {
+      console.log(`[5H][CLEANUP] Progress entry for job ${jobId} was already deleted before timer fired.`);
+    }
+  } else {
+    console.warn('[5H][CLEANUP][WARN] Tried to delete progress, but global progress is missing or invalid.');
+  }
+}
+
 /**
  * Cleans up all temp files and folders for a given job.
- * Now DELAYS removal from progress map by 30 seconds to allow frontend to fetch final result.
+ * DELAYS removal from progress map by 30 seconds to allow frontend to fetch final result.
  * @param {string} jobId - The job's unique identifier
  */
 function cleanupJob(jobId) {
@@ -33,12 +47,7 @@ function cleanupJob(jobId) {
     if (global.progress[jobId]) {
       console.log(`[5H][CLEANUP] Scheduling progress entry removal for job ${jobId} in 30 seconds.`);
       setTimeout(() => {
-        if (global.progress[jobId]) {
-          delete global.progress[jobId];
-          console.log(`[5H][CLEANUP] Progress entry deleted for job ${jobId} (delayed 30s).`);
-        } else {
-          console.log(`[5H][CLEANUP] Progress entry for job ${jobId} was already deleted before timer fired.`);
-        }
+        safeDeleteProgressEntry(jobId);
       }, 30000);
     } else {
       console.log(`[5H][CLEANUP] Job ${jobId} not present in global progress (no delayed deletion needed).`);
