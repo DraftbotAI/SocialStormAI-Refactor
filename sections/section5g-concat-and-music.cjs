@@ -113,7 +113,7 @@ async function ensureAudioStream(videoPath, workDir) {
       .input(videoPath)
       .input('anullsrc=channel_layout=stereo:sample_rate=44100')
       .inputOptions(['-f lavfi'])
-      .outputOptions(['-shortest', '-c:v copy', '-c:a aac', '-y'])
+      .outputOptions(['-shortest', '-c:v copy', '-c:a aac', '-b:a 128k', '-ar 44100', '-ac 2', '-pix_fmt yuv420p', '-y'])
       .save(fixedPath)
       .on('end', async () => {
         try {

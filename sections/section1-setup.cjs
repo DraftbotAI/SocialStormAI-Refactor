@@ -115,7 +115,105 @@ function assertFile(file, label = 'FILE') {
   }
 }
 
-// Get audio duration in seconds using ffprobe
+// --- AUDIO/VIDEO DEFENSE HELPERS ---
+
+// Ensures mp4 has AAC 44100Hz stereo, yuv420p video (bulletproof for concat)
+const standardizeVideo = (inputPath, outPath, refInfo) => {
+  return new Promise((resolve, reject) => {
+    let pixFmt = (refInfo && refInfo.pix_fmt) ? refInfo.pix_fmt : 'yuv420p';
+    let width = (refInfo && refInfo.width) ? refInfo.width : 1080;
+    let height = (refInfo && refInfo.height) ? refInfo.height : 1920;
+    if (!refInfo || typeof refInfo !== 'object') {
+      console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo missing, defaulting to 1080x1920, yuv420p`);
+    } else {
+      if (!refInfo.pix_fmt) {
+        console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo.pix_fmt was undefined, defaulting to 'yuv420p'`);
+      }
+      if (!refInfo.width || !refInfo.height) {
+        console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo.width/height missing, defaulting to 1080x1920`);
+      }
+    }
+
+    console.log(`[SECTION1][HELPER][standardizeVideo][START] Standardizing ${inputPath} to ${width}x${height}, pix_fmt=${pixFmt}, out=${outPath}`);
+    console.log(`[SECTION1][HELPER][standardizeVideo][DEBUG] Full refInfo:`, refInfo);
+
+    if (!assertFile(inputPath, 'STANDARDIZE_INPUT')) {
+      return reject(new Error(`[SECTION1][HELPER][standardizeVideo] Input file missing or too small: ${inputPath}`));
+    }
+
+    // H.264 video, AAC 128k, yuv420p, 1080x1920, stereo 44100Hz audio
+    ffmpeg(inputPath)
+      .videoCodec('libx264')
+      .audioCodec('aac')
+      .size(`${width}x${height}`)
+      .outputOptions([
+        '-pix_fmt', pixFmt,
+        '-b:a', '128k',
+        '-ar', '44100',
+        '-ac', '2',
+        '-movflags', '+faststart',
+        '-y'
+      ])
+      .on('start', (cmd) => {
+        console.log(`[SECTION1][HELPER][standardizeVideo][CMD] ${cmd}`);
+      })
+      .on('stderr', (line) => {
+        console.log(`[SECTION1][HELPER][standardizeVideo][STDERR] ${line}`);
+      })
+      .on('end', () => {
+        console.log(`[SECTION1][HELPER][standardizeVideo][END] Success: ${outPath}`);
+        resolve();
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[SECTION1][HELPER][standardizeVideo][ERR] ${err}`);
+        if (stderr) console.error(`[SECTION1][HELPER][standardizeVideo][FFMPEG][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[SECTION1][HELPER][standardizeVideo][FFMPEG][STDOUT]\n${stdout}`);
+        reject(err);
+      })
+      .save(outPath);
+  });
+};
+
+// Add silent AAC 44100Hz stereo audio if missing
+const addSilentAudioTrack = (inPath, outPath, duration = 3) => {
+  return new Promise((resolve, reject) => {
+    console.log(`[SECTION1][HELPER][addSilentAudioTrack] Adding silent audio to ${inPath} (duration: ${duration}s) -> ${outPath}`);
+    ffmpeg()
+      .input(inPath)
+      .input('anullsrc=channel_layout=stereo:sample_rate=44100')
+      .inputOptions(['-f lavfi'])
+      .outputOptions([
+        '-shortest',
+        '-c:v copy',
+        '-c:a aac',
+        '-b:a 128k',
+        '-ar 44100',
+        '-ac 2',
+        '-pix_fmt yuv420p',
+        '-y'
+      ])
+      .on('start', (cmd) => {
+        console.log(`[SECTION1][HELPER][addSilentAudioTrack][CMD] ${cmd}`);
+      })
+      .on('stderr', (line) => {
+        console.log(`[SECTION1][HELPER][addSilentAudioTrack][STDERR] ${line}`);
+      })
+      .on('end', () => {
+        console.log(`[SECTION1][HELPER][addSilentAudioTrack][END] Success: ${outPath}`);
+        resolve();
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[SECTION1][HELPER][addSilentAudioTrack][ERR] ${err}`);
+        if (stderr) console.error(`[SECTION1][HELPER][addSilentAudioTrack][FFMPEG][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[SECTION1][HELPER][addSilentAudioTrack][FFMPEG][STDOUT]\n${stdout}`);
+        reject(err);
+      })
+      .save(outPath);
+  });
+};
+
+// --- Other Helper Functions ---
+
 const getAudioDuration = (audioPath) => {
   return new Promise((resolve, reject) => {
     console.log(`[SECTION1][HELPER][getAudioDuration] Called with: ${audioPath}`);
@@ -134,7 +232,6 @@ const getAudioDuration = (audioPath) => {
   });
 };
 
-// Trim video to duration
 const trimVideo = (inPath, outPath, duration, seek = 0) => {
   return new Promise((resolve, reject) => {
     console.log(`[SECTION1][HELPER][trimVideo] Trimming ${inPath} to ${duration}s, outPath: ${outPath}, seek: ${seek}`);
@@ -163,7 +260,6 @@ const trimVideo = (inPath, outPath, duration, seek = 0) => {
   });
 };
 
-// Normalize to 9x16, blurred background
 const normalizeTo9x16Blurred = (inPath, outPath, width, height) => {
   return new Promise((resolve, reject) => {
     console.log(`[SECTION1][HELPER][normalizeTo9x16Blurred] Normalizing ${inPath} to ${width}x${height}, output: ${outPath}`);
@@ -196,36 +292,6 @@ const normalizeTo9x16Blurred = (inPath, outPath, width, height) => {
   });
 };
 
-// Add silent audio track if needed
-const addSilentAudioTrack = (inPath, outPath, duration) => {
-  return new Promise((resolve, reject) => {
-    console.log(`[SECTION1][HELPER][addSilentAudioTrack] Adding silent audio to ${inPath} (duration: ${duration}s) -> ${outPath}`);
-    ffmpeg()
-      .input(inPath)
-      .input('anullsrc=channel_layout=stereo:sample_rate=44100')
-      .inputOptions(['-f lavfi'])
-      .outputOptions(['-shortest', '-c:v copy', '-c:a aac', '-y'])
-      .on('start', (cmd) => {
-        console.log(`[SECTION1][HELPER][addSilentAudioTrack][CMD] ${cmd}`);
-      })
-      .on('stderr', (line) => {
-        console.log(`[SECTION1][HELPER][addSilentAudioTrack][STDERR] ${line}`);
-      })
-      .save(outPath)
-      .on('end', () => {
-        console.log(`[SECTION1][HELPER][addSilentAudioTrack][END] Success: ${outPath}`);
-        resolve();
-      })
-      .on('error', (err, stdout, stderr) => {
-        console.error(`[SECTION1][HELPER][addSilentAudioTrack][ERR] ${err}`);
-        if (stderr) console.error(`[SECTION1][HELPER][addSilentAudioTrack][FFMPEG][STDERR]\n${stderr}`);
-        if (stdout) console.log(`[SECTION1][HELPER][addSilentAudioTrack][FFMPEG][STDOUT]\n${stdout}`);
-        reject(err);
-      });
-  });
-};
-
-// Mux video with narration audio
 const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
   return new Promise((resolve, reject) => {
     console.log(`[SECTION1][HELPER][muxVideoWithNarration] Combining video ${videoPath} + audio ${audioPath} → ${outPath} (duration: ${duration}s)`);
@@ -233,7 +299,16 @@ const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
     ffmpeg()
       .input(videoPath)
       .input(audioPath)
-      .outputOptions(['-c:v copy', '-c:a aac', '-shortest', '-y'])
+      .outputOptions([
+        '-c:v copy',
+        '-c:a aac',
+        '-b:a 128k',
+        '-ar 44100',
+        '-ac 2',
+        '-shortest',
+        '-pix_fmt yuv420p',
+        '-y'
+      ])
       .on('start', (cmd) => {
         console.log(`[SECTION1][HELPER][muxVideoWithNarration][CMD] ${cmd}`);
       })
@@ -254,63 +329,6 @@ const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
   });
 };
 
-// ===============================
-// PATCHED: Standardize video to match reference info
-// Defensive: Always fallback to sane defaults (no 'undefined')
-// ===============================
-const standardizeVideo = (inputPath, outPath, refInfo) => {
-  return new Promise((resolve, reject) => {
-    let pixFmt = (refInfo && refInfo.pix_fmt) ? refInfo.pix_fmt : 'yuv420p';
-    let width = (refInfo && refInfo.width) ? refInfo.width : 1080;
-    let height = (refInfo && refInfo.height) ? refInfo.height : 1920;
-    if (!refInfo || typeof refInfo !== 'object') {
-      console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo missing, defaulting to 1080x1920, yuv420p`);
-    } else {
-      if (!refInfo.pix_fmt) {
-        console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo.pix_fmt was undefined, defaulting to 'yuv420p'`);
-      }
-      if (!refInfo.width || !refInfo.height) {
-        console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo.width/height missing, defaulting to 1080x1920`);
-      }
-    }
-
-    console.log(`[SECTION1][HELPER][standardizeVideo][START] Standardizing ${inputPath} to ${width}x${height}, pix_fmt=${pixFmt}, out=${outPath}`);
-    console.log(`[SECTION1][HELPER][standardizeVideo][DEBUG] Full refInfo:`, refInfo);
-
-    if (!assertFile(inputPath, 'STANDARDIZE_INPUT')) {
-      return reject(new Error(`[SECTION1][HELPER][standardizeVideo] Input file missing or too small: ${inputPath}`));
-    }
-
-    const args = [
-      '-vf', `scale=${width}:${height},format=${pixFmt}`,
-      '-c:v', 'libx264',
-      '-c:a', 'aac',
-      '-pix_fmt', pixFmt,
-      '-y'
-    ];
-    ffmpeg(inputPath)
-      .outputOptions(args)
-      .on('start', (cmd) => {
-        console.log(`[SECTION1][HELPER][standardizeVideo][CMD] ${cmd}`);
-      })
-      .on('stderr', (line) => {
-        console.log(`[SECTION1][HELPER][standardizeVideo][STDERR] ${line}`);
-      })
-      .on('end', () => {
-        console.log(`[SECTION1][HELPER][standardizeVideo][END] Success: ${outPath}`);
-        resolve();
-      })
-      .on('error', (err, stdout, stderr) => {
-        console.error(`[SECTION1][HELPER][standardizeVideo][ERR] ${err}`);
-        if (stderr) console.error(`[SECTION1][HELPER][standardizeVideo][FFMPEG][STDERR]\n${stderr}`);
-        if (stdout) console.log(`[SECTION1][HELPER][standardizeVideo][FFMPEG][STDOUT]\n${stdout}`);
-        reject(err);
-      })
-      .save(outPath);
-  });
-};
-
-// Get info about a video
 const getVideoInfo = (filePath) => {
   return new Promise((resolve, reject) => {
     console.log(`[SECTION1][HELPER][getVideoInfo] Getting info for: ${filePath}`);
@@ -325,13 +343,11 @@ const getVideoInfo = (filePath) => {
   });
 };
 
-// Pick music by mood (stub)
 const pickMusicForMood = (mood) => {
   console.log(`[SECTION1][HELPER][pickMusicForMood] Picking music for mood: ${mood}`);
   return null; // Implement as needed
 };
 
-// SAFE CLEANUP FUNCTION
 function cleanupJob(jobId) {
   try {
     console.log(`[SECTION1][CLEANUP] Starting cleanup for job: ${jobId}`);
@@ -349,7 +365,7 @@ function cleanupJob(jobId) {
   }
 }
 
-// === SPLIT SCRIPT TO SCENES FUNCTION ===
+// === SPLIT SCRIPT TO SCENES FUNCTION (TEMP, FOR BOOTSTRAP ONLY) ===
 function splitScriptToScenes(script) {
   console.log(`[SECTION1][HELPER][splitScriptToScenes] Splitting script into scenes, length: ${script ? script.length : 0}`);
   if (!script || typeof script !== 'string') {
