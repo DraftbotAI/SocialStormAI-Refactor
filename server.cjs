@@ -14,12 +14,12 @@ registerBasicRoutes(app, express, progress);
 // === Section 3: Voices API ===
 console.log('[SERVER][INFO] Loading Section 3 (Voices API)...');
 const registerVoicesEndpoint = require('./sections/section3-voices-endpoint.cjs');
-registerVoicesEndpoint(app, section1);
+registerVoicesEndpoint(app); // Only pass app, NOT section1
 
 // === Section 4: Script generator ===
 console.log('[SERVER][INFO] Loading Section 4 (Script Generator)...');
 const registerGenerateScriptEndpoint = require('./sections/section4-generate-script-endpoint.cjs');
-registerGenerateScriptEndpoint(app, section1.openai);
+registerGenerateScriptEndpoint(app, section1.openai); // Pass app and openai
 
 // === Section 5: Video generator ===
 console.log('[SERVER][INFO] Loading Section 5 (Video Generator)...');

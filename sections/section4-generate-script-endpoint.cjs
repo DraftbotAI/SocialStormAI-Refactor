@@ -6,11 +6,10 @@
    - Compatible with modularized backend (Section 1, etc.)
    =========================================================== */
 
-console.log('\n========== [SECTION 4] /api/generate-script Endpoint ==========');
+console.log('\n========== [SECTION4][INIT] /api/generate-script Endpoint ==========');
 
 // Usage (in main server file):
-// const { app, openai } = require('./section1-setup.cjs');
-// const { registerGenerateScriptEndpoint } = require('./section4-generate-script-endpoint.cjs');
+// const registerGenerateScriptEndpoint = require('./sections/section4-generate-script-endpoint.cjs');
 // registerGenerateScriptEndpoint(app, openai);
 
 function registerGenerateScriptEndpoint(app, openai) {
@@ -71,7 +70,7 @@ Description: Real hidden rooms and strange facts about the world’s most famous
 Tags: secrets landmarks mystery history viral
       `.trim();
 
-      // === OpenAI v4+ call ====
+      // === OpenAI v4+ call ===
       const completion = await openai.chat.completions.create({
         model: "gpt-4-1106-preview",
         temperature: 0.84,
@@ -149,7 +148,8 @@ Tags: secrets landmarks mystery history viral
     }
   });
 
-  console.log('[SECTION4][INFO] /api/generate-script endpoint registered.');
+  console.log('[SECTION4][SUCCESS] /api/generate-script endpoint registered.');
 }
 
-module.exports = { registerGenerateScriptEndpoint };
+console.log('[SECTION4][EXPORT] registerGenerateScriptEndpoint exported');
+module.exports = registerGenerateScriptEndpoint;
