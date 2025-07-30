@@ -2,6 +2,7 @@
 // SECTION 5F: VIDEO PROCESSING & AV COMBINER
 // Handles trimming, normalizing, silent audio, muxing narration onto video
 // MAX LOGGING AT EVERY STEP
+// Enhanced: Mega-scene (multi-line audio) support
 // ===========================================================
 
 const fs = require('fs');
@@ -138,9 +139,68 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath, duration) {
   });
 }
 
+/**
+ * Handles "mega-scene" (scene 1+2) — trims video to total audio length,
+ * muxes the merged audio, and ensures all steps are logged.
+ * @param {string} videoIn - Input video file (main subject, e.g. R2/Pexels/Pixabay)
+ * @param {string} audioIn - Mega-scene merged audio file (hook+main subject narration)
+ * @param {string} outPath - Output muxed video file
+ * @returns {Promise<void>}
+ */
+async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
+  console.log(`[5F][MEGA] muxMegaSceneWithNarration called: video="${videoIn}" audio="${audioIn}" out="${outPath}"`);
+  // 1. Get total audio duration using ffprobe
+  const getAudioDuration = (file) => {
+    return new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(file, (err, metadata) => {
+        if (err) {
+          console.error(`[5F][MEGA][ERR] Failed to ffprobe audio: ${file}`, err);
+          return reject(err);
+        }
+        const duration = metadata && metadata.format ? metadata.format.duration : 0;
+        if (!duration || isNaN(duration)) {
+          console.error(`[5F][MEGA][ERR] Could not get duration from audio: ${file}`);
+          return reject(new Error('Audio duration not found'));
+        }
+        resolve(duration);
+      });
+    });
+  };
+
+  let audioDuration = 0;
+  try {
+    audioDuration = await getAudioDuration(audioIn);
+    console.log(`[5F][MEGA] Detected audio duration for mega-scene: ${audioDuration}s`);
+  } catch (err) {
+    throw new Error(`[5F][MEGA][ERR] Cannot get audio duration for mega-scene: ${err}`);
+  }
+
+  // 2. Trim input video to exact audio duration (if needed)
+  const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-megascene-${Date.now()}.mp4`);
+  try {
+    await trimVideo(videoIn, trimmedVideo, audioDuration, 0);
+    console.log(`[5F][MEGA] Trimmed main subject video for mega-scene: ${trimmedVideo}`);
+  } catch (err) {
+    console.error(`[5F][MEGA][ERR] Failed to trim mega-scene video`, err);
+    throw err;
+  }
+
+  // 3. Mux merged audio to trimmed video
+  try {
+    await muxVideoWithNarration(trimmedVideo, audioIn, outPath, audioDuration);
+    console.log(`[5F][MEGA] Muxed merged mega-scene audio to trimmed video: ${outPath}`);
+    // Cleanup
+    if (fs.existsSync(trimmedVideo)) fs.unlinkSync(trimmedVideo);
+  } catch (err) {
+    console.error(`[5F][MEGA][ERR] Failed to mux mega-scene audio/video`, err);
+    throw err;
+  }
+}
+
 module.exports = {
   trimVideo,
   normalizeTo9x16Blurred,
   addSilentAudioTrack,
   muxVideoWithNarration,
+  muxMegaSceneWithNarration,
 };

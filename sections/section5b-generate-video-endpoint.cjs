@@ -2,13 +2,13 @@
 // SECTION 5B: GENERATE VIDEO ENDPOINT (Job Controller)
 // The /api/generate-video route handler. Full job orchestration.
 // MAX LOGGING EVERYWHERE
+// Enhanced: Mega-scene (hook+main) support
 // ===========================================================
+
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
-const ffmpeg = require('fluent-ffmpeg');
 
-// Import concat/music helpers (mux logic lives here)
 const {
   concatScenes,
   ensureAudioStream,
@@ -31,20 +31,23 @@ function registerGenerateVideoEndpoint(app, deps) {
 
   // Destructure helpers/state from deps for clarity + MAX logging
   const {
-    splitScriptToScenes,           // scene splitting helper
-    findClipForScene,              // clip matcher orchestrator (5d)
-    generateSceneAudio,            // narration audio (from 5e, injected in server)
-    getAudioDuration, getVideoInfo, standardizeVideo, pickMusicForMood, cleanupJob,
-    progress, voices, POLLY_VOICE_IDS
+    splitScriptToScenes,
+    findClipForScene,
+    createSceneAudio,
+    createMegaSceneAudio,
+    getAudioDuration, getVideoInfo, standardizeVideo,
+    pickMusicForMood, cleanupJob,
+    progress, voices, POLLY_VOICE_IDS,
+    muxVideoWithNarration, muxMegaSceneWithNarration,
   } = deps;
 
   if (typeof findClipForScene !== "function") {
     console.error('[5B][FATAL] findClipForScene not provided or not a function!');
     throw new Error('[5B][FATAL] findClipForScene missing from deps!');
   }
-  if (typeof generateSceneAudio !== "function") {
-    console.error('[5B][FATAL] generateSceneAudio not provided or not a function!');
-    throw new Error('[5B][FATAL] generateSceneAudio missing from deps!');
+  if (typeof createSceneAudio !== "function" || typeof createMegaSceneAudio !== "function") {
+    console.error('[5B][FATAL] Audio generation helpers missing!');
+    throw new Error('[5B][FATAL] Audio generation helpers missing!');
   }
   if (typeof splitScriptToScenes !== "function") {
     console.error('[5B][FATAL] splitScriptToScenes not provided or not a function!');
@@ -73,7 +76,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         console.log(`[5B][WORKDIR] ${workDir} created.`);
 
         // === 1. Parse and split script into scenes ===
-        const { script = '', voice = '', music = true, outro = true } = req.body || {};
+        const { script = '', voice = '', music = true, outro = true, provider = 'polly' } = req.body || {};
         if (!script || !voice) throw new Error('Missing script or voice');
         console.log('[5B][INPUTS] Script length:', script.length, 'Voice:', voice);
 
@@ -82,44 +85,58 @@ function registerGenerateVideoEndpoint(app, deps) {
         if (!Array.isArray(scenes) || scenes.length === 0) throw new Error('[5B][ERR] No scenes parsed from script.');
 
         // === 2. Find/generate video clip for each scene ===
+        const usedClips = [];
         const sceneFiles = [];
+
         for (let i = 0; i < scenes.length; i++) {
           const scene = scenes[i];
+          const isMegaScene = !!scene.isMegaScene;
           progress[jobId] = { percent: 5 + i * 5, status: `Finding clip for scene ${i + 1}` };
-          console.log(`[5B][SCENE] Scene ${i + 1}: "${scene}"`);
 
-          // Use modular findClipForScene from deps (pass subject, idx, all scenes, main topic)
-          const clipPath = await findClipForScene(scene, i, scenes, scenes[0]);
+          // Main subject for mega-scene: always from scene 1+2
+          const mainTopic = (scenes[0].texts && scenes[0].texts[1]) ? scenes[0].texts[1] : scenes[0].texts[0];
+          let subject = isMegaScene ? mainTopic : (scene.texts[0] || mainTopic);
+
+          // --- CLIP MATCHING ---
+          const clipPath = await findClipForScene({
+            subject,
+            sceneIdx: i,
+            allSceneTexts: scenes.flatMap(s => s.texts),
+            mainTopic,
+            isMegaScene,
+            usedClips
+          });
           if (!clipPath) {
             throw new Error(`[5B][ERR] No clip found for scene ${i + 1}`);
           }
+          usedClips.push(clipPath);
           console.log(`[5B][CLIP] Scene ${i + 1}: Clip selected: ${clipPath}`);
 
-          // === Generate narration audio ===
-          // Use modular generateSceneAudio (sceneText, voiceId, workDir, sceneIdx, jobId)
-          const audioPath = await generateSceneAudio(scene, voice, workDir, i, jobId);
+          // --- AUDIO GENERATION ---
+          let audioPath;
+          if (isMegaScene) {
+            // Mega-scene: merge two lines into one audio
+            audioPath = path.join(workDir, `scene${i + 1}-mega-audio.mp3`);
+            await createMegaSceneAudio(scene.texts, voice, audioPath, provider, workDir);
+            console.log(`[5B][AUDIO] Mega-scene: Merged audio created: ${audioPath}`);
+          } else {
+            audioPath = path.join(workDir, `scene${i + 1}-audio.mp3`);
+            await createSceneAudio(scene.texts[0], voice, audioPath, provider);
+            console.log(`[5B][AUDIO] Scene ${i + 1}: Audio generated: ${audioPath}`);
+          }
           if (!audioPath || typeof audioPath !== 'string' || !fs.existsSync(audioPath)) {
             throw new Error(`[5B][ERR] No audio generated for scene ${i + 1}`);
           }
-          console.log(`[5B][AUDIO] Scene ${i + 1}: Audio generated: ${audioPath}`);
 
-          // === Mux (combine) video and audio for the scene ===
+          // --- MUXING (combine) video and audio for the scene ---
           const muxedScenePath = path.join(workDir, `scene${i + 1}.mp4`);
-          await new Promise((resolve, reject) => {
-            ffmpeg()
-              .input(clipPath)
-              .input(audioPath)
-              .outputOptions(['-shortest', '-y'])
-              .save(muxedScenePath)
-              .on('end', () => {
-                console.log(`[5B][MUX] Scene ${i + 1}: Muxed scene written: ${muxedScenePath}`);
-                resolve();
-              })
-              .on('error', (err) => {
-                console.error(`[5B][MUX][ERR] Scene ${i + 1}: Muxing failed`, err);
-                reject(err);
-              });
-          });
+          if (isMegaScene) {
+            await muxMegaSceneWithNarration(clipPath, audioPath, muxedScenePath);
+            console.log(`[5B][MUX] Mega-scene: Video and merged audio muxed: ${muxedScenePath}`);
+          } else {
+            await muxVideoWithNarration(clipPath, audioPath, muxedScenePath);
+            console.log(`[5B][MUX] Scene ${i + 1}: Muxed scene written: ${muxedScenePath}`);
+          }
           sceneFiles.push(muxedScenePath);
         }
         progress[jobId] = { percent: 40, status: 'All scenes muxed' };

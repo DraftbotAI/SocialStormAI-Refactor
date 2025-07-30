@@ -17,7 +17,8 @@ console.log('[5G][INIT] Final video assembler loaded.');
  * @returns {Promise<string>} Path to concat .mp4
  */
 async function concatScenes(sceneFiles, workDir) {
-  console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files.`);
+  console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
+  sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i+1}: ${file}`));
   const listFile = path.resolve(workDir, 'list.txt');
   fs.writeFileSync(
     listFile,
@@ -99,6 +100,22 @@ async function ensureAudioStream(videoPath, workDir) {
  */
 async function overlayMusic(videoPath, musicPath, outPath) {
   console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
+
+  // (Optional: Log input durations for easier debugging)
+  try {
+    const videoInfo = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(videoPath, (err, md) => err ? reject(err) : resolve(md));
+    });
+    const musicInfo = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(musicPath, (err, md) => err ? reject(err) : resolve(md));
+    });
+    const videoDuration = (videoInfo.format && videoInfo.format.duration) || 0;
+    const musicDuration = (musicInfo.format && musicInfo.format.duration) || 0;
+    console.log(`[5G][MUSIC][DURATION] video: ${videoDuration}s, music: ${musicDuration}s`);
+  } catch (e) {
+    console.warn('[5G][MUSIC][DURATION][WARN] Could not probe input durations.');
+  }
+
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
