@@ -10,24 +10,17 @@ const path = require('path');
 const util = require('util');
 const exec = util.promisify(require('child_process').exec);
 
-// Import TTS helpers (Polly, ElevenLabs, etc)
 const { generateSceneAudio } = require('./section5a-tts-helpers.cjs');
 
 console.log('[5E][INIT] Audio generator loaded.');
 
 // === Single scene audio (one line) ===
-/**
- * Generates narration audio for a given scene, using the correct provider.
- * Handles output paths, checks output validity, and logs every step.
- * @param {string} sceneText - Text to speak
- * @param {string} voiceId - TTS voice ID
- * @param {string} outPath - Where to save MP3
- * @param {string} provider - TTS provider name (polly/elevenlabs)
- * @returns {Promise<string>} - Resolves to outPath if successful
- */
 async function createSceneAudio(sceneText, voiceId, outPath, provider) {
   console.log(`[5E][AUDIOGEN] createSceneAudio called: text="${sceneText}" | voiceId=${voiceId} | outPath=${outPath} | provider=${provider}`);
   try {
+    if (!sceneText || typeof sceneText !== 'string' || !sceneText.trim()) {
+      throw new Error('[5E][AUDIOGEN][ERR] Scene text missing or invalid!');
+    }
     await generateSceneAudio(sceneText, voiceId, outPath, provider);
     if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
       throw new Error(`[5E][AUDIOGEN][ERR] Audio file not created or too small: ${outPath}`);
@@ -41,15 +34,6 @@ async function createSceneAudio(sceneText, voiceId, outPath, provider) {
 }
 
 // === Mega-scene (multi-line) audio generation ===
-/**
- * Generates and merges audio for all lines in a mega-scene (e.g., hook+main).
- * @param {Array<string>} texts - Texts for each line (e.g., [hook, main subject])
- * @param {string} voiceId - TTS voice ID
- * @param {string} outPath - Output path for merged audio
- * @param {string} provider - TTS provider name
- * @param {string} tmpDir - Temp working directory for intermediate files
- * @returns {Promise<string>} - Path to merged audio
- */
 async function createMegaSceneAudio(texts, voiceId, outPath, provider, tmpDir) {
   console.log(`[5E][MEGA] createMegaSceneAudio called: ${texts.length} lines, voiceId=${voiceId}, provider=${provider}, outPath=${outPath}`);
   if (!Array.isArray(texts) || !texts.length) {
@@ -58,28 +42,31 @@ async function createMegaSceneAudio(texts, voiceId, outPath, provider, tmpDir) {
 
   const partPaths = [];
   for (let i = 0; i < texts.length; i++) {
-    const partPath = path.resolve(tmpDir, `mega-part${i + 1}-${Date.now()}.mp3`);
+    const thisText = texts[i];
+    const partPath = path.resolve(tmpDir, `mega-part${i + 1}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.mp3`);
     try {
-      await createSceneAudio(texts[i], voiceId, partPath, provider);
+      await createSceneAudio(thisText, voiceId, partPath, provider);
       partPaths.push(partPath);
+      console.log(`[5E][MEGA] Created part ${i + 1}: ${partPath}`);
     } catch (err) {
-      console.error(`[5E][MEGA][ERR] Audio failed for mega-part ${i + 1} (${texts[i].slice(0, 40)}...)`, err);
+      console.error(`[5E][MEGA][ERR] Audio failed for mega-part ${i + 1} ("${thisText?.slice(0, 40)}...")`, err);
       throw err;
     }
   }
 
   // Optionally, add 0.1s silence gap between clips for clarity
-  let listFile = path.resolve(tmpDir, `mega-concat-list-${Date.now()}.txt`);
+  let listFile = path.resolve(tmpDir, `mega-concat-list-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.txt`);
   let silencePath = path.resolve(tmpDir, `mega-silence-100ms.mp3`);
   let silenceCreated = false;
 
   try {
-    // Create 100ms silence file if needed (ffmpeg)
     if (partPaths.length > 1) {
       const silenceCmd = `ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 0.10 -q:a 9 -acodec libmp3lame "${silencePath}" -y`;
+      console.log(`[5E][MEGA] Creating 100ms silence for spacing: ${silenceCmd}`);
       await exec(silenceCmd);
       silenceCreated = fs.existsSync(silencePath);
-      console.log(`[5E][MEGA] Silence file created: ${silencePath} (${silenceCreated ? 'OK' : 'FAIL'})`);
+      if (!silenceCreated) throw new Error(`[5E][MEGA][ERR] Silence file creation failed!`);
+      console.log(`[5E][MEGA] Silence file created: ${silencePath}`);
     }
 
     // Build concat list file
@@ -96,7 +83,9 @@ async function createMegaSceneAudio(texts, voiceId, outPath, provider, tmpDir) {
     // Concat with ffmpeg
     const concatCmd = `ffmpeg -f concat -safe 0 -i "${listFile}" -c copy "${outPath}" -y`;
     console.log(`[5E][MEGA] Running ffmpeg concat command:\n${concatCmd}`);
-    await exec(concatCmd);
+    const { stdout, stderr } = await exec(concatCmd);
+    if (stdout) console.log(`[5E][MEGA][FFMPEG][STDOUT]:\n${stdout}`);
+    if (stderr) console.log(`[5E][MEGA][FFMPEG][STDERR]:\n${stderr}`);
 
     if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
       throw new Error(`[5E][MEGA][ERR] Mega audio file not created or too small: ${outPath}`);
@@ -105,7 +94,12 @@ async function createMegaSceneAudio(texts, voiceId, outPath, provider, tmpDir) {
     // Cleanup temp files
     for (const f of [...partPaths, listFile, silenceCreated ? silencePath : null]) {
       if (f && fs.existsSync(f)) {
-        fs.unlinkSync(f);
+        try {
+          fs.unlinkSync(f);
+          console.log(`[5E][MEGA][CLEANUP] Deleted temp file: ${f}`);
+        } catch (e) {
+          console.warn(`[5E][MEGA][CLEANUP][WARN] Could not delete temp file: ${f}`, e);
+        }
       }
     }
     return outPath;
@@ -116,11 +110,6 @@ async function createMegaSceneAudio(texts, voiceId, outPath, provider, tmpDir) {
 }
 
 // === Utility: Checks if an audio file exists and is valid. ===
-/**
- * Utility: Checks if an audio file exists and is valid.
- * @param {string} audioPath
- * @returns {boolean}
- */
 function isAudioValid(audioPath) {
   try {
     if (!fs.existsSync(audioPath)) {
@@ -138,15 +127,6 @@ function isAudioValid(audioPath) {
 }
 
 // === Batch generator: handles both mega and single scenes ===
-/**
- * Batch-generate audio for all scenes (mega and single).
- * Each scene object: { id, texts: [str], ... }
- * @param {Array<{id: string, texts: string[]}>} scenes
- * @param {string} voiceId
- * @param {string} provider
- * @param {string} workDir
- * @returns {Promise<Array<string>>} Array of audio file paths
- */
 async function batchGenerateSceneAudio(scenes, voiceId, provider, workDir) {
   console.log(`[5E][BATCH] batchGenerateSceneAudio called: ${scenes.length} scenes, voice=${voiceId}, provider=${provider}`);
   const results = [];
@@ -155,7 +135,6 @@ async function batchGenerateSceneAudio(scenes, voiceId, provider, workDir) {
     const outPath = path.resolve(workDir, `${s.id || `scene${i + 1}`}-audio.mp3`);
     try {
       if (Array.isArray(s.texts) && s.texts.length > 1) {
-        // Mega-scene
         await createMegaSceneAudio(s.texts, voiceId, outPath, provider, workDir);
         console.log(`[5E][BATCH] Mega-scene audio created for scene ${i + 1}: ${outPath}`);
       } else if (Array.isArray(s.texts) && s.texts.length === 1) {

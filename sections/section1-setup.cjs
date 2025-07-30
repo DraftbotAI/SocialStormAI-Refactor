@@ -254,19 +254,38 @@ const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
   });
 };
 
-// Standardize video to match reference info
+// ===============================
+// PATCHED: Standardize video to match reference info
+// Defensive: Always fallback to sane defaults (no 'undefined')
+// ===============================
 const standardizeVideo = (inputPath, outPath, refInfo) => {
   return new Promise((resolve, reject) => {
-    console.log(`[SECTION1][HELPER][standardizeVideo] Standardizing ${inputPath} to match reference:`);
-    console.dir(refInfo, { depth: 5 });
+    let pixFmt = (refInfo && refInfo.pix_fmt) ? refInfo.pix_fmt : 'yuv420p';
+    let width = (refInfo && refInfo.width) ? refInfo.width : 1080;
+    let height = (refInfo && refInfo.height) ? refInfo.height : 1920;
+    if (!refInfo || typeof refInfo !== 'object') {
+      console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo missing, defaulting to 1080x1920, yuv420p`);
+    } else {
+      if (!refInfo.pix_fmt) {
+        console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo.pix_fmt was undefined, defaulting to 'yuv420p'`);
+      }
+      if (!refInfo.width || !refInfo.height) {
+        console.warn(`[SECTION1][HELPER][standardizeVideo][WARN] refInfo.width/height missing, defaulting to 1080x1920`);
+      }
+    }
+
+    console.log(`[SECTION1][HELPER][standardizeVideo][START] Standardizing ${inputPath} to ${width}x${height}, pix_fmt=${pixFmt}, out=${outPath}`);
+    console.log(`[SECTION1][HELPER][standardizeVideo][DEBUG] Full refInfo:`, refInfo);
+
     if (!assertFile(inputPath, 'STANDARDIZE_INPUT')) {
       return reject(new Error(`[SECTION1][HELPER][standardizeVideo] Input file missing or too small: ${inputPath}`));
     }
+
     const args = [
-      '-vf', `scale=${refInfo.width}:${refInfo.height},format=${refInfo.pix_fmt}`,
+      '-vf', `scale=${width}:${height},format=${pixFmt}`,
       '-c:v', 'libx264',
       '-c:a', 'aac',
-      '-pix_fmt', refInfo.pix_fmt,
+      '-pix_fmt', pixFmt,
       '-y'
     ];
     ffmpeg(inputPath)

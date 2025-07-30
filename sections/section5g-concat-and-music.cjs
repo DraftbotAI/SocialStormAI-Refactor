@@ -119,8 +119,6 @@ async function ensureAudioStream(videoPath, workDir) {
         try {
           assertFile(fixedPath, 10240, 'AUDIOFIX_OUT');
           await logFileProbe(fixedPath, 'AUDIOFIX_OUT');
-          // Optionally overwrite original if you want
-          // fs.renameSync(fixedPath, videoPath);
           console.log(`[5G][AUDIOFIX] Silent audio added: ${fixedPath}`);
           resolve(fixedPath);
         } catch (e) {
@@ -225,6 +223,19 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
  */
 async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo, workDir = '/tmp') {
   console.log('[5G][BULLETPROOF] bulletproofScenes called.');
+  // Defensive defaults for refInfo!
+  if (!refInfo || typeof refInfo !== 'object') {
+    console.error('[5G][BULLETPROOF][FATAL] refInfo missing or not an object! Using default safe values.');
+    refInfo = {};
+  }
+  // Always use defensive defaults so ffmpeg never gets undefined!
+  if (!refInfo.codec_name) { console.warn('[5G][BULLETPROOF][WARN] Missing codec_name, defaulting to h264'); refInfo.codec_name = 'h264'; }
+  if (!refInfo.width)      { console.warn('[5G][BULLETPROOF][WARN] Missing width, defaulting to 1080'); refInfo.width = 1080; }
+  if (!refInfo.height)     { console.warn('[5G][BULLETPROOF][WARN] Missing height, defaulting to 1920'); refInfo.height = 1920; }
+  if (!refInfo.pix_fmt)    { console.warn('[5G][BULLETPROOF][WARN] Missing pix_fmt, defaulting to yuv420p'); refInfo.pix_fmt = 'yuv420p'; }
+
+  console.log('[5G][BULLETPROOF][INFO] Using refInfo:', JSON.stringify(refInfo));
+
   for (let i = 0; i < sceneFiles.length; i++) {
     const origPath = sceneFiles[i];
     try {
@@ -239,12 +250,13 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
       const info = await getVideoInfo(fixedPath);
       const v = (info.streams || []).find(s => s.codec_type === 'video');
       const a = (info.streams || []).find(s => s.codec_type === 'audio');
+      // Defensive: ensure no property is undefined
       const needsFix =
         !v ||
-        v.codec_name !== refInfo.codec_name ||
-        v.width !== refInfo.width ||
-        v.height !== refInfo.height ||
-        v.pix_fmt !== refInfo.pix_fmt ||
+        (v.codec_name !== refInfo.codec_name) ||
+        (v.width !== refInfo.width) ||
+        (v.height !== refInfo.height) ||
+        (v.pix_fmt !== refInfo.pix_fmt) ||
         !a;
 
       if (needsFix) {

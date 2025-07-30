@@ -10,7 +10,6 @@ const uuid = require('uuid'); // For scene IDs
 
 console.log('[5C][INIT] Script & scene utilities loaded.');
 
-// === Split script into scenes with 1+2 paired logic ===
 /**
  * Enhanced split:
  * - Groups first two lines into a "mega-scene" for continuous video.
@@ -27,21 +26,23 @@ function splitScriptToScenes(script) {
     return [];
   }
 
-  // Step 1: Try splitting by newlines.
   let lines = script.split('\n').map(line => line.trim()).filter(line => !!line);
 
-  // Step 2: If only 0 or 1 line, fallback to sentence split.
+  // Log full lines for debug
+  console.log(`[5C][SPLIT] Lines after newline split:`, JSON.stringify(lines));
+
   if (lines.length < 2) {
     lines = script.split(/[.?!]\s+/).map(s => s.trim()).filter(Boolean);
-    console.log(`[5C][SPLIT] Fallback: Split by sentence, got ${lines.length} lines.`);
+    console.log(`[5C][SPLIT] Fallback: Split by sentence, got ${lines.length} lines.`, JSON.stringify(lines));
   } else {
     console.log(`[5C][SPLIT] Script split into ${lines.length} non-empty lines.`);
   }
 
-  // Step 3: Remove any empty lines again just to be sure.
+  // Remove empty lines again just to be sure.
   lines = lines.filter(Boolean);
 
   const scenes = [];
+  const seenIds = new Set();
 
   if (lines.length >= 2) {
     // Create "mega-scene" for first two lines
@@ -53,10 +54,14 @@ function splitScriptToScenes(script) {
       type: 'hook+main',
       origIndices: [0, 1],
     });
+    seenIds.add(id);
     console.log(`[5C][MEGA] Created MEGA-SCENE for lines 1+2 [ID: ${id}]`);
-    // Add each additional line as its own scene
     for (let i = 2; i < lines.length; ++i) {
       const sceneId = `scene${i + 1}-${uuid.v4()}`;
+      if (seenIds.has(sceneId)) {
+        console.warn(`[5C][SCENE][WARN] Duplicate scene ID generated at index ${i}. Regenerating...`);
+      }
+      seenIds.add(sceneId);
       scenes.push({
         id: sceneId,
         texts: [lines[i]],
@@ -67,7 +72,6 @@ function splitScriptToScenes(script) {
       console.log(`[5C][SCENE] Created scene ${i + 1}: "${lines[i]}" [ID: ${sceneId}]`);
     }
   } else if (lines.length === 1) {
-    // Only one line: treat as a regular scene
     const sceneId = `scene1-${uuid.v4()}`;
     scenes.push({
       id: sceneId,
@@ -76,12 +80,13 @@ function splitScriptToScenes(script) {
       type: 'single',
       origIndices: [0],
     });
+    seenIds.add(sceneId);
     console.log(`[5C][SCENE] Only one line, created single scene [ID: ${sceneId}]`);
   } else {
     console.warn('[5C][SPLIT] No scenes found in script!');
   }
 
-  // Defensive: Bulletproof—make sure each scene is a proper object
+  // Bulletproof: Make sure each scene is a proper object, texts always array of non-empty string(s)
   const finalScenes = scenes.map((scene, idx) => {
     if (!scene || typeof scene !== 'object') {
       console.error(`[5C][DEFENSE][BUG] Scene at idx ${idx} is not an object! Wrapping as fallback.`);
@@ -93,36 +98,33 @@ function splitScriptToScenes(script) {
         origIndices: [idx]
       };
     }
-    // Defensive: ensure .texts is always an array of strings (never empty or null)
     let safeTexts = Array.isArray(scene.texts) ? scene.texts.map(t => String(t || '')) : [String(scene.texts || '')];
     if (!safeTexts.length || !safeTexts[0]) {
       safeTexts = [''];
       console.warn(`[5C][DEFENSE][BUG] Scene ${scene.id || idx} had empty texts array. Setting to [''].`);
+    }
+    // Guard against duplicate scene IDs
+    if (idx > 0 && seenIds.has(scene.id)) {
+      console.warn(`[5C][DEFENSE][BUG] Duplicate scene ID detected for idx ${idx}: ${scene.id}`);
     }
     return { ...scene, texts: safeTexts };
   });
 
   console.log(`[5C][SPLIT] Total scenes generated (mega + singles): ${finalScenes.length}`);
   finalScenes.forEach((scene, idx) => {
-    console.log(`[5C][SCENES][${idx}] ID: ${scene.id}, Mega: ${!!scene.isMegaScene}, Type: ${scene.type}, Lines: ${scene.texts.length}, OrigIndices: ${scene.origIndices.join(',')}`);
+    console.log(`[5C][SCENES][${idx}] ID: ${scene.id}, Mega: ${!!scene.isMegaScene}, Type: ${scene.type}, Lines: ${scene.texts.length}, OrigIndices: ${scene.origIndices.join(',')}, Text: "${scene.texts.join(' / ')}"`);
   });
 
   return finalScenes;
 }
 
 // === Utility: Guess main subject from all scenes (stub for future AI upgrades) ===
-/**
- * Gets the most repeated or thematically central word/phrase in all scenes.
- * @param {Array<{id: string, texts: string[]}>} scenes
- * @returns {string} Main subject guess
- */
 function guessMainSubjectFromScenes(scenes) {
   console.log('[5C][SUBJECT] guessMainSubjectFromScenes called.');
   if (!Array.isArray(scenes) || !scenes.length) {
     console.warn('[5C][SUBJECT] No scenes to analyze.');
     return '';
   }
-  // Flatten all texts
   const allTexts = scenes.flatMap(s => s.texts || []);
   const freq = {};
   for (const text of allTexts) {
@@ -139,16 +141,14 @@ function guessMainSubjectFromScenes(scenes) {
       max = count;
     }
   }
+  if (!main) {
+    console.warn('[5C][SUBJECT][WARN] Main subject guess was empty.');
+  }
   console.log(`[5C][SUBJECT] Main subject guessed: "${main}" (appears ${max}x)`);
   return main;
 }
 
 // === Utility: Clean scene text (remove special chars, extra spaces, etc.) ===
-/**
- * Clean up scene text (remove special chars, extra spaces, etc.)
- * @param {string} text
- * @returns {string}
- */
 function cleanSceneText(text) {
   if (!text) return '';
   let cleaned = text.replace(/\s+/g, ' ').replace(/[^\w\s.,?!-]/g, '').trim();
