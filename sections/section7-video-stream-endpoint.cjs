@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 
 function registerVideoStreamEndpoint(app) {
+  console.log('[SECTION7][INIT] registerVideoStreamEndpoint called');
   if (!app) throw new Error('[SECTION7][FATAL] No app instance provided!');
 
   app.get('/video/:key', (req, res) => {
@@ -71,4 +72,5 @@ function registerVideoStreamEndpoint(app) {
   console.log('[SECTION7][INFO] /video/:key endpoint registered.');
 }
 
-module.exports = { registerVideoStreamEndpoint };
+console.log('[SECTION7][EXPORT] registerVideoStreamEndpoint exported');
+module.exports = registerVideoStreamEndpoint;
