@@ -33,6 +33,8 @@ async function findClipForScene(subject, sceneIdx, allSceneTexts, mainTopic) {
     if (r2Url) {
       console.log(`[5D][R2] Matched: ${r2Url}`);
       return r2Url;
+    } else {
+      console.log(`[5D][R2] No match for "${subject}"`);
     }
   } catch (err) {
     console.error('[5D][R2][ERR] Error in findR2Clip:', err);
@@ -44,6 +46,8 @@ async function findClipForScene(subject, sceneIdx, allSceneTexts, mainTopic) {
     if (pexelsUrl) {
       console.log(`[5D][PEXELS] Matched: ${pexelsUrl}`);
       return pexelsUrl;
+    } else {
+      console.log(`[5D][PEXELS] No match for "${subject}"`);
     }
   } catch (err) {
     console.error('[5D][PEXELS][ERR] Error in findPexelsClip:', err);
@@ -55,6 +59,8 @@ async function findClipForScene(subject, sceneIdx, allSceneTexts, mainTopic) {
     if (pixabayUrl) {
       console.log(`[5D][PIXABAY] Matched: ${pixabayUrl}`);
       return pixabayUrl;
+    } else {
+      console.log(`[5D][PIXABAY] No match for "${subject}"`);
     }
   } catch (err) {
     console.error('[5D][PIXABAY][ERR] Error in findPixabayClip:', err);
@@ -66,6 +72,8 @@ async function findClipForScene(subject, sceneIdx, allSceneTexts, mainTopic) {
     if (kenBurnsPath) {
       console.log(`[5D][KENBURNS] Fallback image video created: ${kenBurnsPath}`);
       return kenBurnsPath;
+    } else {
+      console.log(`[5D][KENBURNS] No fallback video created for "${subject}"`);
     }
   } catch (err) {
     console.error('[5D][KENBURNS][ERR] Fallback failed:', err);

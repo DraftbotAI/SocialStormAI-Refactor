@@ -126,6 +126,7 @@ async function overlayMusic(videoPath, musicPath, outPath) {
  * @param {string} mainPath - Main video path (.mp4)
  * @param {string} outroPath - Outro video path (.mp4)
  * @param {string} outPath - Output final .mp4
+ * @param {string} workDir - Working dir for temp list
  * @returns {Promise<void>}
  */
 async function appendOutro(mainPath, outroPath, outPath, workDir) {
