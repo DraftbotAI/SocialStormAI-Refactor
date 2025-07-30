@@ -312,8 +312,8 @@ function registerGenerateVideoEndpoint(app, deps) {
       } finally {
         if (cleanupJob) {
           try {
-            cleanupJob(jobId);
-            console.log(`[5B][CLEANUP] [${jobId}] Cleanup complete.`);
+            cleanupJob(jobId); // Now uses delayed cleanup for progress entry
+            console.log(`[5B][CLEANUP] [${jobId}] Cleanup scheduled (delayed progress removal).`);
           } catch (e) {
             console.warn(`[5B][CLEANUP][WARN] [${jobId}] Cleanup failed:`, e);
           }
