@@ -67,17 +67,61 @@ async function listAllFilesInR2(prefix = '') {
   }
 }
 
-// --- MAIN: Find and Download Clip ---
+// --- ENHANCED SCENE SELECTION LOGIC ---
+// Matches by strict phrase, partial, fuzzy, and then fallback to keyword
+function scoreR2Match(file, subject, extraPhrases = []) {
+  const normFile = normalize(file);
+  const normSubject = normalize(subject);
+
+  // 1. Exact phrase match
+  if (normFile === normSubject) return 100;
+
+  // 2. File contains normalized subject (strong partial)
+  if (normFile.includes(normSubject)) return 80;
+
+  // 3. Any extra phrase matches (topic, alt wording)
+  for (let p of extraPhrases) {
+    if (normFile.includes(normalize(p))) return 60;
+  }
+
+  // 4. Loose keyword match (any word from subject)
+  for (let word of normSubject.split(/[^a-z0-9]+/)) {
+    if (word.length > 3 && normFile.includes(word)) return 40;
+  }
+
+  // 5. Weak match
+  return 0;
+}
+
 /**
  * Finds the best-matching video in R2 and downloads it to local workDir.
- * @param {string} sceneText
- * @param {string} workDir  - Where to save the clip locally
- * @param {number} sceneIdx
- * @param {string} jobId
+ * Enhanced: Scores all clips, chooses best, avoids duplicates, logs all steps.
+ * @param {object} opts
+ *   @param {string} opts.subject - The main phrase/subject (e.g., "Eiffel Tower")
+ *   @param {string[]} [opts.extraPhrases] - Extra keywords/phrases for fallback matching
+ *   @param {string[]} [opts.usedClips] - Already used R2 keys (prevent dupe)
+ *   @param {string} opts.workDir  - Local work dir
+ *   @param {number} opts.sceneIdx
+ *   @param {string} opts.jobId
  * @returns {Promise<string|null>} Local video path (or null if not found)
  */
-async function findR2ClipForScene(sceneText, workDir, sceneIdx, jobId) {
-  console.log(`[10A][R2] findR2ClipForScene | sceneText="${sceneText}" workDir="${workDir}" sceneIdx=${sceneIdx} jobId=${jobId}`);
+async function findR2Clip(opts) {
+  const {
+    subject,
+    extraPhrases = [],
+    usedClips = [],
+    workDir,
+    sceneIdx = 0,
+    jobId = ''
+  } = opts || {};
+
+  console.log(`[10A][R2] findR2Clip | subject="${subject}" | extraPhrases=${JSON.stringify(extraPhrases)} | usedClips=${JSON.stringify(usedClips)} | workDir="${workDir}" | sceneIdx=${sceneIdx} | jobId=${jobId}`);
+
+  if (!subject || typeof subject !== 'string') {
+    console.error('[10A][ERR] No valid subject passed!');
+    return null;
+  }
+
   try {
     // 1. List all files in the bucket
     const files = await listAllFilesInR2('');
@@ -86,29 +130,40 @@ async function findR2ClipForScene(sceneText, workDir, sceneIdx, jobId) {
       return null;
     }
 
-    // 2. Try for a match (normalized)
-    const normQuery = normalize(sceneText);
-    let best = null;
-    for (let file of files) {
-      if (normalize(file).includes(normQuery) && file.endsWith('.mp4')) {
-        best = file;
-        break;
+    // 2. Filter out already used clips, only look at mp4s
+    const mp4Files = files.filter(f => f.endsWith('.mp4') && !usedClips.includes(f));
+
+    // 3. Score all files for best match
+    let bestScore = -1;
+    let bestFile = null;
+    let allScores = [];
+
+    for (let file of mp4Files) {
+      const score = scoreR2Match(file, subject, extraPhrases);
+      allScores.push({ file, score });
+      if (score > bestScore) {
+        bestScore = score;
+        bestFile = file;
       }
     }
-    if (!best) {
-      console.log(`[10A][R2] No R2 match for "${sceneText}"`);
+
+    allScores.sort((a, b) => b.score - a.score);
+    console.log('[10A][R2][SCORES] Top R2 file scores:', allScores.slice(0, 5));
+
+    if (!bestFile || bestScore < 40) {
+      console.log(`[10A][R2] No strong R2 match for "${subject}" (best score: ${bestScore})`);
       return null;
     }
 
-    // 3. Download the file to the job's workDir
+    // 4. Download the file to the job's workDir
     const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2.mp4`);
     if (fs.existsSync(outPath)) {
       console.log(`[10A][R2] File already downloaded: ${outPath}`);
       return outPath;
     }
-    console.log(`[10A][R2] Downloading R2 clip: ${best} -> ${outPath}`);
+    console.log(`[10A][R2] Downloading R2 clip: ${bestFile} -> ${outPath}`);
 
-    const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: best });
+    const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: bestFile });
     const resp = await s3Client.send(getCmd);
 
     await new Promise((resolve, reject) => {
@@ -130,13 +185,13 @@ async function findR2ClipForScene(sceneText, workDir, sceneIdx, jobId) {
       });
     });
 
-    // 4. Return the local path
+    // 5. Return the local path
     return outPath;
 
   } catch (err) {
-    console.error('[10A][R2][ERR] findR2ClipForScene failed:', err);
+    console.error('[10A][R2][ERR] findR2Clip failed:', err);
     return null;
   }
 }
 
-module.exports = { findR2ClipForScene };
+module.exports = findR2Clip;

@@ -17,6 +17,13 @@ if (!PIXABAY_API_KEY) {
   console.error('[10C][FATAL] Missing PIXABAY_API_KEY in environment!');
 }
 
+// Defensive: sanitize the query
+function cleanQuery(str) {
+  if (!str) return '';
+  return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
+}
+
+// --- Download video from Pixabay to local file ---
 async function downloadPixabayVideoToLocal(url, outPath) {
   try {
     console.log(`[10C][DL] Downloading Pixabay video: ${url} -> ${outPath}`);
@@ -40,40 +47,68 @@ async function downloadPixabayVideoToLocal(url, outPath) {
 }
 
 /**
- * Finds and downloads best Pixabay video for a given subject/scene.
- * @param {string} sceneText
- * @param {string} workDir  - Local job folder for saving video
+ * Finds and downloads best Pixabay video for a given subject/scene,
+ * scoring by resolution, aspect, deduping, and full trace logging.
+ * @param {string} subject         Main scene subject (clean, descriptive)
+ * @param {string} workDir         Local job folder for saving video
  * @param {number} sceneIdx
  * @param {string} jobId
+ * @param {Array<string>} usedClips Paths/URLs already used
  * @returns {Promise<string|null>} Local .mp4 path, or null
  */
-async function findPixabayClipForScene(sceneText, workDir, sceneIdx, jobId) {
-  console.log(`[10C][PIXABAY] findPixabayClipForScene | sceneText="${sceneText}" workDir="${workDir}" sceneIdx=${sceneIdx} jobId=${jobId}`);
+async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
+  console.log(`[10C][PIXABAY][${jobId}] findPixabayClipForScene | subject="${subject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
 
   if (!PIXABAY_API_KEY) {
     console.error('[10C][PIXABAY][ERR] No Pixabay API key set!');
     return null;
   }
   try {
-    const query = encodeURIComponent(sceneText);
-    const url = `https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${query}&per_page=5`;
-    console.log(`[10C][PIXABAY] Searching: ${url}`);
+    const query = encodeURIComponent(cleanQuery(subject));
+    const url = `https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${query}&per_page=8`;
+    console.log(`[10C][PIXABAY][${jobId}] Searching: ${url}`);
     const resp = await axios.get(url);
 
     if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
-      // Pick best video (prefer highest res)
-      const best = resp.data.hits[0];
-      const maxRes = Object.values(best.videos).sort((a, b) => b.width - a.width)[0];
-      if (maxRes && maxRes.url) {
+      // Score and filter results for best match
+      let best = null;
+      let bestScore = -1;
+      const scores = [];
+
+      for (const hit of resp.data.hits) {
+        // Prefer max resolution, then aspect (landscape), then dedupe
+        const videoCandidates = Object.values(hit.videos);
+        for (const vid of videoCandidates) {
+          let score = 0;
+          score += Math.floor(vid.width / 100);
+          if (vid.height >= 720) score += 2;
+          if (vid.width > vid.height) score += 2;
+          if (vid.url && usedClips && usedClips.some(u => u.includes(vid.url))) score -= 100;
+          scores.push({ vid, score });
+          if (score > bestScore) {
+            best = vid;
+            bestScore = score;
+          }
+        }
+      }
+      scores.sort((a, b) => b.score - a.score);
+      console.log(`[10C][PIXABAY][${jobId}] Top Pixabay file scores:`, scores.slice(0, 3).map(s => ({ url: s.vid.url, score: s.score })));
+
+      if (best && best.url && bestScore >= 0) {
         // Download to local
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
-        return await downloadPixabayVideoToLocal(maxRes.url, outPath);
+        return await downloadPixabayVideoToLocal(best.url, outPath);
       }
     }
-    console.log(`[10C][PIXABAY] No match for "${sceneText}"`);
+    console.log(`[10C][PIXABAY][${jobId}] No video match found for "${subject}"`);
     return null;
   } catch (err) {
-    console.error('[10C][PIXABAY][ERR] findPixabayClipForScene failed:', err.response?.data || err);
+    // Log actual error payload from Pixabay if present
+    if (err.response?.data) {
+      console.error('[10C][PIXABAY][ERR]', JSON.stringify(err.response.data));
+    } else {
+      console.error('[10C][PIXABAY][ERR]', err);
+    }
     return null;
   }
 }

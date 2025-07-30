@@ -3,12 +3,12 @@
 // Tries R2, then Pexels, then Pixabay, then Ken Burns fallback
 // All helpers are required from section10a/b/c/d
 // MAX LOGGING EVERY STEP
-// Enhanced: Mega-scene support, dedupe
+// Enhanced: Mega-scene support, dedupe, traceability
 // ===========================================================
 
-const { findR2Clip } = require('./section10a-r2-clip-helper.cjs');
-const { findPexelsClip } = require('./section10b-pexels-clip-helper.cjs');
-const { findPixabayClip } = require('./section10c-pixabay-clip-helper.cjs');
+const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
+const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
+const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 
 console.log('[5D][INIT] Clip matcher orchestrator loaded.');
@@ -26,7 +26,9 @@ console.log('[5D][INIT] Clip matcher orchestrator loaded.');
  *   @param {string} mainTopic - Main script topic (context)
  *   @param {boolean} isMegaScene - true if this is the hook+main scene
  *   @param {Array<string>} usedClips - All already-used clip URLs/paths
- * @returns {Promise<string|null>} Video URL or local path
+ *   @param {string} workDir - Directory for storing downloaded clips (REQUIRED)
+ *   @param {string} jobId - Job identifier (for max logging)
+ * @returns {Promise<string|null>} Video file path or remote URL
  */
 async function findClipForScene({
   subject,
@@ -35,84 +37,89 @@ async function findClipForScene({
   mainTopic,
   isMegaScene = false,
   usedClips = [],
+  workDir,
+  jobId
 }) {
-  console.log(`[5D][MATCH] findClipForScene | sceneIdx=${sceneIdx} | subject="${subject}" | mainTopic="${mainTopic}" | isMegaScene=${isMegaScene}`);
+  console.log(`[5D][MATCH][${jobId}] findClipForScene | sceneIdx=${sceneIdx} | subject="${subject}" | mainTopic="${mainTopic}" | isMegaScene=${isMegaScene} | workDir=${workDir}`);
+
   if (usedClips && usedClips.length) {
-    console.log(`[5D][MATCH] Used clips so far: ${JSON.stringify(usedClips)}`);
+    console.log(`[5D][MATCH][${jobId}] Used clips so far: ${JSON.stringify(usedClips)}`);
+  }
+
+  // Defensive: Ensure helpers exist
+  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !fallbackKenBurnsVideo) {
+    console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
+    return null;
   }
 
   // --- For mega-scene, always use main topic as subject ---
   let searchSubject = isMegaScene ? mainTopic : subject;
   if (isMegaScene) {
-    console.log(`[5D][MEGA] Mega-scene detected. Overriding subject to mainTopic: "${mainTopic}"`);
+    console.log(`[5D][MEGA][${jobId}] Mega-scene detected. Overriding subject to mainTopic: "${mainTopic}"`);
   }
-
-  // Dedupe logic: If a clip is found in usedClips, skip it and try the next-best match.
-  // The R2, Pexels, and Pixabay helpers should accept a usedClips/exclude list if possible.
-  // If not, filter after.
 
   // 1. Try R2 first
   try {
-    const r2Url = await findR2Clip(searchSubject, sceneIdx, mainTopic, usedClips);
-    if (r2Url && !usedClips.includes(r2Url)) {
-      console.log(`[5D][R2] Matched: ${r2Url}`);
-      return r2Url;
-    } else if (r2Url) {
-      console.warn(`[5D][R2] R2 match "${r2Url}" was already used. Skipping.`);
+    const r2Path = await findR2ClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
+    if (r2Path && !usedClips.includes(r2Path)) {
+      console.log(`[5D][R2][${jobId}] Matched: ${r2Path}`);
+      return r2Path;
+    } else if (r2Path) {
+      console.warn(`[5D][R2][${jobId}] R2 match "${r2Path}" was already used. Skipping.`);
     } else {
-      console.log(`[5D][R2] No match for "${searchSubject}"`);
+      console.log(`[5D][R2][${jobId}] No R2 match for "${searchSubject}"`);
     }
   } catch (err) {
-    console.error('[5D][R2][ERR] Error in findR2Clip:', err);
+    console.error(`[5D][R2][ERR][${jobId}] Error in findR2ClipForScene:`, err);
   }
 
   // 2. Try Pexels
   try {
-    const pexelsUrl = await findPexelsClip(searchSubject, sceneIdx, mainTopic, usedClips);
-    if (pexelsUrl && !usedClips.includes(pexelsUrl)) {
-      console.log(`[5D][PEXELS] Matched: ${pexelsUrl}`);
-      return pexelsUrl;
-    } else if (pexelsUrl) {
-      console.warn(`[5D][PEXELS] Pexels match "${pexelsUrl}" was already used. Skipping.`);
+    const pexelsPath = await findPexelsClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
+    if (pexelsPath && !usedClips.includes(pexelsPath)) {
+      console.log(`[5D][PEXELS][${jobId}] Matched: ${pexelsPath}`);
+      return pexelsPath;
+    } else if (pexelsPath) {
+      console.warn(`[5D][PEXELS][${jobId}] Pexels match "${pexelsPath}" was already used. Skipping.`);
     } else {
-      console.log(`[5D][PEXELS] No match for "${searchSubject}"`);
+      console.log(`[5D][PEXELS][${jobId}] No Pexels match for "${searchSubject}"`);
     }
   } catch (err) {
-    console.error('[5D][PEXELS][ERR] Error in findPexelsClip:', err);
+    console.error(`[5D][PEXELS][ERR][${jobId}] Error in findPexelsClipForScene:`, err);
   }
 
   // 3. Try Pixabay
   try {
-    const pixabayUrl = await findPixabayClip(searchSubject, sceneIdx, mainTopic, usedClips);
-    if (pixabayUrl && !usedClips.includes(pixabayUrl)) {
-      console.log(`[5D][PIXABAY] Matched: ${pixabayUrl}`);
-      return pixabayUrl;
-    } else if (pixabayUrl) {
-      console.warn(`[5D][PIXABAY] Pixabay match "${pixabayUrl}" was already used. Skipping.`);
+    const pixabayPath = await findPixabayClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
+    if (pixabayPath && !usedClips.includes(pixabayPath)) {
+      console.log(`[5D][PIXABAY][${jobId}] Matched: ${pixabayPath}`);
+      return pixabayPath;
+    } else if (pixabayPath) {
+      console.warn(`[5D][PIXABAY][${jobId}] Pixabay match "${pixabayPath}" was already used. Skipping.`);
     } else {
-      console.log(`[5D][PIXABAY] No match for "${searchSubject}"`);
+      console.log(`[5D][PIXABAY][${jobId}] No Pixabay match for "${searchSubject}"`);
     }
   } catch (err) {
-    console.error('[5D][PIXABAY][ERR] Error in findPixabayClip:', err);
+    console.error(`[5D][PIXABAY][ERR][${jobId}] Error in findPixabayClipForScene:`, err);
   }
 
   // 4. Fallback: Ken Burns pan video from image
   try {
-    const kenBurnsPath = await fallbackKenBurnsVideo(searchSubject, usedClips);
+    const kenBurnsPath = await fallbackKenBurnsVideo(searchSubject, workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsPath && !usedClips.includes(kenBurnsPath)) {
-      console.log(`[5D][KENBURNS] Fallback image video created: ${kenBurnsPath}`);
+      console.log(`[5D][KENBURNS][${jobId}] Fallback image video created: ${kenBurnsPath}`);
       return kenBurnsPath;
     } else if (kenBurnsPath) {
-      console.warn(`[5D][KENBURNS] Ken Burns fallback "${kenBurnsPath}" was already used. Skipping.`);
+      console.warn(`[5D][KENBURNS][${jobId}] Ken Burns fallback "${kenBurnsPath}" was already used. Skipping.`);
     } else {
-      console.log(`[5D][KENBURNS] No fallback video created for "${searchSubject}"`);
+      console.log(`[5D][KENBURNS][${jobId}] No fallback video created for "${searchSubject}"`);
     }
   } catch (err) {
-    console.error('[5D][KENBURNS][ERR] Fallback failed:', err);
+    console.error(`[5D][KENBURNS][ERR][${jobId}] Fallback failed:`, err);
   }
 
   // Final fail
-  console.warn(`[5D][NO MATCH] No clip found for "${searchSubject}" (scene ${sceneIdx + 1})`);
+  console.warn(`[5D][NO MATCH][${jobId}] No clip found for "${searchSubject}" (scene ${sceneIdx + 1})`);
   return null;
 }
 

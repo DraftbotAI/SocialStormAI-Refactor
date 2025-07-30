@@ -2,7 +2,7 @@
 // SECTION 10D: KEN BURNS IMAGE VIDEO HELPER
 // Finds fallback still images, downloads them, creates slow-pan videos
 // Used when no matching R2/Pexels/Pixabay video is found.
-// MAX LOGGING EVERY STEP
+// MAX LOGGING EVERY STEP, Modular, Deduped
 // ===========================================================
 
 const axios = require('axios');
@@ -152,18 +152,30 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5) {
 
 // --- Main entry: fallback to Ken Burns if no video found ---
 // Returns: local .mp4 path (or null if fail)
-async function fallbackKenBurnsVideo(subject, tmpDir = null, duration = 5) {
+// Signature: (subject, workDir, sceneIdx, jobId, usedClips)
+async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClips = []) {
   try {
-    console.log(`[10D][FALLBACK] Attempting Ken Burns fallback video for "${subject}"`);
+    console.log(`[10D][FALLBACK][${jobId}] Attempting Ken Burns fallback video for "${subject}" | workDir="${workDir}" | sceneIdx=${sceneIdx}`);
+
+    // Look for an image that hasn't been used yet
     let imageUrl = await findImageInPexels(subject);
     if (!imageUrl) imageUrl = await findImageInPixabay(subject);
+
+    // If dupe, keep looking (simple dupe check)
+    let tryCount = 0;
+    while (imageUrl && usedClips && usedClips.some(u => u.includes(imageUrl)) && tryCount < 3) {
+      console.warn(`[10D][FALLBACK][${jobId}] Image already used (${imageUrl}), trying next...`);
+      imageUrl = await findImageInPixabay(subject + ' ' + (Math.random() * 10000).toFixed(0));
+      tryCount++;
+    }
+
     if (!imageUrl) {
-      console.warn(`[10D][FALLBACK] No fallback image found for "${subject}"`);
+      console.warn(`[10D][FALLBACK][${jobId}] No fallback image found for "${subject}"`);
       return null;
     }
 
     // Prepare temp dir
-    const realTmpDir = tmpDir || path.join(__dirname, 'tmp');
+    const realTmpDir = workDir || path.join(__dirname, 'tmp');
     if (!fs.existsSync(realTmpDir)) fs.mkdirSync(realTmpDir, { recursive: true });
 
     const imgName = `kenburns-${uuidv4()}.jpg`;
@@ -173,12 +185,12 @@ async function fallbackKenBurnsVideo(subject, tmpDir = null, duration = 5) {
     const outVidName = `kenburns-${uuidv4()}.mp4`;
     const outVidPath = path.join(realTmpDir, outVidName);
 
-    await makeKenBurnsVideoFromImage(imgPath, outVidPath, duration);
+    await makeKenBurnsVideoFromImage(imgPath, outVidPath, 5);
 
-    console.log(`[10D][FALLBACK] Ken Burns fallback video created: ${outVidPath}`);
+    console.log(`[10D][FALLBACK][${jobId}] Ken Burns fallback video created: ${outVidPath}`);
     return outVidPath;
   } catch (err) {
-    console.error('[10D][FALLBACK][ERR] Ken Burns fallback failed:', err);
+    console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns fallback failed:`, err);
     return null;
   }
 }
