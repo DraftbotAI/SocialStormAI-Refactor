@@ -23,9 +23,9 @@ registerGenerateScriptEndpoint(app, section1.openai);
 
 // === Section 5: Video generator ===
 console.log('[SERVER][INFO] Loading Section 5 (Video Generator)...');
-// Import audio generator and clip matcher explicitly for passing to 5b
+// Import ALL required helpers for Section 5B
 const { findClipForScene } = require('./sections/section5d-clip-matcher.cjs');
-const { createSceneAudio } = require('./sections/section5e-audio-generator.cjs');
+const { createSceneAudio, createMegaSceneAudio } = require('./sections/section5e-audio-generator.cjs');
 const registerGenerateVideoEndpoint = require('./sections/section5b-generate-video-endpoint.cjs');
 
 // Hand off ALL helpers (spread section1, inject others to avoid "not a function" errors)
@@ -34,8 +34,9 @@ registerGenerateVideoEndpoint(app, {
     progress,
     voices: section1.voices,
     POLLY_VOICE_IDS: section1.POLLY_VOICE_IDS,
-    findClipForScene,       // required by 5b
-    generateSceneAudio: createSceneAudio // required by 5b, always inject as generateSceneAudio
+    findClipForScene,               // required by 5b
+    createSceneAudio,               // required by 5b
+    createMegaSceneAudio            // required by 5b
 });
 
 // === Section 6: Thumbnails ===
