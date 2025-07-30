@@ -2,11 +2,13 @@
 // SECTION 10A: R2 CLIP HELPER (Cloudflare R2)
 // Exports: findR2ClipForScene (used by 5D)
 // MAX LOGGING EVERY STEP, Modular System Compatible
+// Parallel safe: no temp file collisions
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 
 console.log('[10A][INIT] R2 clip helper loaded.');
 
@@ -65,7 +67,6 @@ async function listAllFilesInR2(prefix = '', jobId = '') {
   }
 }
 
-// --- ENHANCED SCENE SELECTION LOGIC ---
 function scoreR2Match(file, subject, extraPhrases = []) {
   const normFile = normalize(file);
   const normSubject = normalize(subject);
@@ -79,6 +80,24 @@ function scoreR2Match(file, subject, extraPhrases = []) {
     if (word.length > 3 && normFile.includes(word)) return 40;
   }
   return 0;
+}
+
+function isValidClip(path, jobId) {
+  try {
+    if (!fs.existsSync(path)) {
+      console.warn(`[10A][R2][${jobId}] File does not exist: ${path}`);
+      return false;
+    }
+    const size = fs.statSync(path).size;
+    if (size < 2048) {
+      console.warn(`[10A][R2][${jobId}] File too small or broken: ${path} (${size} bytes)`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(`[10A][R2][${jobId}] File validation error:`, err);
+    return false;
+  }
 }
 
 /**
@@ -133,9 +152,10 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
       return null;
     }
 
-    // Download to job's workDir
-    const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2.mp4`);
-    if (fs.existsSync(outPath)) {
+    // Use a truly unique filename for every download attempt (parallel safe)
+    const unique = uuidv4();
+    const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2-${unique}.mp4`);
+    if (fs.existsSync(outPath) && isValidClip(outPath, jobId)) {
       console.log(`[10A][R2][${jobId}] File already downloaded: ${outPath}`);
       return outPath;
     }
@@ -162,6 +182,11 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
         reject(err);
       });
     });
+
+    if (!isValidClip(outPath, jobId)) {
+      console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+      return null;
+    }
 
     return outPath;
 

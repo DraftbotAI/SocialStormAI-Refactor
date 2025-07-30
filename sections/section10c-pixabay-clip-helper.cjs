@@ -2,6 +2,7 @@
 // SECTION 10C: PIXABAY CLIP HELPER
 // Finds and downloads best-matching video from Pixabay API
 // MAX LOGGING EVERY STEP, Modular System Compatible
+// Bulletproof: unique files, dedupe, valid output, crash-proof
 // ===========================================================
 
 const axios = require('axios');
@@ -17,31 +18,54 @@ if (!PIXABAY_API_KEY) {
   console.error('[10C][FATAL] Missing PIXABAY_API_KEY in environment!');
 }
 
-// Defensive: sanitize the query
+// --- Utility: Clean query for Pixabay ---
 function cleanQuery(str) {
   if (!str) return '';
   return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
 }
 
-// --- Download video from Pixabay to local file ---
-async function downloadPixabayVideoToLocal(url, outPath) {
+// --- File validation ---
+function isValidClip(path, jobId) {
   try {
-    console.log(`[10C][DL] Downloading Pixabay video: ${url} -> ${outPath}`);
+    if (!fs.existsSync(path)) {
+      console.warn(`[10C][DL][${jobId}] File does not exist: ${path}`);
+      return false;
+    }
+    const size = fs.statSync(path).size;
+    if (size < 2048) {
+      console.warn(`[10C][DL][${jobId}] File too small or broken: ${path} (${size} bytes)`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(`[10C][DL][${jobId}] File validation error:`, err);
+    return false;
+  }
+}
+
+// --- Download video from Pixabay to local file ---
+async function downloadPixabayVideoToLocal(url, outPath, jobId) {
+  try {
+    console.log(`[10C][DL][${jobId}] Downloading Pixabay video: ${url} -> ${outPath}`);
     const response = await axios.get(url, { responseType: 'stream' });
     await new Promise((resolve, reject) => {
       const stream = response.data.pipe(fs.createWriteStream(outPath));
       stream.on('finish', () => {
-        console.log(`[10C][DL] Video saved to: ${outPath}`);
+        console.log(`[10C][DL][${jobId}] Video saved to: ${outPath}`);
         resolve();
       });
       stream.on('error', (err) => {
-        console.error('[10C][DL][ERR] Write error:', err);
+        console.error('[10C][DL][ERR]', err);
         reject(err);
       });
     });
+    if (!isValidClip(outPath, jobId)) {
+      console.warn(`[10C][DL][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+      return null;
+    }
     return outPath;
   } catch (err) {
-    console.error('[10C][DL][ERR] Failed to download Pixabay video:', err);
+    console.error('[10C][DL][ERR]', err);
     return null;
   }
 }
@@ -83,7 +107,7 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
           score += Math.floor(vid.width / 100);
           if (vid.height >= 720) score += 2;
           if (vid.width > vid.height) score += 2;
-          // Deduplication check
+          // Deduplication check (inclusive both ways)
           if (vid.url && usedClips && usedClips.some(u => u.includes(vid.url) || vid.url.includes(u))) score -= 100;
           scores.push({ vid, score });
           if (score > bestScore) {
@@ -96,9 +120,9 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
       console.log(`[10C][PIXABAY][${jobId}] Top Pixabay file scores:`, scores.slice(0, 3).map(s => ({ url: s.vid.url, score: s.score })));
 
       if (best && best.url && bestScore >= 0) {
-        // Download to local
+        // Always unique per job/scene/clip
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
-        return await downloadPixabayVideoToLocal(best.url, outPath);
+        return await downloadPixabayVideoToLocal(best.url, outPath, jobId);
       }
     }
     console.log(`[10C][PIXABAY][${jobId}] No video match found for "${subject}"`);

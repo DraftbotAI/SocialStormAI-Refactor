@@ -2,7 +2,7 @@
 // SECTION 10D: KEN BURNS IMAGE VIDEO HELPER
 // Finds fallback still images, downloads them, creates slow-pan videos
 // Used when no matching R2/Pexels/Pixabay video is found.
-// MAX LOGGING EVERY STEP, Modular, Deduped
+// MAX LOGGING EVERY STEP, Modular, Deduped, Validated
 // ===========================================================
 
 const axios = require('axios');
@@ -15,6 +15,25 @@ const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
 
 console.log('[10D][INIT] Ken Burns image video helper loaded.');
+
+// --- Validate output file ---
+function isValidFile(fp, jobId) {
+  try {
+    if (!fs.existsSync(fp)) {
+      console.warn(`[10D][VALIDATE][${jobId}] File does not exist: ${fp}`);
+      return false;
+    }
+    const sz = fs.statSync(fp).size;
+    if (sz < 2048) {
+      console.warn(`[10D][VALIDATE][${jobId}] File too small: ${fp} (${sz} bytes)`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error(`[10D][VALIDATE][${jobId}] Error validating file:`, e);
+    return false;
+  }
+}
 
 // --- Find an image on Pexels ---
 async function findImageInPexels(subject) {
@@ -77,12 +96,12 @@ async function findImageInPixabay(subject) {
 }
 
 // --- Download remote image to local disk ---
-async function downloadRemoteFileToLocal(url, outPath) {
-  console.log(`[10D][DL] Downloading | url="${url}" | outPath="${outPath}"`);
+async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
+  console.log(`[10D][DL][${jobId}] Downloading | url="${url}" | outPath="${outPath}"`);
   try {
     if (!url) throw new Error('No URL provided to download.');
     if (fs.existsSync(outPath)) {
-      console.log(`[10D][DL] File already exists, skipping download: ${outPath}`);
+      console.log(`[10D][DL][${jobId}] File already exists, skipping download: ${outPath}`);
       return;
     }
 
@@ -99,7 +118,7 @@ async function downloadRemoteFileToLocal(url, outPath) {
       let errored = false;
       writer.on('error', err => {
         errored = true;
-        console.error('[10D][DL][ERR] Stream error:', err);
+        console.error('[10D][DL][ERR]', err);
         writer.close();
         reject(err);
       });
@@ -111,19 +130,19 @@ async function downloadRemoteFileToLocal(url, outPath) {
       });
     });
 
-    if (!fs.existsSync(outPath)) {
-      throw new Error('[10D][DL] File not written after download: ' + outPath);
+    if (!isValidFile(outPath, jobId)) {
+      throw new Error('[10D][DL] File not written or broken after download: ' + outPath);
     }
   } catch (err) {
-    console.error('[10D][DL][ERR] Download failed:', url, err);
+    console.error('[10D][DL][ERR]', url, err);
     throw err;
   }
 }
 
 // --- Make Ken Burns video from local image ---
-async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5) {
+async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
-  console.log(`[10D][KENBURNS] Creating pan video (${direction}) | ${imgPath} → ${outPath} (${duration}s)`);
+  console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}) | ${imgPath} → ${outPath} (${duration}s)`);
 
   if (!fs.existsSync(imgPath)) throw new Error('[10D][KENBURNS][ERR] Image does not exist: ' + imgPath);
 
@@ -133,18 +152,18 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5) {
     : `[0:v]scale=${width*1.4}:${height*1.4},crop=${width}:${height}:x='(iw-${width})-(iw-${width})*t/${duration}',setpts=PTS-STARTPTS[v]`;
 
   const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 "${outPath}"`;
-  console.log(`[10D][KENBURNS] Running FFmpeg: ${ffmpegCmd}`);
+  console.log(`[10D][KENBURNS][${jobId}] Running FFmpeg: ${ffmpegCmd}`);
 
   return new Promise((resolve, reject) => {
     exec(ffmpegCmd, (error, stdout, stderr) => {
       if (error) {
-        console.error('[10D][KENBURNS][ERR] FFmpeg error:', error, stderr);
+        console.error('[10D][KENBURNS][ERR]', error, stderr);
         return reject(error);
       }
-      if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 4096) {
+      if (!isValidFile(outPath, jobId)) {
         return reject(new Error('[10D][KENBURNS][ERR] Output video not created or too small'));
       }
-      console.log('[10D][KENBURNS] Ken Burns pan video created:', outPath);
+      console.log('[10D][KENBURNS][${jobId}] Ken Burns pan video created:', outPath);
       resolve(outPath);
     });
   });
@@ -180,12 +199,12 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
 
     const imgName = `kenburns-${uuidv4()}.jpg`;
     const imgPath = path.join(realTmpDir, imgName);
-    await downloadRemoteFileToLocal(imageUrl, imgPath);
+    await downloadRemoteFileToLocal(imageUrl, imgPath, jobId);
 
     const outVidName = `kenburns-${uuidv4()}.mp4`;
     const outVidPath = path.join(realTmpDir, outVidName);
 
-    await makeKenBurnsVideoFromImage(imgPath, outVidPath, 5);
+    await makeKenBurnsVideoFromImage(imgPath, outVidPath, 5, jobId);
 
     console.log(`[10D][FALLBACK][${jobId}] Ken Burns fallback video created: ${outVidPath}`);
     return outVidPath;

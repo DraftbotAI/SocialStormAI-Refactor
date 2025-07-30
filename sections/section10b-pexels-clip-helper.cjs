@@ -2,6 +2,7 @@
 // SECTION 10B: PEXELS CLIP HELPER
 // Finds and downloads best-matching video from Pexels API
 // MAX LOGGING EVERY STEP, Modular System Compatible
+// Parallel-safe: unique file output per job/scene
 // ===========================================================
 
 const axios = require('axios');
@@ -16,32 +17,55 @@ if (!PEXELS_API_KEY) {
   console.error('[10B][FATAL] Missing PEXELS_API_KEY in environment!');
 }
 
-// Utility: Defensive keyword cleaning for Pexels queries
+// --- Utility: Defensive keyword cleaning for Pexels queries ---
 function cleanQuery(str) {
   if (!str) return '';
   // Remove quotes, weird chars, and extra spaces
   return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
 }
 
-// --- Download video from Pexels to local file ---
-async function downloadPexelsVideoToLocal(url, outPath) {
+// --- File validation ---
+function isValidClip(path, jobId) {
   try {
-    console.log(`[10B][DL] Downloading Pexels video: ${url} -> ${outPath}`);
+    if (!fs.existsSync(path)) {
+      console.warn(`[10B][DL][${jobId}] File does not exist: ${path}`);
+      return false;
+    }
+    const size = fs.statSync(path).size;
+    if (size < 2048) {
+      console.warn(`[10B][DL][${jobId}] File too small or broken: ${path} (${size} bytes)`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(`[10B][DL][${jobId}] File validation error:`, err);
+    return false;
+  }
+}
+
+// --- Download video from Pexels to local file ---
+async function downloadPexelsVideoToLocal(url, outPath, jobId) {
+  try {
+    console.log(`[10B][DL][${jobId}] Downloading Pexels video: ${url} -> ${outPath}`);
     const response = await axios.get(url, { responseType: 'stream' });
     await new Promise((resolve, reject) => {
       const stream = response.data.pipe(fs.createWriteStream(outPath));
       stream.on('finish', () => {
-        console.log(`[10B][DL] Video saved to: ${outPath}`);
+        console.log(`[10B][DL][${jobId}] Video saved to: ${outPath}`);
         resolve();
       });
       stream.on('error', (err) => {
-        console.error('[10B][DL][ERR] Write error:', err);
+        console.error('[10B][DL][ERR]', err);
         reject(err);
       });
     });
+    if (!isValidClip(outPath, jobId)) {
+      console.warn(`[10B][DL][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+      return null;
+    }
     return outPath;
   } catch (err) {
-    console.error('[10B][DL][ERR] Failed to download Pexels video:', err);
+    console.error('[10B][DL][ERR]', err);
     return null;
   }
 }
@@ -102,9 +126,9 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
       console.log(`[10B][PEXELS][${jobId}] Top Pexels file scores:`, scores.slice(0, 3).map(s => ({ url: s.file.link, score: s.score })));
 
       if (best && best.link && bestScore >= 0) {
-        // Download to local
+        // Always unique per job/scene/clip
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
-        return await downloadPexelsVideoToLocal(best.link, outPath);
+        return await downloadPexelsVideoToLocal(best.link, outPath, jobId);
       }
     }
     console.log(`[10B][PEXELS][${jobId}] No video match found for "${subject}"`);
