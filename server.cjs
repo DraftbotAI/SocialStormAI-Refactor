@@ -3,30 +3,52 @@ console.log('\n========== [BOOT] SocialStormAI Modular Backend ==========');
 
 // === Section 1: Setup (returns app, helpers, shared state) ===
 const section1 = require('./sections/section1-setup.cjs');
-const { app, progress, express, ...helpers } = section1;
+const { app, progress, express } = section1;
+console.log('[SERVER][INFO] Section 1 loaded (app, progress, express ready)');
 
 // === Section 2: Basic routes & static serving ===
-require('./sections/section2-basic-routes.cjs').registerBasicRoutes(app, progress);
+console.log('[SERVER][INFO] Loading Section 2 (Basic Routes)...');
+const registerBasicRoutes = require('./sections/section2-basic-routes.cjs');
+registerBasicRoutes(app, express, progress);
 
 // === Section 3: Voices API ===
-require('./sections/section3-voices-endpoint.cjs').registerVoicesEndpoint(app);
+console.log('[SERVER][INFO] Loading Section 3 (Voices API)...');
+const registerVoicesEndpoint = require('./sections/section3-voices-endpoint.cjs');
+registerVoicesEndpoint(app, section1);
 
 // === Section 4: Script generator ===
-require('./sections/section4-generate-script-endpoint.cjs').registerGenerateScriptEndpoint(app, helpers.openai);
+console.log('[SERVER][INFO] Loading Section 4 (Script Generator)...');
+const registerGenerateScriptEndpoint = require('./sections/section4-generate-script-endpoint.cjs');
+registerGenerateScriptEndpoint(app, section1.openai);
 
 // === Section 5: Video generator ===
-require('./sections/section5-generate-video-endpoint.cjs').registerGenerateVideoEndpoint(app, {
-    ...helpers, progress, voices: helpers.voices, POLLY_VOICE_IDS: helpers.POLLY_VOICE_IDS
+console.log('[SERVER][INFO] Loading Section 5 (Video Generator)...');
+const registerGenerateVideoEndpoint = require('./sections/section5-generate-video-endpoint.cjs');
+registerGenerateVideoEndpoint(app, {
+    ...section1,
+    progress,
+    voices: section1.voices,               // If present in section1
+    POLLY_VOICE_IDS: section1.POLLY_VOICE_IDS // If present in section1
 });
 
 // === Section 6: Thumbnails ===
-require('./sections/section6-generate-thumbnails-endpoint.cjs').registerThumbnailEndpoint(app);
+console.log('[SERVER][INFO] Loading Section 6 (Thumbnail Generator)...');
+const registerThumbnailEndpoint = require('./sections/section6-generate-thumbnails-endpoint.cjs');
+registerThumbnailEndpoint(app, section1);
 
 // === Section 7: Video streaming ===
-require('./sections/section7-video-stream-endpoint.cjs').registerVideoStreamEndpoint(app);
+console.log('[SERVER][INFO] Loading Section 7 (Video Streaming)...');
+const registerVideoStreamEndpoint = require('./sections/section7-video-stream-endpoint.cjs');
+registerVideoStreamEndpoint(app, section1);
 
 // === Section 8: Contact form ===
-require('./sections/section8-contact-endpoint.cjs').registerContactEndpoint(app);
+console.log('[SERVER][INFO] Loading Section 8 (Contact Endpoint)...');
+const registerContactEndpoint = require('./sections/section8-contact-endpoint.cjs');
+registerContactEndpoint(app, section1);
 
 // === Section 9: 404 and server start ===
-require('./sections/section9-error-handling-and-server-start.cjs').registerErrorHandlerAndStart(app);
+console.log('[SERVER][INFO] Loading Section 9 (404 and Server Start)...');
+const registerErrorHandlerAndStart = require('./sections/section9-error-handling-and-server-start.cjs');
+registerErrorHandlerAndStart(app);
+
+console.log('[SERVER][COMPLETE] All sections loaded. Server boot complete.');

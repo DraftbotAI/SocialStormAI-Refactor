@@ -9,37 +9,52 @@
 // Dependencies expected from Section 1:
 const path = require('path');
 
-// Accepts 'app', 'express', and 'progress' as parameters from Section 1
+console.log('[SECTION2][INIT] section2-basic-routes.cjs loaded');
+
 function registerBasicRoutes(app, express, progress) {
-  console.log('[SECTION2][INFO] Setting up static file routes...');
+  console.log('[SECTION2][START] Registering static file routes and endpoints...');
 
-  const PUBLIC_DIR = path.join(__dirname, '..', 'public');
-  app.use(express.static(PUBLIC_DIR));
-  console.log('[SECTION2][INFO] Static file directory mounted:', PUBLIC_DIR);
+  try {
+    const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+    app.use(express.static(PUBLIC_DIR));
+    console.log('[SECTION2][INFO] Static file directory mounted:', PUBLIC_DIR);
 
-  app.get('/', (req, res) => {
-    console.log('[SECTION2][REQ] GET /');
-    res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
-  });
+    // Home page
+    app.get('/', (req, res) => {
+      console.log('[SECTION2][REQ] GET /');
+      res.sendFile(path.join(PUBLIC_DIR, 'index.html'), err => {
+        if (err) {
+          console.error('[SECTION2][ERR] Failed to send index.html:', err);
+          res.status(500).send('Error loading homepage.');
+        }
+      });
+    });
 
-  app.get('/api/status', (req, res) => {
-    console.log('[SECTION2][REQ] GET /api/status');
-    res.json({ status: 'OK', timestamp: new Date().toISOString() });
-  });
+    // Status endpoint
+    app.get('/api/status', (req, res) => {
+      console.log('[SECTION2][REQ] GET /api/status');
+      res.json({ status: 'OK', timestamp: new Date().toISOString() });
+    });
 
-  app.get('/api/progress/:jobId', (req, res) => {
-    const { jobId } = req.params;
-    console.log(`[SECTION2][REQ] GET /api/progress/${jobId}`);
-    if (progress && progress[jobId]) {
-      console.log(`[SECTION2][INFO] Returning progress for job ${jobId}:`, progress[jobId]);
-      res.json(progress[jobId]);
-    } else {
-      console.warn(`[SECTION2][WARN] No progress found for job ${jobId}`);
-      res.json({ percent: 100, status: 'Done (or not found)' });
-    }
-  });
+    // Progress endpoint
+    app.get('/api/progress/:jobId', (req, res) => {
+      const { jobId } = req.params;
+      console.log(`[SECTION2][REQ] GET /api/progress/${jobId}`);
+      if (progress && progress[jobId]) {
+        console.log(`[SECTION2][INFO] Returning progress for job ${jobId}:`, progress[jobId]);
+        res.json(progress[jobId]);
+      } else {
+        console.warn(`[SECTION2][WARN] No progress found for job ${jobId}`);
+        res.json({ percent: 100, status: 'Done (or not found)' });
+      }
+    });
 
-  console.log('[SECTION2][INFO] All basic routes registered.');
+    console.log('[SECTION2][SUCCESS] All basic routes registered.');
+  } catch (err) {
+    console.error('[SECTION2][FATAL] Error registering basic routes:', err);
+    throw err; // Bubble up so init fails visibly
+  }
 }
 
+console.log('[SECTION2][EXPORT] registerBasicRoutes exported');
 module.exports = registerBasicRoutes;

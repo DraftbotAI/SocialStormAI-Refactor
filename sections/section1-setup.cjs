@@ -8,8 +8,8 @@
    =========================================================== */
 
 console.log('\n========== [BOOTING SERVER] ==========');
-console.log('[INFO] Booting SocialStormAI backend (Section 1: setup)...');
-console.log('[INFO] Loading dependencies...');
+console.log('[SECTION1][INIT] Booting SocialStormAI backend (Section 1: setup)...');
+console.log('[SECTION1][INFO] Loading dependencies...');
 
 require('dotenv').config();
 const express = require('express');
@@ -23,7 +23,7 @@ const { v4: uuidv4 } = require('uuid');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = process.env.FFMPEG_PATH || require('ffmpeg-static');
 ffmpeg.setFfmpegPath(ffmpegPath);
-console.log('[INFO] FFmpeg path set to:', ffmpegPath);
+console.log('[SECTION1][INFO] FFmpeg path set to:', ffmpegPath);
 
 const { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand } = require("@aws-sdk/client-s3");
 const AWS = require('aws-sdk');
@@ -36,9 +36,9 @@ try {
   openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
   });
-  console.log('[INFO] OpenAI client initialized.');
+  console.log('[SECTION1][INFO] OpenAI client initialized.');
 } catch (err) {
-  console.error('[FATAL] OpenAI client setup failed:', err);
+  console.error('[SECTION1][FATAL] OpenAI client setup failed:', err);
   process.exit(1);
 }
 
@@ -57,13 +57,13 @@ const s3Client = new S3Client({
     secretAccessKey: R2_SECRET_ACCESS_KEY,
   },
 });
-console.log('[INFO] Cloudflare R2 S3Client initialized.');
-console.log('[INFO] R2_LIBRARY_BUCKET:', R2_LIBRARY_BUCKET);
-console.log('[INFO] R2_VIDEOS_BUCKET:', R2_VIDEOS_BUCKET);
-console.log('[INFO] R2_ENDPOINT:', R2_ENDPOINT);
+console.log('[SECTION1][INFO] Cloudflare R2 S3Client initialized.');
+console.log('[SECTION1][INFO] R2_LIBRARY_BUCKET:', R2_LIBRARY_BUCKET);
+console.log('[SECTION1][INFO] R2_VIDEOS_BUCKET:', R2_VIDEOS_BUCKET);
+console.log('[SECTION1][INFO] R2_ENDPOINT:', R2_ENDPOINT);
 
-const JOBS_DIR = path.join(__dirname, '..', 'jobs'); // fixed for /sections directory
-console.log('[INFO] Dependencies loaded.');
+const JOBS_DIR = path.join(__dirname, '..', 'jobs');
+console.log('[SECTION1][INFO] Dependencies loaded.');
 
 // === ENVIRONMENT VALIDATION ===
 const requiredEnvVars = [
@@ -79,17 +79,17 @@ const requiredEnvVars = [
 ];
 const missingEnv = requiredEnvVars.filter(key => !process.env[key]);
 if (missingEnv.length > 0) {
-  console.error('[FATAL] Missing environment variables:', missingEnv);
+  console.error('[SECTION1][FATAL] Missing environment variables:', missingEnv);
   process.exit(1);
 }
-console.log('[INFO] All required environment variables are present.');
+console.log('[SECTION1][INFO] All required environment variables are present.');
 
 AWS.config.update({
   accessKeyId: process.env.AWS_ACCESS_KEY_ID,
   secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   region: process.env.AWS_REGION || 'us-east-1'
 });
-console.log('[INFO] AWS SDK configured for Polly, region:', process.env.AWS_REGION);
+console.log('[SECTION1][INFO] AWS SDK configured for Polly, region:', process.env.AWS_REGION);
 
 // Express App — exported for main entry if needed
 const app = express();
@@ -99,11 +99,7 @@ app.use(express.json({ limit: '12mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 const progress = {};
-console.log('[INFO] Progress tracker initialized.');
-
-// === LOAD HELPERS ONLY IF NEEDED (recommended to import helpers per-section) ===
-// const { splitScriptToScenes, findClipForScene, downloadRemoteFileToLocal } = require('./pexels-helper.cjs');
-// console.log('[INFO] Helper functions loaded.');
+console.log('[SECTION1][INFO] Progress tracker initialized.');
 
 // ===================== UTILITY FUNCTIONS =====================
 
@@ -112,17 +108,17 @@ console.log('[INFO] Progress tracker initialized.');
 // Get audio duration in seconds using ffprobe
 const getAudioDuration = (audioPath) => {
   return new Promise((resolve, reject) => {
-    console.log(`[HELPER] [getAudioDuration] Called with: ${audioPath}`);
+    console.log(`[SECTION1][HELPER][getAudioDuration] Called with: ${audioPath}`);
     ffmpeg.ffprobe(audioPath, (err, metadata) => {
       if (err) {
-        console.error(`[HELPER] [getAudioDuration] ffprobe error for ${audioPath}:`, err);
+        console.error(`[SECTION1][HELPER][getAudioDuration] ffprobe error for ${audioPath}:`, err);
         return reject(err);
       }
       if (!metadata || !metadata.format || typeof metadata.format.duration !== 'number') {
-        console.error(`[HELPER] [getAudioDuration] Invalid metadata for ${audioPath}:`, metadata);
+        console.error(`[SECTION1][HELPER][getAudioDuration] Invalid metadata for ${audioPath}:`, metadata);
         return reject(new Error('Invalid ffprobe metadata'));
       }
-      console.log(`[HELPER] [getAudioDuration] Success. Duration: ${metadata.format.duration}s`);
+      console.log(`[SECTION1][HELPER][getAudioDuration] Success. Duration: ${metadata.format.duration}s`);
       resolve(metadata.format.duration);
     });
   });
@@ -131,18 +127,18 @@ const getAudioDuration = (audioPath) => {
 // Trim video to duration
 const trimVideo = (inPath, outPath, duration, seek = 0) => {
   return new Promise((resolve, reject) => {
-    console.log(`[HELPER] [trimVideo] Trimming ${inPath} to ${duration}s, outPath: ${outPath}, seek: ${seek}`);
+    console.log(`[SECTION1][HELPER][trimVideo] Trimming ${inPath} to ${duration}s, outPath: ${outPath}, seek: ${seek}`);
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     ffmpeg(inPath)
       .setStartTime(seek)
       .setDuration(duration)
       .output(outPath)
       .on('end', () => {
-        console.log(`[HELPER] [trimVideo] Trim complete: ${outPath}`);
+        console.log(`[SECTION1][HELPER][trimVideo] Trim complete: ${outPath}`);
         resolve();
       })
       .on('error', (err) => {
-        console.error(`[HELPER] [trimVideo] Error:`, err);
+        console.error(`[SECTION1][HELPER][trimVideo] Error:`, err);
         reject(err);
       })
       .run();
@@ -152,7 +148,7 @@ const trimVideo = (inPath, outPath, duration, seek = 0) => {
 // Normalize to 9x16, blurred background
 const normalizeTo9x16Blurred = (inPath, outPath, width, height) => {
   return new Promise((resolve, reject) => {
-    console.log(`[HELPER] [normalizeTo9x16Blurred] Normalizing ${inPath} to ${width}x${height}, output: ${outPath}`);
+    console.log(`[SECTION1][HELPER][normalizeTo9x16Blurred] Normalizing ${inPath} to ${width}x${height}, output: ${outPath}`);
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     ffmpeg(inPath)
       .complexFilter([
@@ -163,11 +159,11 @@ const normalizeTo9x16Blurred = (inPath, outPath, width, height) => {
       .outputOptions(['-c:a copy'])
       .output(outPath)
       .on('end', () => {
-        console.log(`[HELPER] [normalizeTo9x16Blurred] Success: ${outPath}`);
+        console.log(`[SECTION1][HELPER][normalizeTo9x16Blurred] Success: ${outPath}`);
         resolve();
       })
       .on('error', (err) => {
-        console.error(`[HELPER] [normalizeTo9x16Blurred] Error:`, err);
+        console.error(`[SECTION1][HELPER][normalizeTo9x16Blurred] Error:`, err);
         reject(err);
       })
       .run();
@@ -177,7 +173,7 @@ const normalizeTo9x16Blurred = (inPath, outPath, width, height) => {
 // Add silent audio track if needed
 const addSilentAudioTrack = (inPath, outPath, duration) => {
   return new Promise((resolve, reject) => {
-    console.log(`[HELPER] [addSilentAudioTrack] Adding silent audio to ${inPath} (duration: ${duration}s) -> ${outPath}`);
+    console.log(`[SECTION1][HELPER][addSilentAudioTrack] Adding silent audio to ${inPath} (duration: ${duration}s) -> ${outPath}`);
     ffmpeg()
       .input(inPath)
       .input('anullsrc=channel_layout=stereo:sample_rate=44100')
@@ -185,11 +181,11 @@ const addSilentAudioTrack = (inPath, outPath, duration) => {
       .outputOptions(['-shortest', '-c:v copy', '-c:a aac', '-y'])
       .save(outPath)
       .on('end', () => {
-        console.log(`[HELPER] [addSilentAudioTrack] Success: ${outPath}`);
+        console.log(`[SECTION1][HELPER][addSilentAudioTrack] Success: ${outPath}`);
         resolve();
       })
       .on('error', (err) => {
-        console.error(`[HELPER] [addSilentAudioTrack] Error:`, err);
+        console.error(`[SECTION1][HELPER][addSilentAudioTrack] Error:`, err);
         reject(err);
       });
   });
@@ -198,7 +194,7 @@ const addSilentAudioTrack = (inPath, outPath, duration) => {
 // Mux video with narration audio
 const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
   return new Promise((resolve, reject) => {
-    console.log(`[HELPER] [muxVideoWithNarration] Combining video ${videoPath} + audio ${audioPath} → ${outPath} (duration: ${duration}s)`);
+    console.log(`[SECTION1][HELPER][muxVideoWithNarration] Combining video ${videoPath} + audio ${audioPath} → ${outPath} (duration: ${duration}s)`);
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     ffmpeg()
       .input(videoPath)
@@ -206,11 +202,11 @@ const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
       .outputOptions(['-c:v copy', '-c:a aac', '-shortest', '-y'])
       .save(outPath)
       .on('end', () => {
-        console.log(`[HELPER] [muxVideoWithNarration] Success: ${outPath}`);
+        console.log(`[SECTION1][HELPER][muxVideoWithNarration] Success: ${outPath}`);
         resolve();
       })
       .on('error', (err) => {
-        console.error(`[HELPER] [muxVideoWithNarration] Error:`, err);
+        console.error(`[SECTION1][HELPER][muxVideoWithNarration] Error:`, err);
         reject(err);
       });
   });
@@ -219,7 +215,7 @@ const muxVideoWithNarration = (videoPath, audioPath, outPath, duration) => {
 // Standardize video to match reference info
 const standardizeVideo = (inputPath, outPath, refInfo) => {
   return new Promise((resolve, reject) => {
-    console.log(`[HELPER] [standardizeVideo] Standardizing ${inputPath} to match reference:`, refInfo);
+    console.log(`[SECTION1][HELPER][standardizeVideo] Standardizing ${inputPath} to match reference:`, refInfo);
     const args = [
       '-vf', `scale=${refInfo.width}:${refInfo.height},format=${refInfo.pix_fmt}`,
       '-c:v', 'libx264',
@@ -231,11 +227,11 @@ const standardizeVideo = (inputPath, outPath, refInfo) => {
       .outputOptions(args)
       .save(outPath)
       .on('end', () => {
-        console.log(`[HELPER] [standardizeVideo] Success: ${outPath}`);
+        console.log(`[SECTION1][HELPER][standardizeVideo] Success: ${outPath}`);
         resolve();
       })
       .on('error', (err) => {
-        console.error(`[HELPER] [standardizeVideo] Error:`, err);
+        console.error(`[SECTION1][HELPER][standardizeVideo] Error:`, err);
         reject(err);
       });
   });
@@ -244,13 +240,13 @@ const standardizeVideo = (inputPath, outPath, refInfo) => {
 // Get info about a video
 const getVideoInfo = (filePath) => {
   return new Promise((resolve, reject) => {
-    console.log(`[HELPER] [getVideoInfo] Getting info for: ${filePath}`);
+    console.log(`[SECTION1][HELPER][getVideoInfo] Getting info for: ${filePath}`);
     ffmpeg.ffprobe(filePath, (err, metadata) => {
       if (err) {
-        console.error(`[HELPER] [getVideoInfo] ffprobe error:`, err);
+        console.error(`[SECTION1][HELPER][getVideoInfo] ffprobe error:`, err);
         return reject(err);
       }
-      console.log(`[HELPER] [getVideoInfo] Info for ${filePath}:`, JSON.stringify(metadata));
+      console.log(`[SECTION1][HELPER][getVideoInfo] Info for ${filePath}:`, JSON.stringify(metadata));
       resolve(metadata);
     });
   });
@@ -258,31 +254,32 @@ const getVideoInfo = (filePath) => {
 
 // Pick music by mood (stub)
 const pickMusicForMood = (mood) => {
-  console.log(`[HELPER] [pickMusicForMood] Picking music for mood: ${mood}`);
+  console.log(`[SECTION1][HELPER][pickMusicForMood] Picking music for mood: ${mood}`);
   return null; // Implement as needed
 };
 
 // SAFE CLEANUP FUNCTION
 function cleanupJob(jobId) {
   try {
-    console.log(`[CLEANUP] Starting cleanup for job: ${jobId}`);
+    console.log(`[SECTION1][CLEANUP] Starting cleanup for job: ${jobId}`);
     if (progress[jobId]) {
       delete progress[jobId];
-      console.log(`[CLEANUP] Progress entry deleted for job: ${jobId}`);
+      console.log(`[SECTION1][CLEANUP] Progress entry deleted for job: ${jobId}`);
     }
     const jobDir = path.join(__dirname, '..', 'renders', jobId);
     if (fs.existsSync(jobDir)) {
       fsExtra.removeSync(jobDir);
-      console.log(`[CLEANUP] Removed temp folder: ${jobDir}`);
+      console.log(`[SECTION1][CLEANUP] Removed temp folder: ${jobDir}`);
     }
   } catch (err) {
-    console.warn(`[WARN] Cleanup failed for job ${jobId}:`, err);
+    console.warn(`[SECTION1][WARN] Cleanup failed for job ${jobId}:`, err);
   }
 }
 
-console.log('[INFO] Section 1 complete – all dependencies, helpers, and logging functions loaded.');
+console.log('[SECTION1][COMPLETE] All dependencies, helpers, and logging functions loaded.');
 
 // ===================== EXPORTS =====================
+console.log('[SECTION1][EXPORT] Exporting all Section 1 helpers, configs, and shared state.');
 
 module.exports = {
   express,
