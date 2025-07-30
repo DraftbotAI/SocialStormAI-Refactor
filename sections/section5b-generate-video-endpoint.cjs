@@ -8,7 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const ffmpeg = require('fluent-ffmpeg');
 
-// Import helpers directly
+// Import concat/music helpers (mux logic lives here)
 const {
   concatScenes,
   ensureAudioStream,
@@ -29,13 +29,27 @@ function registerGenerateVideoEndpoint(app, deps) {
     throw new Error('[5B][FATAL] No dependencies passed in!');
   }
 
-  // Destructure all helpers and state from deps for clarity and MAX logging
+  // Destructure helpers/state from deps for clarity + MAX logging
   const {
-    splitScriptToScenes, findClipForScene, generateSceneAudio,
+    splitScriptToScenes,           // scene splitting helper
+    findClipForScene,              // clip matcher orchestrator (5d)
+    generateSceneAudio,            // narration audio (from 5e, injected in server)
     getAudioDuration, getVideoInfo, standardizeVideo, pickMusicForMood, cleanupJob,
     progress, voices, POLLY_VOICE_IDS
-    // Add any other helpers you use!
   } = deps;
+
+  if (typeof findClipForScene !== "function") {
+    console.error('[5B][FATAL] findClipForScene not provided or not a function!');
+    throw new Error('[5B][FATAL] findClipForScene missing from deps!');
+  }
+  if (typeof generateSceneAudio !== "function") {
+    console.error('[5B][FATAL] generateSceneAudio not provided or not a function!');
+    throw new Error('[5B][FATAL] generateSceneAudio missing from deps!');
+  }
+  if (typeof splitScriptToScenes !== "function") {
+    console.error('[5B][FATAL] splitScriptToScenes not provided or not a function!');
+    throw new Error('[5B][FATAL] splitScriptToScenes missing from deps!');
+  }
 
   console.log('[5B][INFO] Registering POST /api/generate-video route...');
 
@@ -65,6 +79,7 @@ function registerGenerateVideoEndpoint(app, deps) {
 
         const scenes = splitScriptToScenes(script);
         console.log(`[5B][SCENES] Split into ${scenes.length} scenes.`);
+        if (!Array.isArray(scenes) || scenes.length === 0) throw new Error('[5B][ERR] No scenes parsed from script.');
 
         // === 2. Find/generate video clip for each scene ===
         const sceneFiles = [];
@@ -73,7 +88,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 5 + i * 5, status: `Finding clip for scene ${i + 1}` };
           console.log(`[5B][SCENE] Scene ${i + 1}: "${scene}"`);
 
-          // Use the findClipForScene helper from deps
+          // Use modular findClipForScene from deps (pass subject, idx, all scenes, main topic)
           const clipPath = await findClipForScene(scene, i, scenes, scenes[0]);
           if (!clipPath) {
             throw new Error(`[5B][ERR] No clip found for scene ${i + 1}`);
@@ -81,7 +96,11 @@ function registerGenerateVideoEndpoint(app, deps) {
           console.log(`[5B][CLIP] Scene ${i + 1}: Clip selected: ${clipPath}`);
 
           // === Generate narration audio ===
+          // Use modular generateSceneAudio (sceneText, voiceId, workDir, sceneIdx, jobId)
           const audioPath = await generateSceneAudio(scene, voice, workDir, i, jobId);
+          if (!audioPath || typeof audioPath !== 'string' || !fs.existsSync(audioPath)) {
+            throw new Error(`[5B][ERR] No audio generated for scene ${i + 1}`);
+          }
           console.log(`[5B][AUDIO] Scene ${i + 1}: Audio generated: ${audioPath}`);
 
           // === Mux (combine) video and audio for the scene ===
