@@ -3,10 +3,11 @@ console.log('\n========== [BOOT] SocialStormAI Modular Backend ==========');
 
 // === Section 1: Setup (returns app, helpers, shared state) ===
 const section1 = require('./sections/section1-setup.cjs');
-const { app, progress, ...helpers } = section1;
+const { app, progress, express, ...helpers } = section1;
 
 // === Section 2: Basic routes & static serving ===
-require('./sections/section2-basic-routes.cjs').registerBasicRoutes(app, progress);
+const registerBasicRoutes = require('./sections/section2-basic-routes.cjs');
+registerBasicRoutes(app, express, progress);
 
 // === Section 3: Voices API ===
 require('./sections/section3-voices-endpoint.cjs').registerVoicesEndpoint(app);

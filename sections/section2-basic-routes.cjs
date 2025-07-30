@@ -2,18 +2,15 @@
    SECTION 2: BASIC ROUTES & STATIC FILE SERVING (Modular)
    -----------------------------------------------------------
    - Static file middleware, home page, status and progress endpoints
-   - Assumes app, path, progress from Section 1
+   - Assumes app, express, progress from Section 1
    - MAX logging everywhere
    =========================================================== */
 
 // Dependencies expected from Section 1:
 const path = require('path');
 
-// You must inject 'app', 'progress' from Section 1 setup
-// Example import and usage:
-// const { app, progress } = require('./section1-setup.cjs');
-
-function registerBasicRoutes(app, progress) {
+// Accepts 'app', 'express', and 'progress' as parameters from Section 1
+function registerBasicRoutes(app, express, progress) {
   console.log('[SECTION2][INFO] Setting up static file routes...');
 
   const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -33,7 +30,7 @@ function registerBasicRoutes(app, progress) {
   app.get('/api/progress/:jobId', (req, res) => {
     const { jobId } = req.params;
     console.log(`[SECTION2][REQ] GET /api/progress/${jobId}`);
-    if (progress[jobId]) {
+    if (progress && progress[jobId]) {
       console.log(`[SECTION2][INFO] Returning progress for job ${jobId}:`, progress[jobId]);
       res.json(progress[jobId]);
     } else {
@@ -45,4 +42,4 @@ function registerBasicRoutes(app, progress) {
   console.log('[SECTION2][INFO] All basic routes registered.');
 }
 
-module.exports = { registerBasicRoutes };
+module.exports = registerBasicRoutes;
