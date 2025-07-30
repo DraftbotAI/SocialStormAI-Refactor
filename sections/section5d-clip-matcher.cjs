@@ -60,7 +60,9 @@ async function findClipForScene({
 
   // 1. Try R2 first
   try {
-    const r2Path = await findR2ClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
+    const r2Path = await findR2ClipForScene(
+      searchSubject, workDir, sceneIdx, jobId, usedClips
+    );
     if (r2Path && !usedClips.includes(r2Path)) {
       console.log(`[5D][R2][${jobId}] Matched: ${r2Path}`);
       return r2Path;
@@ -75,7 +77,9 @@ async function findClipForScene({
 
   // 2. Try Pexels
   try {
-    const pexelsPath = await findPexelsClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
+    const pexelsPath = await findPexelsClipForScene(
+      searchSubject, workDir, sceneIdx, jobId, usedClips
+    );
     if (pexelsPath && !usedClips.includes(pexelsPath)) {
       console.log(`[5D][PEXELS][${jobId}] Matched: ${pexelsPath}`);
       return pexelsPath;
@@ -90,7 +94,9 @@ async function findClipForScene({
 
   // 3. Try Pixabay
   try {
-    const pixabayPath = await findPixabayClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
+    const pixabayPath = await findPixabayClipForScene(
+      searchSubject, workDir, sceneIdx, jobId, usedClips
+    );
     if (pixabayPath && !usedClips.includes(pixabayPath)) {
       console.log(`[5D][PIXABAY][${jobId}] Matched: ${pixabayPath}`);
       return pixabayPath;
@@ -105,7 +111,9 @@ async function findClipForScene({
 
   // 4. Fallback: Ken Burns pan video from image
   try {
-    const kenBurnsPath = await fallbackKenBurnsVideo(searchSubject, workDir, sceneIdx, jobId, usedClips);
+    const kenBurnsPath = await fallbackKenBurnsVideo(
+      searchSubject, workDir, sceneIdx, jobId, usedClips
+    );
     if (kenBurnsPath && !usedClips.includes(kenBurnsPath)) {
       console.log(`[5D][KENBURNS][${jobId}] Fallback image video created: ${kenBurnsPath}`);
       return kenBurnsPath;

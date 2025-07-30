@@ -146,13 +146,16 @@ function registerGenerateVideoEndpoint(app, deps) {
           console.log(`[5B][MATCH] [${jobId}] Scene ${i + 1}: Subject for matching: "${subject}"`);
           let clipPath = null;
           try {
+            // --- THIS IS THE CRITICAL UPDATE: Pass workDir and jobId! ---
             clipPath = await findClipForScene({
               subject,
               sceneIdx: i,
               allSceneTexts: scenes.flatMap(s => s.texts),
               mainTopic,
               isMegaScene,
-              usedClips
+              usedClips,
+              workDir,   // must now always pass workDir
+              jobId      // must now always pass jobId
             });
           } catch (e) {
             console.error(`[5B][CLIP][ERR] [${jobId}] findClipForScene failed for scene ${i + 1}:`, e);

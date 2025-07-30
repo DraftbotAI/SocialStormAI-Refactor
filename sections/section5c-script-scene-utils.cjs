@@ -3,6 +3,7 @@
 // Splits script into scenes, handles scene structure, utilities.
 // MAX LOGGING AT EVERY STEP
 // Enhanced: Scene 1+2 "mega-scene" grouping for continuous video
+// Bulletproof: Always returns array of scene objects, never strings
 // ===========================================================
 
 const uuid = require('uuid'); // For scene IDs
@@ -20,21 +21,25 @@ console.log('[5C][INIT] Script & scene utilities loaded.');
  */
 function splitScriptToScenes(script) {
   console.log('[5C][SPLIT] splitScriptToScenes called.');
+
   if (!script || typeof script !== 'string') {
     console.error('[5C][ERR] No script provided or script not a string.');
     return [];
   }
 
-  // Try splitting by \n, fallback to splitting by period if only one line
+  // Step 1: Try splitting by newlines.
   let lines = script.split('\n').map(line => line.trim()).filter(line => !!line);
 
-  // If it looks like a single giant line, try splitting by sentence
+  // Step 2: If only 0 or 1 line, fallback to sentence split.
   if (lines.length < 2) {
     lines = script.split(/[.?!]\s+/).map(s => s.trim()).filter(Boolean);
     console.log(`[5C][SPLIT] Fallback: Split by sentence, got ${lines.length} lines.`);
   } else {
     console.log(`[5C][SPLIT] Script split into ${lines.length} non-empty lines.`);
   }
+
+  // Step 3: Remove any empty lines again just to be sure.
+  lines = lines.filter(Boolean);
 
   const scenes = [];
 
@@ -76,27 +81,25 @@ function splitScriptToScenes(script) {
     console.warn('[5C][SPLIT] No scenes found in script!');
   }
 
-  // Defensive: Fix/convert any accidental string scene into object (should not happen now)
+  // Defensive: Bulletproof—make sure each scene is a proper object
   const finalScenes = scenes.map((scene, idx) => {
-    if (typeof scene === 'string') {
-      console.error(`[5C][FIX][BUG] Scene at ${idx} was a string! Auto-wrapping.`);
+    if (!scene || typeof scene !== 'object') {
+      console.error(`[5C][DEFENSE][BUG] Scene at idx ${idx} is not an object! Wrapping as fallback.`);
       return {
         id: `scene${idx + 1}-fixwrap-${uuid.v4()}`,
-        texts: [scene],
+        texts: [typeof scene === 'string' ? scene : String(scene)],
         isMegaScene: false,
         type: 'auto-wrap',
         origIndices: [idx]
       };
     }
-    // Always ensure texts is an array
-    if (!Array.isArray(scene.texts)) {
-      console.error(`[5C][FIX][BUG] Scene at ${idx} missing .texts! Wrapping.`);
-      return {
-        ...scene,
-        texts: [String(scene.texts || '')],
-      };
+    // Defensive: ensure .texts is always an array of strings (never empty or null)
+    let safeTexts = Array.isArray(scene.texts) ? scene.texts.map(t => String(t || '')) : [String(scene.texts || '')];
+    if (!safeTexts.length || !safeTexts[0]) {
+      safeTexts = [''];
+      console.warn(`[5C][DEFENSE][BUG] Scene ${scene.id || idx} had empty texts array. Setting to [''].`);
     }
-    return scene;
+    return { ...scene, texts: safeTexts };
   });
 
   console.log(`[5C][SPLIT] Total scenes generated (mega + singles): ${finalScenes.length}`);
