@@ -343,10 +343,27 @@ const getVideoInfo = (filePath) => {
   });
 };
 
-const pickMusicForMood = (mood) => {
-  console.log(`[SECTION1][HELPER][pickMusicForMood] Picking music for mood: ${mood}`);
-  return null; // Implement as needed
-};
+// =================== PICK MUSIC FOR MOOD (DEFAULT HARDCODED) ===================
+/**
+ * Always returns first .mp3 file from 'upbeat_energetic_pop' for now.
+ * To make it mood-aware later, just switch the subfolder based on input.
+ */
+function pickMusicForMood(scriptOrMood, workDir) {
+  const musicDir = path.resolve(__dirname, '..', 'public', 'assets', 'music_library', 'upbeat_energetic_pop');
+  try {
+    const files = fs.readdirSync(musicDir).filter(f => f.endsWith('.mp3'));
+    if (files.length > 0) {
+      const chosen = path.join(musicDir, files[0]);
+      console.log('[SECTION1][pickMusicForMood][DEFAULT] Using:', chosen);
+      return chosen;
+    }
+    console.warn('[SECTION1][pickMusicForMood][WARN] No .mp3 files found in upbeat_energetic_pop!');
+    return null;
+  } catch (err) {
+    console.error('[SECTION1][pickMusicForMood][ERR] Failed to read music folder:', err);
+    return null;
+  }
+}
 
 function cleanupJob(jobId) {
   try {
@@ -365,7 +382,7 @@ function cleanupJob(jobId) {
   }
 }
 
-// === SPLIT SCRIPT TO SCENES FUNCTION (TEMP, FOR BOOTSTRAP ONLY) ===
+// === SPLIT SCRIPT TO SCENES FUNCTION ===
 function splitScriptToScenes(script) {
   console.log(`[SECTION1][HELPER][splitScriptToScenes] Splitting script into scenes, length: ${script ? script.length : 0}`);
   if (!script || typeof script !== 'string') {
