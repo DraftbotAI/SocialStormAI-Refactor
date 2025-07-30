@@ -10,6 +10,7 @@
 console.log('\n========== [SECTION 9] Error Handling & Server Start ==========');
 
 function registerErrorHandlerAndStart(app) {
+  console.log('[SECTION9][INIT] registerErrorHandlerAndStart called');
   if (!app) throw new Error('[SECTION9][FATAL] No app instance provided!');
 
   // 404 Catch-all (must go last)
@@ -20,10 +21,11 @@ function registerErrorHandlerAndStart(app) {
 
   const PORT = process.env.PORT || 8080;
   app.listen(PORT, () => {
-    console.log(`🟢 [SECTION9] SocialStormAI backend running on port ${PORT}`);
+    console.log(`🟢 [SECTION9][START] SocialStormAI backend running on port ${PORT}`);
   });
 
   console.log('[SECTION9][INFO] Error handler and server start registered.');
 }
 
-module.exports = { registerErrorHandlerAndStart };
+console.log('[SECTION9][EXPORT] registerErrorHandlerAndStart exported');
+module.exports = registerErrorHandlerAndStart;
