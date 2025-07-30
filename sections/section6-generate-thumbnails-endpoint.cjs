@@ -71,6 +71,7 @@ async function generateSingleThumbnail({ caption, topic, templateIndex = 0 }) {
 
 // === Main registration function ===
 function registerThumbnailEndpoint(app) {
+  console.log('[SECTION6][INIT] registerThumbnailEndpoint called');
   if (!app) throw new Error('[SECTION6][FATAL] No app instance provided!');
 
   app.post('/api/generate-thumbnails', async (req, res) => {
@@ -111,4 +112,5 @@ function registerThumbnailEndpoint(app) {
   console.log('[SECTION6][INFO] /api/generate-thumbnails endpoint registered.');
 }
 
-module.exports = { registerThumbnailEndpoint, generateSingleThumbnail };
+console.log('[SECTION6][EXPORT] registerThumbnailEndpoint exported');
+module.exports = registerThumbnailEndpoint;
