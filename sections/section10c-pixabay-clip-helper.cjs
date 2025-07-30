@@ -83,7 +83,8 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
           score += Math.floor(vid.width / 100);
           if (vid.height >= 720) score += 2;
           if (vid.width > vid.height) score += 2;
-          if (vid.url && usedClips && usedClips.some(u => u.includes(vid.url))) score -= 100;
+          // Deduplication check
+          if (vid.url && usedClips && usedClips.some(u => u.includes(vid.url) || vid.url.includes(u))) score -= 100;
           scores.push({ vid, score });
           if (score > bestScore) {
             best = vid;

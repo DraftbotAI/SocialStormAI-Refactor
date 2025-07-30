@@ -12,7 +12,6 @@ const { v4: uuidv4 } = require('uuid');
 console.log('[10B][INIT] Pexels clip helper loaded.');
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
-
 if (!PEXELS_API_KEY) {
   console.error('[10B][FATAL] Missing PEXELS_API_KEY in environment!');
 }
@@ -89,7 +88,7 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
         score += Math.floor(file.width / 100);
 
         // Check for dupe
-        if (usedClips && usedClips.some(u => u.includes(file.link))) {
+        if (usedClips && usedClips.some(u => u.includes(file.link) || file.link.includes(u))) {
           score -= 100;
         }
 
