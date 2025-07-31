@@ -1,11 +1,9 @@
 // ===========================================================
-// SECTION 10D: KEN BURNS IMAGE VIDEO HELPER
+// SECTION 10D: KEN BURNS IMAGE VIDEO HELPER (Bulletproofed!)
 // Finds fallback still images, downloads them, creates slow-pan videos
 // Used when no matching R2/Pexels/Pixabay video is found.
-// MAX LOGGING EVERY STEP, Modular, Deduped, Validated
-// Now: FFmpeg Ken Burns fallback is time-limited, always uses robust pixel/color flags!
-// If Ken Burns fails, fallback to static image video so pipeline NEVER dies!
-// Now: Always force scale/pad to 1080x1920, yuv420p, never fails on weird images!
+// Now: All images are re-encoded with sharp for 100% JPEG compatibility!
+// MAX LOGGING EVERY STEP, Modular, Deduped, Validated, Never dies
 // ===========================================================
 
 const axios = require('axios');
@@ -13,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
+const sharp = require('sharp');
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
@@ -31,7 +30,6 @@ function isValidFile(fp, jobId) {
       console.warn(`[10D][VALIDATE][${jobId}] File too small: ${fp} (${sz} bytes)`);
       return false;
     }
-    console.log(`[10D][VALIDATE][${jobId}] Output file valid: ${fp} (${sz} bytes)`);
     return true;
   } catch (e) {
     console.error(`[10D][VALIDATE][${jobId}] Error validating file:`, e);
@@ -128,8 +126,7 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
       });
       writer.on('finish', () => {
         if (!errored) {
-          const size = fs.existsSync(outPath) ? fs.statSync(outPath).size : 'N/A';
-          console.log('[10D][DL] Download complete:', outPath, 'size:', size);
+          console.log('[10D][DL] Download complete:', outPath, 'size:', fs.existsSync(outPath) ? fs.statSync(outPath).size : 'N/A');
           resolve();
         }
       });
@@ -144,6 +141,25 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
   }
 }
 
+// --- Bulletproof: Preprocess every image to standard JPEG with sharp ---
+async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
+  try {
+    console.log(`[10D][PREPROCESS][${jobId}] Preprocessing image: ${inPath} → ${outPath}`);
+    await sharp(inPath)
+      .resize(1080, 1920, { fit: 'contain', background: { r: 0, g: 0, b: 0 } })
+      .jpeg({ quality: 88, chromaSubsampling: '4:4:4' })
+      .toFile(outPath);
+    if (!isValidFile(outPath, jobId)) {
+      throw new Error('[10D][PREPROCESS][ERR] Sharp output file not valid: ' + outPath);
+    }
+    console.log(`[10D][PREPROCESS][${jobId}] Preprocessing complete: ${outPath}`);
+    return outPath;
+  } catch (err) {
+    console.error(`[10D][PREPROCESS][ERR][${jobId}] Failed to preprocess image`, err);
+    throw err;
+  }
+}
+
 // --- Make Ken Burns video from local image (with perfect scaling/padding!) ---
 async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
@@ -152,20 +168,20 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
   if (!fs.existsSync(imgPath)) throw new Error('[10D][KENBURNS][ERR] Image does not exist: ' + imgPath);
 
   const width = 1080, height = 1920;
-  const scale = width * 1.4;
-  // First: scale/pad to big canvas, then crop+pan to 1080x1920
+  const baseScale = `${width * 1.4}:${height * 1.4}`;
   const panExpr = direction === 'ltr'
     ? `x='(iw-${width})*t/${duration}'`
     : `x='(iw-${width})-(iw-${width})*t/${duration}'`;
-
-  // WARNING: Do not put :force_original_aspect_ratio=decrease on crop! Only on scale!
-  const filter = `[0:v]scale=${scale}:${height*1.4}:force_original_aspect_ratio=decrease,pad=${scale}:${height*1.4}:(ow-iw)/2:(oh-ih)/2,setsar=1,crop=${width}:${height}:${panExpr},setpts=PTS-STARTPTS[v]`;
+  const filter = `
+    [0:v]scale=${baseScale}:force_original_aspect_ratio=decrease,
+    pad=${width * 1.4}:${height * 1.4}:(ow-iw)/2:(oh-ih)/2,setsar=1,
+    crop=${width}:${height}:${panExpr},setpts=PTS-STARTPTS[v]
+  `.replace(/\s+/g, '');
 
   const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
 
   console.log(`[10D][KENBURNS][${jobId}] Running FFmpeg: ${ffmpegCmd}`);
 
-  // --- Main Ken Burns attempt (timeout protected)
   return new Promise((resolve, reject) => {
     const child = exec(ffmpegCmd, { timeout: 12000 }, (error, stdout, stderr) => {
       if (error) {
@@ -175,13 +191,6 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
           console.error('[10D][KENBURNS][ERR]', error, stderr);
         }
         return reject(error);
-      }
-      // Log output file size
-      if (fs.existsSync(outPath)) {
-        const sz = fs.statSync(outPath).size;
-        console.log(`[10D][KENBURNS][CHECK][${jobId}] Output exists: ${outPath}, size: ${sz}`);
-      } else {
-        console.error(`[10D][KENBURNS][CHECK][${jobId}] Output missing: ${outPath}`);
       }
       if (!isValidFile(outPath, jobId)) {
         return reject(new Error('[10D][KENBURNS][ERR] Output video not created or too small'));
@@ -200,8 +209,6 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
 // --- Emergency fallback: static image video (never fails!) ---
 async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
   const width = 1080, height = 1920;
-  // Robust scaling/pad — always succeeds, never fails on aspect!
-  // DO NOT add any colon before force_original_aspect_ratio
   const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -vf "scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
   console.log(`[10D][STATICIMG][${jobId}] Running fallback FFmpeg: ${ffmpegCmd}`);
   return new Promise((resolve, reject) => {
@@ -209,13 +216,6 @@ async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
       if (error) {
         console.error(`[10D][STATICIMG][ERR][${jobId}] Fallback static image to video failed.`, error, stderr);
         return reject(error);
-      }
-      // Log output file size
-      if (fs.existsSync(outPath)) {
-        const sz = fs.statSync(outPath).size;
-        console.log(`[10D][STATICIMG][CHECK][${jobId}] Output exists: ${outPath}, size: ${sz}`);
-      } else {
-        console.error(`[10D][STATICIMG][CHECK][${jobId}] Output missing: ${outPath}`);
       }
       if (!isValidFile(outPath, jobId)) {
         return reject(new Error('[10D][STATICIMG][ERR] Output video not created or too small'));
@@ -228,7 +228,6 @@ async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
 
 // --- Main entry: fallback to Ken Burns if no video found ---
 // Returns: local .mp4 path (or null if fail)
-// Signature: (subject, workDir, sceneIdx, jobId, usedClips)
 async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClips = []) {
   try {
     console.log(`[10D][FALLBACK][${jobId}] Attempting Ken Burns fallback video for "${subject}" | workDir="${workDir}" | sceneIdx=${sceneIdx}`);
@@ -237,7 +236,6 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     let imageUrl = await findImageInPexels(subject);
     if (!imageUrl) imageUrl = await findImageInPixabay(subject);
 
-    // If dupe, keep looking (simple dupe check)
     let tryCount = 0;
     while (imageUrl && usedClips && usedClips.some(u => u.includes(imageUrl)) && tryCount < 3) {
       console.warn(`[10D][FALLBACK][${jobId}] Image already used (${imageUrl}), trying next...`);
@@ -250,26 +248,27 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
       return null;
     }
 
-    // Prepare temp dir
     const realTmpDir = workDir || path.join(__dirname, 'tmp');
     if (!fs.existsSync(realTmpDir)) fs.mkdirSync(realTmpDir, { recursive: true });
 
-    const imgName = `kenburns-${uuidv4()}.jpg`;
-    const imgPath = path.join(realTmpDir, imgName);
-    await downloadRemoteFileToLocal(imageUrl, imgPath, jobId);
+    const rawImgPath = path.join(realTmpDir, `kenburns-raw-${uuidv4()}.jpg`);
+    await downloadRemoteFileToLocal(imageUrl, rawImgPath, jobId);
+
+    // ALWAYS preprocess image to bulletproof JPEG
+    const jpegImgPath = path.join(realTmpDir, `kenburns-prepped-${uuidv4()}.jpg`);
+    await preprocessImageToJpeg(rawImgPath, jpegImgPath, jobId);
 
     const outVidName = `kenburns-${uuidv4()}.mp4`;
     const outVidPath = path.join(realTmpDir, outVidName);
 
-    // --- Try Ken Burns once. If it fails, do NOT crash: fallback to static image video ---
     try {
-      await makeKenBurnsVideoFromImage(imgPath, outVidPath, 5, jobId);
+      await makeKenBurnsVideoFromImage(jpegImgPath, outVidPath, 5, jobId);
       console.log(`[10D][FALLBACK][${jobId}] Ken Burns fallback video created: ${outVidPath}`);
       return outVidPath;
     } catch (err) {
       console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns video creation failed, using static image video fallback.`, err);
       try {
-        await staticImageToVideo(imgPath, outVidPath, 5, jobId);
+        await staticImageToVideo(jpegImgPath, outVidPath, 5, jobId);
         console.log(`[10D][FALLBACK][${jobId}] Static image fallback video created: ${outVidPath}`);
         return outVidPath;
       } catch (staticErr) {
@@ -289,5 +288,6 @@ module.exports = {
   findImageInPixabay,
   downloadRemoteFileToLocal,
   makeKenBurnsVideoFromImage,
-  staticImageToVideo
+  staticImageToVideo,
+  preprocessImageToJpeg
 };
