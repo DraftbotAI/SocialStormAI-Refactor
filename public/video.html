@@ -152,309 +152,308 @@
     @media (max-width: 480px) {
       .mobile-nav { padding: 1rem 1rem 1.5rem 1rem; }
     }
-    /* Additional CSS unchanged (next message continues here...) */
-main.page-content {
-  flex: 1 0 auto;
-  width: 100%;
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 3.5rem 2rem 2rem 2rem;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  background: #fff;
-  border-radius: 16px;
-  box-shadow: 0 4px 22px #00e0fe10;
-}
-h2 {
-  margin-bottom: 1.1rem;
-  font-size: 1.41rem;
-  color: #0a2342;
-  font-weight: 900;
-  letter-spacing: -0.5px;
-}
-textarea, select, input {
-  width: 100%;
-  padding: .82rem;
-  border: 2px solid #00e0fe;
-  border-radius: 8px;
-  font-family: inherit;
-  font-size: 1.06rem;
-  color: #0a2342;
-  margin-bottom: 1.2rem;
-  background: #f7fbff;
-  transition: border 0.22s;
-}
-textarea:focus, select:focus, input:focus { border-color: #00b3c4; }
-#scriptTextarea { height: 240px; resize: vertical; }
-.btn {
-  background: #00e0fe;
-  color: #10141a;
-  border: none;
-  padding: .85rem 2.1rem;
-  border-radius: 8px;
-  font-weight: 900;
-  cursor: pointer;
-  font-size: 1.09rem;
-  box-shadow: 0 6px 18px #00e0fe34;
-  margin-bottom: 0.5rem;
-  transition: background 0.2s, color 0.2s;
-  letter-spacing: 0.01em;
-}
-.btn:hover { background: #00b3c4; color: #fff; }
-.btn:disabled { background: #a9e6f7; color: #444; cursor: not-allowed; }
-.guidance-tip {
-  font-size: 1.02rem;
-  color: #007fa3;
-  margin-bottom: 1.4rem;
-  background: #eaf7fb;
-  padding: 0.82rem 1.1rem;
-  border-left: 4px solid #00e0fe;
-  border-radius: 6px;
-  width: 100%;
-  box-sizing: border-box;
-  font-style: italic;
-}
-.gen-status {
-  display: inline-block;
-  margin-left: 1.2em;
-  font-size: 1.08rem;
-  color: #00b3c4;
-  min-width: 78px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  vertical-align: middle;
-}
-#metaDataBox { margin-top: 18px; width: 100%; }
-.video-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  width: 100%;
-  min-height: 340px;
-  padding: 16px 0 8px 0;
-  background: #000;
-  border-radius: 14px;
-  box-shadow: 0 0 32px #0002;
-  margin-bottom: 1.5rem;
-}
-.video-container video {
-  width: 100%;
-  max-width: 640px;
-  aspect-ratio: 16/9;
-  background: #000;
-  border-radius: 12px;
-  box-shadow: 0 0 24px #0003;
-  object-fit: contain;
-  display: block;
-  margin: 0 auto;
-  outline: 2px solid #00e0fe33;
-  max-width: 98vw;
-  max-height: 70vh;
-}
-#output {
-  min-height: 2.2rem;
-  padding: .8rem;
-  background: #f0f8ff;
-  border: 1px solid #cce6ff;
-  border-radius: 6px;
-  font-family: monospace;
-  margin-bottom: 1.2rem;
-  width: 100%;
-  word-break: break-word;
-}
-#downloadBtn { display: none; margin-bottom: 1rem; }
-#shareBtn { display: none; margin-bottom: 1rem; }
-#progressBarWrap {
-  width: 100%;
-  background: #e6f2fa;
-  border-radius: 10px;
-  margin: 10px 0;
-  height: 24px;
-  box-shadow: 0 2px 12px #00e0fe33;
-  display: none;
-}
-#progressBar {
-  height: 100%;
-  background: linear-gradient(90deg,#00e0fe,#00b3c4 85%);
-  width: 0;
-  border-radius: 10px;
-  transition: width 0.25s;
-  color: #fff;
-  font-weight: 600;
-  font-size: 1rem;
-  text-align: center;
-  line-height: 24px;
-}
-#progressStatus { margin-top: 6px; font-size: 0.98rem; min-height: 1.4em; }
-/* continue CSS exactly from your original code, unchanged, in the next message... */
-.meta-group { margin: 10px 0 22px 0; }
-.meta-label { font-weight: bold; font-size:1.04em; color:#0a2342; margin-bottom:2px; display:flex; align-items:center; gap:4px; position: relative; }
-.meta-value {
-  background: #f0f8ff;
-  border: 1.5px solid #cce6ff;
-  border-radius: 5px;
-  padding: 7px 44px 7px 10px;
-  font-size: 1rem;
-  color: #0a2342;
-  font-family: inherit;
-  position: relative;
-  margin-bottom:6px;
-  min-height: 26px;
-  white-space: pre-line;
-  word-break: break-word;
-  user-select: all;
-}
-.copy-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0 7px;
-  margin-left: 4px;
-  color: #00e0fe;
-  font-size: 1.11em;
-  border-radius: 4px;
-  transition: background 0.15s;
-  position: absolute;
-  top: 7px;
-  right: 5px;
-  display: flex;
-  align-items: center;
-  outline: none;
-}
-.copy-btn:hover { background: #d4f1ff; }
-.copy-btn.copied { color: #008000; background: #c9f7d2; }
-.branding-toggle-row {
-  display: flex;
-  align-items: center;
-  margin-bottom: 14px;
-  gap: 12px;
-}
-.switch {
-  position: relative; display: inline-block; width: 48px; height: 28px;
-}
-.switch input { display: none; }
-.slider {
-  position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-  background-color: #a0cfee; transition: .4s; border-radius: 30px;
-}
-.slider:before {
-  position: absolute; content: ""; height: 22px; width: 22px; left: 3px; bottom: 3px;
-  background-color: #fff; transition: .4s; border-radius: 50%;
-  box-shadow: 0 1px 6px #00e0fe33;
-}
-input:checked + .slider { background-color: #00e0fe; }
-input:checked + .slider:before { transform: translateX(20px); background: #e6f2fa; }
-.branding-label { font-size:1rem; font-weight:600; color:#0a2342; margin-right:10px; user-select:none; }
-#thumbnail-upsell {
-  margin: 2.4rem 0 0 0;
-  width: 100%;
-  background: linear-gradient(98deg, #eaf7fb 65%, #e9fdf9 100%);
-  border-radius: 12px;
-  box-shadow: 0 2px 18px #00e0fe0a;
-  padding: 2rem 1.4rem 1.7rem 1.4rem;
-  display: none;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  border: 2.5px solid #00e0fe44;
-}
-#thumbnail-upsell h3 {
-  color: #00b3c4;
-  font-size: 1.41rem;
-  font-weight: 900;
-  margin-bottom: 0.2rem;
-  letter-spacing: -0.5px;
-}
-#thumbnail-upsell p {
-  color: #0a2342;
-  font-size: 1.07rem;
-  margin-bottom: 1.4rem;
-  font-weight: 500;
-}
-.thumb-price-options {
-  display: flex;
-  gap: 1.2rem;
-  justify-content: center;
-  flex-wrap: wrap;
-  margin-bottom: 1.3rem;
-}
-.thumb-option {
-  background: #fff;
-  border: 2px solid #00e0fe33;
-  border-radius: 10px;
-  box-shadow: 0 3px 12px #00e0fe19;
-  padding: 1.15rem 1.4rem 0.95rem 1.4rem;
-  min-width: 180px;
-  text-align: center;
-  font-weight: 700;
-  color: #00b3c4;
-  transition: box-shadow 0.18s, border 0.18s;
-}
-.thumb-option strong { color: #0a2342; font-size: 1.15em; }
-.thumb-option .cta-thumb {
-  margin-top: 1rem;
-  background: #00e0fe;
-  color: #10141a;
-  border: none;
-  border-radius: 6px;
-  font-size: 1.05rem;
-  font-weight: 900;
-  padding: 0.6rem 1.7rem;
-  cursor: pointer;
-  box-shadow: 0 3px 12px #00e0fe33;
-  transition: background 0.18s, color 0.18s;
-}
-.thumb-option .cta-thumb:hover { background: #00b3c4; color: #fff; }
-.thumb-included {
-  background: #d9fff5;
-  color: #008060;
-  border-radius: 7px;
-  padding: 0.5rem 1rem;
-  font-weight: 900;
-  font-size: 1.1em;
-  margin-top: 1.1rem;
-  border: 2px solid #00e0fe11;
-}
-#chatbot-bubble {
-  position: fixed;
-  bottom: 26px;
-  right: 26px;
-  width: 64px;
-  height: 64px;
-  background: linear-gradient(135deg,#00e0fe 80%,#00b3c4 100%);
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  box-shadow: 0 8px 32px #00e0fe70, 0 1.5px 9px #0a234266;
-  transition: background 0.22s, transform 0.12s;
-  z-index: 1000;
-  animation: bounce 1.5s infinite alternate cubic-bezier(.65,-0.25,.5,1.25);
-  border: 2.5px solid #fff;
-}
-#chatbot-bubble:hover {
-  background: linear-gradient(135deg,#00b3c4 80%,#00e0fe 100%);
-  transform: scale(1.09) rotate(-6deg);
-  box-shadow: 0 12px 36px #00b3c470, 0 1.5px 9px #0a234266;
-}
-@media (max-width: 600px) {
-  #chatbot-bubble::after { display:none; }
-}
-@keyframes poptext {
-  from { opacity: 0.6; }
-  to { opacity: 0.96; }
-}
-@keyframes sparkieblink {
-  0%, 95%, 100% { fill: #ffe800; }
-  96% { fill: #fff; }
-}
-@keyframes bounce {
-  from { transform: translateY(0);}
-  to   { transform: translateY(-10px);}
-}
-</style>
+    /* (CSS continues in next message...) */
+    main.page-content {
+      flex: 1 0 auto;
+      width: 100%;
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 3.5rem 2rem 2rem 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 22px #00e0fe10;
+    }
+    h2 {
+      margin-bottom: 1.1rem;
+      font-size: 1.41rem;
+      color: #0a2342;
+      font-weight: 900;
+      letter-spacing: -0.5px;
+    }
+    textarea, select, input {
+      width: 100%;
+      padding: .82rem;
+      border: 2px solid #00e0fe;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 1.06rem;
+      color: #0a2342;
+      margin-bottom: 1.2rem;
+      background: #f7fbff;
+      transition: border 0.22s;
+    }
+    textarea:focus, select:focus, input:focus { border-color: #00b3c4; }
+    #scriptTextarea { height: 240px; resize: vertical; }
+    .btn {
+      background: #00e0fe;
+      color: #10141a;
+      border: none;
+      padding: .85rem 2.1rem;
+      border-radius: 8px;
+      font-weight: 900;
+      cursor: pointer;
+      font-size: 1.09rem;
+      box-shadow: 0 6px 18px #00e0fe34;
+      margin-bottom: 0.5rem;
+      transition: background 0.2s, color 0.2s;
+      letter-spacing: 0.01em;
+    }
+    .btn:hover { background: #00b3c4; color: #fff; }
+    .btn:disabled { background: #a9e6f7; color: #444; cursor: not-allowed; }
+    .guidance-tip {
+      font-size: 1.02rem;
+      color: #007fa3;
+      margin-bottom: 1.4rem;
+      background: #eaf7fb;
+      padding: 0.82rem 1.1rem;
+      border-left: 4px solid #00e0fe;
+      border-radius: 6px;
+      width: 100%;
+      box-sizing: border-box;
+      font-style: italic;
+    }
+    .gen-status {
+      display: inline-block;
+      margin-left: 1.2em;
+      font-size: 1.08rem;
+      color: #00b3c4;
+      min-width: 78px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      vertical-align: middle;
+    }
+    #metaDataBox { margin-top: 18px; width: 100%; }
+    .video-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      width: 100%;
+      min-height: 340px;
+      padding: 16px 0 8px 0;
+      background: #000;
+      border-radius: 14px;
+      box-shadow: 0 0 32px #0002;
+      margin-bottom: 1.5rem;
+    }
+    .video-container video {
+      width: 100%;
+      max-width: 640px;
+      aspect-ratio: 16/9;
+      background: #000;
+      border-radius: 12px;
+      box-shadow: 0 0 24px #0003;
+      object-fit: contain;
+      display: block;
+      margin: 0 auto;
+      outline: 2px solid #00e0fe33;
+      max-width: 98vw;
+      max-height: 70vh;
+    }
+    #output {
+      min-height: 2.2rem;
+      padding: .8rem;
+      background: #f0f8ff;
+      border: 1px solid #cce6ff;
+      border-radius: 6px;
+      font-family: monospace;
+      margin-bottom: 1.2rem;
+      width: 100%;
+      word-break: break-word;
+    }
+    #downloadBtn { display: none; margin-bottom: 1rem; }
+    #shareBtn { display: none; margin-bottom: 1rem; }
+    #progressBarWrap {
+      width: 100%;
+      background: #e6f2fa;
+      border-radius: 10px;
+      margin: 10px 0;
+      height: 24px;
+      box-shadow: 0 2px 12px #00e0fe33;
+      display: none;
+    }
+    #progressBar {
+      height: 100%;
+      background: linear-gradient(90deg,#00e0fe,#00b3c4 85%);
+      width: 0;
+      border-radius: 10px;
+      transition: width 0.25s;
+      color: #fff;
+      font-weight: 600;
+      font-size: 1rem;
+      text-align: center;
+      line-height: 24px;
+    }
+    #progressStatus { margin-top: 6px; font-size: 0.98rem; min-height: 1.4em; }
+    .meta-group { margin: 10px 0 22px 0; }
+    .meta-label { font-weight: bold; font-size:1.04em; color:#0a2342; margin-bottom:2px; display:flex; align-items:center; gap:4px; position: relative; }
+    .meta-value {
+      background: #f0f8ff;
+      border: 1.5px solid #cce6ff;
+      border-radius: 5px;
+      padding: 7px 44px 7px 10px;
+      font-size: 1rem;
+      color: #0a2342;
+      font-family: inherit;
+      position: relative;
+      margin-bottom:6px;
+      min-height: 26px;
+      white-space: pre-line;
+      word-break: break-word;
+      user-select: all;
+    }
+    .copy-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0 7px;
+      margin-left: 4px;
+      color: #00e0fe;
+      font-size: 1.11em;
+      border-radius: 4px;
+      transition: background 0.15s;
+      position: absolute;
+      top: 7px;
+      right: 5px;
+      display: flex;
+      align-items: center;
+      outline: none;
+    }
+    .copy-btn:hover { background: #d4f1ff; }
+    .copy-btn.copied { color: #008000; background: #c9f7d2; }
+    .branding-toggle-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 14px;
+      gap: 12px;
+    }
+    .switch {
+      position: relative; display: inline-block; width: 48px; height: 28px;
+    }
+    .switch input { display: none; }
+    .slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #a0cfee; transition: .4s; border-radius: 30px;
+    }
+    .slider:before {
+      position: absolute; content: ""; height: 22px; width: 22px; left: 3px; bottom: 3px;
+      background-color: #fff; transition: .4s; border-radius: 50%;
+      box-shadow: 0 1px 6px #00e0fe33;
+    }
+    input:checked + .slider { background-color: #00e0fe; }
+    input:checked + .slider:before { transform: translateX(20px); background: #e6f2fa; }
+    .branding-label { font-size:1rem; font-weight:600; color:#0a2342; margin-right:10px; user-select:none; }
+    #thumbnail-upsell {
+      margin: 2.4rem 0 0 0;
+      width: 100%;
+      background: linear-gradient(98deg, #eaf7fb 65%, #e9fdf9 100%);
+      border-radius: 12px;
+      box-shadow: 0 2px 18px #00e0fe0a;
+      padding: 2rem 1.4rem 1.7rem 1.4rem;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      border: 2.5px solid #00e0fe44;
+    }
+    #thumbnail-upsell h3 {
+      color: #00b3c4;
+      font-size: 1.41rem;
+      font-weight: 900;
+      margin-bottom: 0.2rem;
+      letter-spacing: -0.5px;
+    }
+    #thumbnail-upsell p {
+      color: #0a2342;
+      font-size: 1.07rem;
+      margin-bottom: 1.4rem;
+      font-weight: 500;
+    }
+    .thumb-price-options {
+      display: flex;
+      gap: 1.2rem;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 1.3rem;
+    }
+    .thumb-option {
+      background: #fff;
+      border: 2px solid #00e0fe33;
+      border-radius: 10px;
+      box-shadow: 0 3px 12px #00e0fe19;
+      padding: 1.15rem 1.4rem 0.95rem 1.4rem;
+      min-width: 180px;
+      text-align: center;
+      font-weight: 700;
+      color: #00b3c4;
+      transition: box-shadow 0.18s, border 0.18s;
+    }
+    .thumb-option strong { color: #0a2342; font-size: 1.15em; }
+    .thumb-option .cta-thumb {
+      margin-top: 1rem;
+      background: #00e0fe;
+      color: #10141a;
+      border: none;
+      border-radius: 6px;
+      font-size: 1.05rem;
+      font-weight: 900;
+      padding: 0.6rem 1.7rem;
+      cursor: pointer;
+      box-shadow: 0 3px 12px #00e0fe33;
+      transition: background 0.18s, color 0.18s;
+    }
+    .thumb-option .cta-thumb:hover { background: #00b3c4; color: #fff; }
+    .thumb-included {
+      background: #d9fff5;
+      color: #008060;
+      border-radius: 7px;
+      padding: 0.5rem 1rem;
+      font-weight: 900;
+      font-size: 1.1em;
+      margin-top: 1.1rem;
+      border: 2px solid #00e0fe11;
+    }
+    #chatbot-bubble {
+      position: fixed;
+      bottom: 26px;
+      right: 26px;
+      width: 64px;
+      height: 64px;
+      background: linear-gradient(135deg,#00e0fe 80%,#00b3c4 100%);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: 0 8px 32px #00e0fe70, 0 1.5px 9px #0a234266;
+      transition: background 0.22s, transform 0.12s;
+      z-index: 1000;
+      animation: bounce 1.5s infinite alternate cubic-bezier(.65,-0.25,.5,1.25);
+      border: 2.5px solid #fff;
+    }
+    #chatbot-bubble:hover {
+      background: linear-gradient(135deg,#00b3c4 80%,#00e0fe 100%);
+      transform: scale(1.09) rotate(-6deg);
+      box-shadow: 0 12px 36px #00b3c470, 0 1.5px 9px #0a234266;
+    }
+    @media (max-width: 600px) {
+      #chatbot-bubble::after { display:none; }
+    }
+    @keyframes poptext {
+      from { opacity: 0.6; }
+      to { opacity: 0.96; }
+    }
+    @keyframes sparkieblink {
+      0%, 95%, 100% { fill: #ffe800; }
+      96% { fill: #fff; }
+    }
+    @keyframes bounce {
+      from { transform: translateY(0);}
+      to   { transform: translateY(-10px);}
+    }
+  </style>
 </head>
 <body>
   <nav>
@@ -483,7 +482,6 @@ input:checked + .slider:before { transform: translateX(20px); background: #e6f2f
       <li><button class="btn-primary" onclick="location.href='video.html'">Get Started</button></li>
     </ul>
   </nav>
-
   <main class="page-content">
     <section style="width:100%;">
       <h2>Generate Script</h2>
@@ -501,7 +499,6 @@ input:checked + .slider:before { transform: translateX(20px); background: #e6f2f
       <textarea id="scriptTextarea" placeholder="Generated script will appear here…"></textarea>
       <div id="metaDataBox"></div>
     </section>
-
     <section style="width:100%;">
       <h2>Pick a Voice & Generate Video</h2>
       <div id="brandingToggleRow" class="branding-toggle-row" style="display:none;">
@@ -511,7 +508,6 @@ input:checked + .slider:before { transform: translateX(20px); background: #e6f2f
           <span class="slider"></span>
         </label>
       </div>
-
       <!-- NEW: Background music toggle -->
       <div id="musicToggleRow" class="branding-toggle-row">
         <label class="branding-label" for="addMusicSwitch">Add background music</label>
@@ -520,31 +516,23 @@ input:checked + .slider:before { transform: translateX(20px); background: #e6f2f
           <span class="slider"></span>
         </label>
       </div>
-
       <div style="display: flex; align-items: center; gap: 12px;">
         <select id="voiceSelect" style="flex:1;"></select>
         <button id="previewBtn" class="btn" type="button" style="white-space:nowrap;" disabled>Preview Voice</button>
       </div>
       <audio id="voicePreviewAudio" style="display:none"></audio>
-
       <button id="generateVideoBtn" class="btn" disabled>Generate Video</button>
-
       <div id="output"></div>
-
       <div id="progressBarWrap">
         <div id="progressBar">0%</div>
       </div>
-
       <div id="progressStatus"></div>
-
       <div class="video-container">
         <video id="videoPlayer" controls playsinline preload="auto" crossorigin="anonymous" style="background:#000;"></video>
       </div>
-
       <button id="downloadBtn" class="btn" style="display:none;margin-top:8px;">Download Video</button>
       <button id="shareBtn" class="btn" style="display:none;margin-left:8px;">Share Video</button>
     </section>
-
     <!-- Thumbnail Upsell Section -->
     <div id="thumbnail-upsell">
       <h3>Boost Your Video with Custom Thumbnails!</h3>
@@ -569,7 +557,6 @@ input:checked + .slider:before { transform: translateX(20px); background: #e6f2f
       </p>
     </div>
   </main>
-
   <div id="chatbot-bubble" title="Chat with Sparkie!">
     <svg viewBox="0 0 64 64">
       <circle cx="32" cy="32" r="30" fill="#00e0fe"/>
@@ -579,13 +566,10 @@ input:checked + .slider:before { transform: translateX(20px); background: #e6f2f
       <polygon class="sparkie-bolt" points="30,18 34,18 32,11"/>
     </svg>
   </div>
-
   <footer>
     &copy; 2025 SocialStorm AI. Built for creators who want to win.
   </footer>
-
-  <script>
-  
+<script>
 document.addEventListener('DOMContentLoaded', function() {
   function log(...args) { try { console.log('[LOG]', ...args); } catch(_){} }
   function logWarn(...args) { try { console.warn('[WARN]', ...args); } catch(_){} }
@@ -740,75 +724,86 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
-// ✅ VIDEO GENERATION LOGIC (CORRECTED FOR R2 PLAYBACK)
-let pollingInterval, simInterval, simulatedPercent = 0;
+  // ✅ VIDEO GENERATION LOGIC (CORRECTED FOR R2 PLAYBACK)
+  let pollingInterval, simInterval, simulatedPercent = 0;
 
-document.getElementById('generateVideoBtn').onclick = async () => {
-  const script = document.getElementById('scriptTextarea').value.trim();
-  const voice = document.getElementById('voiceSelect').value;
-  const out = document.getElementById('output');
-  const player = document.getElementById('videoPlayer');
-  const downloadBtn = document.getElementById('downloadBtn');
-  const shareBtn = document.getElementById('shareBtn');
-  const progressBarWrap = document.getElementById('progressBarWrap');
-  const progressBar = document.getElementById('progressBar');
-  const progressStatus = document.getElementById('progressStatus');
+  document.getElementById('generateVideoBtn').onclick = async () => {
+    const script = document.getElementById('scriptTextarea').value.trim();
+    const voice = document.getElementById('voiceSelect').value;
+    const out = document.getElementById('output');
+    const player = document.getElementById('videoPlayer');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const shareBtn = document.getElementById('shareBtn');
+    const progressBarWrap = document.getElementById('progressBarWrap');
+    const progressBar = document.getElementById('progressBar');
+    const progressStatus = document.getElementById('progressStatus');
 
-  if (!script || !voice) {
-    out.textContent = !script ? 'Generate script first.' : 'Select a voice.';
-    return;
-  }
+    if (!script || !voice) {
+      out.textContent = !script ? 'Generate script first.' : 'Select a voice.';
+      return;
+    }
 
-  out.textContent = '';
-  progressBarWrap.style.display = 'block';
-  progressBar.style.width = '0%';
-  progressBar.textContent = '0%';
-  progressStatus.textContent = 'Starting…';
-  player.style.display = 'none';
-  player.removeAttribute('src');
-  player.load();
-  downloadBtn.style.display = shareBtn.style.display = 'none';
+    out.textContent = '';
+    progressBarWrap.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressBar.textContent = '0%';
+    progressStatus.textContent = 'Starting…';
+    player.style.display = 'none';
+    player.removeAttribute('src');
+    player.load();
+    downloadBtn.style.display = shareBtn.style.display = 'none';
 
-  simulatedPercent = 0;
-  clearInterval(simInterval);
-  simInterval = setInterval(() => {
-    if (simulatedPercent < 94) simulatedPercent += Math.random();
-    progressBar.style.width = `${simulatedPercent}%`;
-    progressBar.textContent = `${Math.round(simulatedPercent)}%`;
-  }, 800);
+    simulatedPercent = 0;
+    clearInterval(simInterval);
+    simInterval = setInterval(() => {
+      if (simulatedPercent < 94) simulatedPercent += Math.random();
+      progressBar.style.width = `${simulatedPercent}%`;
+      progressBar.textContent = `${Math.round(simulatedPercent)}%`;
+    }, 800);
 
-  try {
-    const payload = {
-      script,
-      voice,
-      paidUser: isPaidUser,
-      removeWatermark: isPaidUser && document.getElementById('removeBrandingSwitch').checked,
-      addMusic: document.getElementById('addMusicSwitch').checked
-    };
+    try {
+      const payload = {
+        script,
+        voice,
+        paidUser: isPaidUser,
+        removeWatermark: isPaidUser && document.getElementById('removeBrandingSwitch').checked,
+        addMusic: document.getElementById('addMusicSwitch').checked
+      };
 
-    const res = await fetch('/api/generate-video', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload)
-    });
+      const res = await fetch('/api/generate-video', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
 
-    const data = await res.json();
-    if (!data.jobId) throw new Error('Failed to start video generation.');
+      const data = await res.json();
+      if (!data.jobId) throw new Error('Failed to start video generation.');
 
-    pollingInterval = setInterval(async () => {
-      const resp = await fetch(`/api/progress/${data.jobId}`);
-      const p = await resp.json();
-      let displayPercent = Math.max(simulatedPercent, p.percent || 0);
-      progressBar.style.width = `${displayPercent}%`;
-      progressBar.textContent = `${Math.round(displayPercent)}%`;
-      progressStatus.textContent = p.status || '';
+      pollingInterval = setInterval(async () => {
+        const resp = await fetch(`/api/progress/${data.jobId}`);
+        const p = await resp.json();
+        let displayPercent = Math.max(simulatedPercent, p.percent || 0);
+        progressBar.style.width = `${displayPercent}%`;
+        progressBar.textContent = `${Math.round(displayPercent)}%`;
+        progressStatus.textContent = p.status || '';
 
-      if (p.percent >= 100) {
-        clearInterval(pollingInterval);
-        clearInterval(simInterval);
-        
-        if (p.key) {
-          player.src = `/video/${p.key}`;
+        if (p.percent >= 100) {
+          clearInterval(pollingInterval);
+          clearInterval(simInterval);
+
+          // --- MAIN FIX: Use R2 public URL from backend, fallback to /video/${p.key} if needed ---
+          let videoUrl = p.output || (p.key ? `/video/${p.key}` : null);
+
+          if (videoUrl && videoUrl.startsWith('http')) {
+            player.src = videoUrl;
+          } else if (videoUrl) {
+            player.src = videoUrl;
+          } else {
+            out.textContent = p.status || 'Generation failed.';
+            progressBarWrap.style.display = 'none';
+            return;
+          }
+
           player.style.display = 'block';
           player.load();
 
@@ -822,89 +817,85 @@ document.getElementById('generateVideoBtn').onclick = async () => {
             progressBar.textContent = '100%';
             setTimeout(() => progressBarWrap.style.display = 'none', 2000);
             showThumbUpsell();
+            log('VIDEO', 'Loaded and ready', player.src);
           };
 
           player.onerror = () => {
             progressStatus.textContent = 'Error loading video. Retry.';
-            logError('VIDEO', 'Error loading video.');
+            logError('VIDEO', 'Error loading video.', player.src);
           };
 
-        } else {
-          out.textContent = p.status || 'Generation failed.';
-          progressBarWrap.style.display = 'none';
         }
-      }
-    }, 1200);
+      }, 1200);
 
-  } catch (err) {
-    clearInterval(simInterval);
-    progressStatus.textContent = 'Error generating video.';
-    progressBarWrap.style.display = 'none';
-    logError('VIDEO', err);
+    } catch (err) {
+      clearInterval(simInterval);
+      progressStatus.textContent = 'Error generating video.';
+      progressBarWrap.style.display = 'none';
+      logError('VIDEO', err);
+    }
+  };
+
+  function makeFileNameFromIdea() {
+    let idea = document.getElementById('ideaInput').value.trim();
+    return (idea ? idea.replace(/[^\w\s\-]/gi,'').replace(/\s+/g,'-') : 'SocialStormAI-Video').substring(0,32) + '.mp4';
   }
-};
 
-function makeFileNameFromIdea() {
-  let idea = document.getElementById('ideaInput').value.trim();
-  return (idea ? idea.replace(/[^\w\s\-]/gi,'').replace(/\s+/g,'-') : 'SocialStormAI-Video').substring(0,32) + '.mp4';
-}
-
-document.getElementById('downloadBtn').onclick = async () => {
-  const videoUrl = document.getElementById('videoPlayer').src;
-  const downloadBtn = document.getElementById('downloadBtn');
-  downloadBtn.disabled = true;
-  downloadBtn.textContent = "Preparing…";
-  try {
-    const resp = await fetch(videoUrl);
-    if (!resp.ok) throw new Error("Download failed.");
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = makeFileNameFromIdea();
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+  document.getElementById('downloadBtn').onclick = async () => {
+    const videoUrl = document.getElementById('videoPlayer').src;
+    const downloadBtn = document.getElementById('downloadBtn');
+    downloadBtn.disabled = true;
+    downloadBtn.textContent = "Preparing…";
+    try {
+      const resp = await fetch(videoUrl);
+      if (!resp.ok) throw new Error("Download failed.");
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = makeFileNameFromIdea();
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        downloadBtn.disabled = false;
+        downloadBtn.textContent = "Download Video";
+      }, 500);
+    } catch(e) {
+      logError('DOWNLOAD', e);
       downloadBtn.disabled = false;
       downloadBtn.textContent = "Download Video";
-    }, 500);
-  } catch(e) {
-    logError('DOWNLOAD', e);
-    downloadBtn.disabled = false;
-    downloadBtn.textContent = "Download Video";
-  }
-};
+    }
+  };
 
-document.getElementById('shareBtn').onclick = () => {
-  const url = document.getElementById('videoPlayer').src;
-  const title = document.getElementById('meta-title').innerText || '';
-  const description = document.getElementById('meta-description').innerText || '';
-  const tags = document.getElementById('meta-tags').innerText || '';
-  const subject = encodeURIComponent(title || "My SocialStormAI Video");
-  const bodyText = encodeURIComponent(`${description}\n\nTags:\n${tags}\n\nWatch here:\n${url}`);
-  window.location.href = `mailto:?subject=${subject}&body=${bodyText}`;
-};
+  document.getElementById('shareBtn').onclick = () => {
+    const url = document.getElementById('videoPlayer').src;
+    const title = document.getElementById('meta-title').innerText || '';
+    const description = document.getElementById('meta-description').innerText || '';
+    const tags = document.getElementById('meta-tags').innerText || '';
+    const subject = encodeURIComponent(title || "My SocialStormAI Video");
+    const bodyText = encodeURIComponent(`${description}\n\nTags:\n${tags}\n\nWatch here:\n${url}`);
+    window.location.href = `mailto:?subject=${subject}&body=${bodyText}`;
+  };
 
-function showThumbUpsell() {
-  if (isProUser) {
-    document.getElementById('thumbIncluded').style.display = 'block';
-    document.querySelectorAll('.thumb-option').forEach(opt => opt.style.display = 'none');
+  function showThumbUpsell() {
+    if (isProUser) {
+      document.getElementById('thumbIncluded').style.display = 'block';
+      document.querySelectorAll('.thumb-option').forEach(opt => opt.style.display = 'none');
+    }
+    document.getElementById('thumbnail-upsell').style.display = 'flex';
+    setTimeout(() => {
+      document.getElementById('thumbnail-upsell').scrollIntoView({behavior:'smooth',block:'center'});
+    }, 450);
   }
-  document.getElementById('thumbnail-upsell').style.display = 'flex';
-  setTimeout(() => {
-    document.getElementById('thumbnail-upsell').scrollIntoView({behavior:'smooth',block:'center'});
-  }, 450);
-}
 
-function setupSparkie() {
-  document.getElementById('chatbot-bubble').onclick = () => {
-    alert("Sparkie: Hey! The chat feature is coming soon. For now, send feedback or ideas through the contact page. ⚡️");
+  function setupSparkie() {
+    document.getElementById('chatbot-bubble').onclick = () => {
+      alert("Sparkie: Hey! The chat feature is coming soon. For now, send feedback or ideas through the contact page. ⚡️");
+    }
   }
-}
 });
 </script>
-
 </body>
 </html>
