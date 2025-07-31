@@ -21,7 +21,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   // Paid/Pro logic (update as needed)
-  const isPaidUser = false;
+  const isPaidUser = false; // <--- Set to true to test as a paid user!
   const isOverLimit = false;
   const isProUser = false;
 
@@ -29,7 +29,17 @@ document.addEventListener('DOMContentLoaded', function() {
   loadVoices();
   setupSparkie();
   window.scrollTo(0,0);
-  document.getElementById('brandingToggleRow').style.display = isPaidUser ? "flex" : "none";
+
+  // Show branding/music/outro toggles if paid
+  if (isPaidUser) {
+    document.getElementById('brandingToggleRow').style.display = "flex";
+    document.getElementById('outroToggleRow').style.display = "flex";
+    document.getElementById('watermarkToggleRow').style.display = "flex";
+  } else {
+    document.getElementById('brandingToggleRow').style.display = "none";
+    document.getElementById('outroToggleRow').style.display = "none";
+    document.getElementById('watermarkToggleRow').style.display = "none";
+  }
   document.getElementById('scriptTextarea').addEventListener('input', updateGenerateVideoBtnState);
   updateGenerateVideoBtnState();
 
@@ -182,6 +192,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const progressBarWrap = document.getElementById('progressBarWrap');
     const progressBar = document.getElementById('progressBar');
     const progressStatus = document.getElementById('progressStatus');
+    // Paid toggles
+    const removeWatermark = isPaidUser && document.getElementById('removeBrandingSwitch')?.checked;
+    const removeOutro = isPaidUser && document.getElementById('removeOutroSwitch')?.checked;
 
     if (!script || !voice) {
       out.textContent = !script ? 'Generate script first.' : 'Select a voice.';
@@ -204,10 +217,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     simulatedPercent = 0;
     clearInterval(simInterval);
-
-    // Smooth progress bar: Animate up to backend percent (never > 100, never jump backwards)
     simInterval = setInterval(() => {
-      if (simulatedPercent < 94) simulatedPercent += 0.5 + Math.random(); // Slow, steady
+      if (simulatedPercent < 94) simulatedPercent += 0.5 + Math.random();
       if (simulatedPercent > 99) simulatedPercent = 99;
       progressBar.style.width = `${simulatedPercent}%`;
       progressBar.textContent = `${Math.round(simulatedPercent)}%`;
@@ -218,7 +229,8 @@ document.addEventListener('DOMContentLoaded', function() {
         script,
         voice,
         paidUser: isPaidUser,
-        removeWatermark: isPaidUser && document.getElementById('removeBrandingSwitch')?.checked,
+        removeWatermark,
+        removeOutro,
         addMusic: document.getElementById('addMusicSwitch')?.checked
       };
 
@@ -265,8 +277,8 @@ document.addEventListener('DOMContentLoaded', function() {
             player.style.display = 'block';
             player.style.width = '100%';
             player.style.height = '100%';
-            player.style.objectFit = 'cover';    // *** KEY: always fill ***
-            player.style.aspectRatio = '9/16';   // *** KEY: always portrait ***
+            player.style.objectFit = 'cover';
+            player.style.aspectRatio = '9/16';
             log('VIDEO', 'Set <video> src & style:', player.src);
 
             // Pause, reset, load (some browsers need this order)
@@ -291,7 +303,7 @@ document.addEventListener('DOMContentLoaded', function() {
             downloadBtn.href = videoUrl;
             downloadBtn.setAttribute('download', 'socialstormai-video.mp4');
 
-            // Fully works on all browsers/desktops/mobiles
+            // Universal download
             downloadBtn.onclick = (e) => {
               e.preventDefault();
               fetch(videoUrl)
@@ -322,9 +334,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     title: 'Check out my AI video!',
                     url: videoUrl
                   });
-                } catch (_) {
-                  // User cancelled, do nothing
-                }
+                } catch (_) {}
               } else {
                 navigator.clipboard.writeText(videoUrl);
                 alert('Video link copied!');
