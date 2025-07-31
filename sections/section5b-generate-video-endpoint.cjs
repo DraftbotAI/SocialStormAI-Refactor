@@ -41,9 +41,12 @@ function hashForCache(str) {
 }
 
 // ================= R2 UPLOAD HELPER =======================
+// UPDATED: Always return URL with custom domain!
 async function uploadToR2(localFilePath, r2FinalName, jobId) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  const publicBase = process.env.R2_PUBLIC_DOMAIN || 'pub-5d04f1b7b3034299b5953e63a9555fb8.r2.dev';
+  // --- ONLY CUSTOM DOMAIN URL SHOULD BE USED ON FRONTEND ---
+  // Always output https://videos.socialstormai.com/<file>
+  const customDomainBase = 'videos.socialstormai.com';
   const r2Key = `${jobId}-${r2FinalName}`;
   console.log(`[5B][R2 UPLOAD][START] Attempting upload for job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
   try {
@@ -61,7 +64,8 @@ async function uploadToR2(localFilePath, r2FinalName, jobId) {
 
     console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
 
-    const publicUrl = `https://${publicBase}/${r2Key}`;
+    // Return ONLY custom domain
+    const publicUrl = `https://${customDomainBase}/${r2Key}`;
     console.log(`[5B][R2 UPLOAD][SUCCESS] File available at: ${publicUrl}`);
     return publicUrl;
   } catch (err) {
@@ -322,6 +326,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         // === 8. Upload final video to R2 and finish ===
         try {
           progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2...' };
+          // --- Fix: This URL is now always https://videos.socialstormai.com/xxx.mp4 ---
           const r2VideoUrl = await uploadToR2(finalPath, r2FinalName, jobId);
           progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
         } catch (uploadErr) {

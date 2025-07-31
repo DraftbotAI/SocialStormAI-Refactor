@@ -1,4 +1,4 @@
-// ================================
+// ================================ 
 // SECTION 1: DOM READY & UTILITIES
 // ================================
 document.addEventListener('DOMContentLoaded', function() {
@@ -12,11 +12,13 @@ document.addEventListener('DOMContentLoaded', function() {
   // ==============================
   const hamburgerBtn = document.getElementById('hamburgerBtn');
   const mobileNav = document.getElementById('mobileNav');
-  hamburgerBtn.addEventListener('click', () => {
-    hamburgerBtn.classList.toggle('active');
-    log('NAV', 'Hamburger clicked, toggling mobile menu.');
-    mobileNav.style.display = mobileNav.style.display === 'flex' ? 'none' : 'flex';
-  });
+  if (hamburgerBtn && mobileNav) {
+    hamburgerBtn.addEventListener('click', () => {
+      hamburgerBtn.classList.toggle('active');
+      log('NAV', 'Hamburger clicked, toggling mobile menu.');
+      mobileNav.style.display = mobileNav.style.display === 'flex' ? 'none' : 'flex';
+    });
+  }
 
   // Paid/Pro logic (update as needed)
   const isPaidUser = false;
@@ -239,12 +241,21 @@ document.addEventListener('DOMContentLoaded', function() {
           clearInterval(pollingInterval);
           clearInterval(simInterval);
 
-          // FINAL VIDEO URL RESOLUTION
-          const videoUrl = p.output || (p.key ? `/video/${p.key}` : null);
-          log('VIDEO', 'Received final video URL:', videoUrl);
+          // FINAL VIDEO URL RESOLUTION (PRO FIX!)
+          let videoUrl = null;
+          if (p.output && p.output.startsWith('https://videos.socialstormai.com/')) {
+            videoUrl = p.output;
+            log('VIDEO', 'Using custom R2 domain for videoUrl:', videoUrl);
+          } else if (p.output && p.output.startsWith('https://')) {
+            // Only fallback if absolutely necessary, never use dev R2 if custom domain should work
+            videoUrl = p.output;
+            logWarn('VIDEO', 'Output is not from custom R2 domain, using as fallback:', videoUrl);
+          } else {
+            logError('VIDEO', 'Backend did not return valid video URL:', p.output);
+          }
 
           if (videoUrl) {
-            // Always set .src directly for universal browser compatibility
+            // Set .src directly for universal browser compatibility
             player.src = videoUrl;
             log('VIDEO', 'Set <video> src:', player.src);
 
@@ -269,6 +280,12 @@ document.addEventListener('DOMContentLoaded', function() {
             progressStatus.textContent = 'Click ▶︎ to play your video.';
             downloadBtn.style.display = 'inline-block';
             shareBtn.style.display = 'inline-block';
+            downloadBtn.href = videoUrl;
+            downloadBtn.setAttribute('download', 'socialstormai-video.mp4');
+            shareBtn.onclick = () => {
+              navigator.clipboard.writeText(videoUrl);
+              alert('Video link copied!');
+            };
             progressBar.style.width = '100%';
             progressBar.textContent = '100%';
             setTimeout(() => progressBarWrap.style.display = 'none', 2000);
