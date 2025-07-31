@@ -6,7 +6,6 @@
    - MAX logging everywhere
    =========================================================== */
 
-// Dependencies expected from Section 1:
 const path = require('path');
 
 console.log('[SECTION2][INIT] section2-basic-routes.cjs loaded');
@@ -19,33 +18,38 @@ function registerBasicRoutes(app, express, progress) {
     app.use(express.static(PUBLIC_DIR));
     console.log('[SECTION2][INFO] Static file directory mounted:', PUBLIC_DIR);
 
-    // Home page
+    // Home page (always serve index.html from /public)
     app.get('/', (req, res) => {
       console.log('[SECTION2][REQ] GET /');
-      res.sendFile(path.join(PUBLIC_DIR, 'index.html'), err => {
+      const indexPath = path.join(PUBLIC_DIR, 'index.html');
+      res.sendFile(indexPath, (err) => {
         if (err) {
           console.error('[SECTION2][ERR] Failed to send index.html:', err);
-          res.status(500).send('Error loading homepage.');
+          // Show basic error UI
+          res.status(err.statusCode || 500).send('Error loading homepage.');
+        } else {
+          console.log('[SECTION2][INFO] index.html sent successfully.');
         }
       });
     });
 
-    // Status endpoint
+    // API: Status check
     app.get('/api/status', (req, res) => {
       console.log('[SECTION2][REQ] GET /api/status');
       res.json({ status: 'OK', timestamp: new Date().toISOString() });
     });
 
-    // Progress endpoint
+    // API: Progress for a jobId
     app.get('/api/progress/:jobId', (req, res) => {
       const { jobId } = req.params;
       console.log(`[SECTION2][REQ] GET /api/progress/${jobId}`);
-      if (progress && progress[jobId]) {
+      if (progress && typeof progress === 'object' && progress[jobId]) {
         console.log(`[SECTION2][INFO] Returning progress for job ${jobId}:`, progress[jobId]);
         res.json(progress[jobId]);
       } else {
         console.warn(`[SECTION2][WARN] No progress found for job ${jobId}`);
-        res.json({ percent: 100, status: 'Done (or not found)' });
+        // Always return a valid JSON shape to prevent frontend errors
+        res.json({ percent: 100, status: 'Done (or not found)', jobId });
       }
     });
 

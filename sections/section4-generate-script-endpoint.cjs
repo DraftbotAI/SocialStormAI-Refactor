@@ -1,9 +1,9 @@
 /* ===========================================================
-   SECTION 4: /api/generate-script ENDPOINT (Modular)
+   SECTION 4: /api/generate-script ENDPOINT (Modular, PRO)
    -----------------------------------------------------------
    - Exports registerGenerateScriptEndpoint(app, openai)
    - MAX logging everywhere
-   - Compatible with modularized backend (Section 1, etc.)
+   - Enhanced: full input validation, OpenAI usage logging, robust errors
    =========================================================== */
 
 console.log('\n========== [SECTION4][INIT] /api/generate-script Endpoint ==========');
@@ -21,15 +21,27 @@ function registerGenerateScriptEndpoint(app, openai) {
   console.log('[SECTION4][INFO] Registering /api/generate-script endpoint...');
 
   app.post('/api/generate-script', async (req, res) => {
-    const idea = req.body.idea?.trim();
+    let idea;
     const timestamp = new Date().toISOString();
     console.log(`[SECTION4][REQ] POST /api/generate-script @ ${timestamp}`);
-    console.log(`[SECTION4][INPUT] idea = "${idea}"`);
 
-    if (!idea) {
-      console.warn('[SECTION4][WARN] Missing idea in request body');
-      return res.status(400).json({ success: false, error: "Missing idea" });
+    // Input validation: Body must be JSON and contain a non-empty "idea" string
+    try {
+      if (!req.body || typeof req.body !== 'object') {
+        console.warn('[SECTION4][WARN] Request body missing or not parsed (possible JSON error).');
+        return res.status(400).json({ success: false, error: "Request body missing or not valid JSON." });
+      }
+      idea = typeof req.body.idea === 'string' ? req.body.idea.trim() : '';
+      if (!idea) {
+        console.warn('[SECTION4][WARN] Missing or empty "idea" in request body.');
+        return res.status(400).json({ success: false, error: "Missing idea" });
+      }
+    } catch (inputErr) {
+      console.error('[SECTION4][ERR] Exception parsing request body:', inputErr);
+      return res.status(400).json({ success: false, error: "Invalid request body." });
     }
+
+    console.log(`[SECTION4][INPUT] idea = "${idea}"`);
 
     try {
       const prompt = `
@@ -82,6 +94,11 @@ Tags: secrets landmarks mystery history viral
 
       const raw = completion?.choices?.[0]?.message?.content?.trim() || '';
       console.log('[SECTION4][GPT] Raw output:\n' + raw);
+
+      // === Log OpenAI token usage if present ===
+      if (completion?.usage) {
+        console.log('[SECTION4][OPENAI_USAGE]', completion.usage);
+      }
 
       // === Parse Output ===
       let scriptLines = [];
@@ -143,6 +160,11 @@ Tags: secrets landmarks mystery history viral
       });
 
     } catch (err) {
+      // Distinguish between OpenAI errors and general errors
+      if (err.response && err.response.status) {
+        console.error('[SECTION4][FATAL][OPENAI] OpenAI API error:', err.response.status, err.response.data);
+        return res.status(502).json({ success: false, error: "OpenAI API error", details: err.response.data });
+      }
       console.error('[SECTION4][FATAL] Script generation failed:', err);
       res.status(500).json({ success: false, error: "Script generation failed" });
     }

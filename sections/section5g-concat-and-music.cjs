@@ -2,6 +2,7 @@
 // SECTION 5G: FINAL VIDEO ASSEMBLER & MUSIC/OUTRO
 // Concats scenes, adds music, appends outro, validates output.
 // SUPER MAX LOGGING AT EVERY STEP — NO SILENT FAILURES
+// Aspect ratio fixed! Scenes always 9:16, never stretched.
 // ===========================================================
 
 const fs = require('fs');
@@ -57,9 +58,6 @@ async function logFileProbe(file, label = 'PROBE') {
 
 // === FINAL VIDEO LOGIC ===
 
-/**
- * Generate a unique filename for final output (no collisions, always traceable).
- */
 function getUniqueFinalName(prefix = 'final') {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const uuid = uuidv4();
@@ -92,6 +90,7 @@ async function concatScenes(sceneFiles, workDir) {
         '-c:a aac',
         '-movflags +faststart',
         '-preset veryfast',
+        // === Aspect ratio fix: Always 9:16, never stretched ===
         '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
       ])
       .save(concatFile)
