@@ -33,11 +33,10 @@ console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
  */
 async function uploadToR2(localFilePath, r2FinalName, jobId) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  const accountDomain = process.env.R2_PUBLIC_DOMAIN || 'videos.socialstormai.com';
-  // --------- FIX: Upload to root, not videos/ subfolder ---------
-  // Use jobId-prefixed filename for uniqueness (or just r2FinalName for short root filenames)
+  // This should be your "pub-xxxxx.r2.dev" base, NOT the S3 endpoint!
+  const publicBase = process.env.R2_PUBLIC_DOMAIN || 'pub-5d04f1b7b3034299b5953e63a9555fb8.r2.dev';
+  // Flat file naming for direct root serving (matches Cloudflare dashboard public URL)
   const r2Key = `${jobId}-${r2FinalName}`;
-  // -------------------------------------------------------------
   console.log(`[5B][R2 UPLOAD][START] Attempting upload for job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
   try {
     if (!fs.existsSync(localFilePath)) {
@@ -54,12 +53,8 @@ async function uploadToR2(localFilePath, r2FinalName, jobId) {
 
     console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
 
-    let publicUrl;
-    if (accountDomain.includes('r2.dev')) {
-      publicUrl = `https://${accountDomain}/${r2Key}`;
-    } else {
-      publicUrl = `https://${accountDomain}/${r2Key}`;
-    }
+    // Always build public URL with .r2.dev!
+    const publicUrl = `https://${publicBase}/${r2Key}`;
     console.log(`[5B][R2 UPLOAD][SUCCESS] File available at: ${publicUrl}`);
     return publicUrl;
   } catch (err) {
