@@ -31,6 +31,7 @@ function isValidFile(fp, jobId) {
       console.warn(`[10D][VALIDATE][${jobId}] File too small: ${fp} (${sz} bytes)`);
       return false;
     }
+    console.log(`[10D][VALIDATE][${jobId}] Output file valid: ${fp} (${sz} bytes)`);
     return true;
   } catch (e) {
     console.error(`[10D][VALIDATE][${jobId}] Error validating file:`, e);
@@ -127,7 +128,8 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
       });
       writer.on('finish', () => {
         if (!errored) {
-          console.log('[10D][DL] Download complete:', outPath, 'size:', fs.existsSync(outPath) ? fs.statSync(outPath).size : 'N/A');
+          const size = fs.existsSync(outPath) ? fs.statSync(outPath).size : 'N/A';
+          console.log('[10D][DL] Download complete:', outPath, 'size:', size);
           resolve();
         }
       });
@@ -150,19 +152,15 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
   if (!fs.existsSync(imgPath)) throw new Error('[10D][KENBURNS][ERR] Image does not exist: ' + imgPath);
 
   const width = 1080, height = 1920;
-  // 1.4x zoom for Ken Burns, pan left-to-right or right-to-left
-  // **Always scale and pad to 1080x1920, then Ken Burns crop**
-  const baseScale = `${width * 1.4}:${height * 1.4}`;
+  const scale = width * 1.4;
+  // First: scale/pad to big canvas, then crop+pan to 1080x1920
   const panExpr = direction === 'ltr'
     ? `x='(iw-${width})*t/${duration}'`
     : `x='(iw-${width})-(iw-${width})*t/${duration}'`;
-  const filter = `
-    [0:v]scale=${baseScale}:force_original_aspect_ratio=decrease,
-    pad=${width * 1.4}:${height * 1.4}:(ow-iw)/2:(oh-ih)/2,setsar=1,
-    crop=${width}:${height}:${panExpr},setpts=PTS-STARTPTS[v]
-  `.replace(/\s+/g, '');
 
-  // Add -pix_fmt yuv420p and color flags, plus -preset ultrafast for max speed
+  // WARNING: Do not put :force_original_aspect_ratio=decrease on crop! Only on scale!
+  const filter = `[0:v]scale=${scale}:${height*1.4}:force_original_aspect_ratio=decrease,pad=${scale}:${height*1.4}:(ow-iw)/2:(oh-ih)/2,setsar=1,crop=${width}:${height}:${panExpr},setpts=PTS-STARTPTS[v]`;
+
   const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
 
   console.log(`[10D][KENBURNS][${jobId}] Running FFmpeg: ${ffmpegCmd}`);
@@ -177,6 +175,13 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
           console.error('[10D][KENBURNS][ERR]', error, stderr);
         }
         return reject(error);
+      }
+      // Log output file size
+      if (fs.existsSync(outPath)) {
+        const sz = fs.statSync(outPath).size;
+        console.log(`[10D][KENBURNS][CHECK][${jobId}] Output exists: ${outPath}, size: ${sz}`);
+      } else {
+        console.error(`[10D][KENBURNS][CHECK][${jobId}] Output missing: ${outPath}`);
       }
       if (!isValidFile(outPath, jobId)) {
         return reject(new Error('[10D][KENBURNS][ERR] Output video not created or too small'));
@@ -195,7 +200,8 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
 // --- Emergency fallback: static image video (never fails!) ---
 async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
   const width = 1080, height = 1920;
-  // Use robust scaling, padding, and yuv420p for any image!
+  // Robust scaling/pad — always succeeds, never fails on aspect!
+  // DO NOT add any colon before force_original_aspect_ratio
   const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -vf "scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
   console.log(`[10D][STATICIMG][${jobId}] Running fallback FFmpeg: ${ffmpegCmd}`);
   return new Promise((resolve, reject) => {
@@ -203,6 +209,13 @@ async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
       if (error) {
         console.error(`[10D][STATICIMG][ERR][${jobId}] Fallback static image to video failed.`, error, stderr);
         return reject(error);
+      }
+      // Log output file size
+      if (fs.existsSync(outPath)) {
+        const sz = fs.statSync(outPath).size;
+        console.log(`[10D][STATICIMG][CHECK][${jobId}] Output exists: ${outPath}, size: ${sz}`);
+      } else {
+        console.error(`[10D][STATICIMG][CHECK][${jobId}] Output missing: ${outPath}`);
       }
       if (!isValidFile(outPath, jobId)) {
         return reject(new Error('[10D][STATICIMG][ERR] Output video not created or too small'));
