@@ -13,13 +13,18 @@ const crypto = require('crypto');
 // R2 dependencies (S3 SDK)
 const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
 
+// === CRUCIAL: Correct import for bulletproofScenes ===
+const {
+  bulletproofScenes,          // <-- FIX: from section5c-script-scene-utils.cjs
+  splitScriptToScenes
+} = require('./section5c-script-scene-utils.cjs');
+
 // === 5G Video/Music/Outro/Helpers ===
 const {
   concatScenes,
   ensureAudioStream,
   overlayMusic,
   appendOutro,
-  bulletproofScenes, // FIX: now correctly imported as a function!
   getUniqueFinalName // must be implemented in 5G!
 } = require('./section5g-concat-and-music.cjs');
 
@@ -78,7 +83,7 @@ function registerGenerateVideoEndpoint(app, deps) {
   if (!deps) throw new Error('[5B][FATAL] No dependencies passed in!');
 
   const {
-    splitScriptToScenes,
+    splitScriptToScenes: depSplitScriptToScenes,
     findClipForScene,
     createSceneAudio,
     createMegaSceneAudio,
@@ -91,7 +96,7 @@ function registerGenerateVideoEndpoint(app, deps) {
   if (typeof findClipForScene !== "function") throw new Error('[5B][FATAL] findClipForScene missing from deps!');
   if (typeof createSceneAudio !== "function" || typeof createMegaSceneAudio !== "function")
     throw new Error('[5B][FATAL] Audio generation helpers missing!');
-  if (typeof splitScriptToScenes !== "function")
+  if (typeof depSplitScriptToScenes !== "function")
     throw new Error('[5B][FATAL] splitScriptToScenes missing from deps!');
 
   console.log('[5B][INFO] Registering POST /api/generate-video route...');
@@ -120,9 +125,8 @@ function registerGenerateVideoEndpoint(app, deps) {
         if (!script || !voice) throw new Error('Missing script or voice');
         console.log(`[5B][INPUTS] [${jobId}] Script length: ${script.length} | Voice: ${voice}`);
 
-        let scenes = splitScriptToScenes(script);
-
-        // BULLETPROOF: Defensive wrapper (always array of valid scene objects)
+        // Use deps version to preserve injection, but always bulletproof
+        let scenes = depSplitScriptToScenes(script);
         scenes = bulletproofScenes(scenes);
 
         console.log(`[5B][SCENES] [${jobId}] Split into ${scenes.length} scenes.`);

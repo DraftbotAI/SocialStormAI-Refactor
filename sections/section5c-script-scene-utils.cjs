@@ -1,7 +1,7 @@
 // ===========================================================
 // SECTION 5C: SCRIPT & SCENE UTILITIES
 // Splits script into scenes, handles scene structure, utilities.
-// MAX LOGGING AT EVERY STEP
+// MAX LOGGING EVERY STEP
 // Enhanced: Always returns array of scene objects, never strings
 // Improved: Viral summary/hook-first logic, super robust sentence/line splitting
 // ===========================================================
