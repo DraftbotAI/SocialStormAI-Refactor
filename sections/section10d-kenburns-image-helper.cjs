@@ -3,6 +3,7 @@
 // Finds fallback still images, downloads them, creates slow-pan videos
 // Used when no matching R2/Pexels/Pixabay video is found.
 // MAX LOGGING EVERY STEP, Modular, Deduped, Validated
+// Now: FFmpeg Ken Burns fallback is time-limited, always uses robust pixel/color flags!
 // ===========================================================
 
 const axios = require('axios');
@@ -139,7 +140,7 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
   }
 }
 
-// --- Make Ken Burns video from local image ---
+// --- Make Ken Burns video from local image (now with timeout and full pixel/color flags) ---
 async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
   console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}) | ${imgPath} → ${outPath} (${duration}s)`);
@@ -151,13 +152,19 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
     ? `[0:v]scale=${width*1.4}:${height*1.4},crop=${width}:${height}:x='(iw-${width})*t/${duration}',setpts=PTS-STARTPTS[v]`
     : `[0:v]scale=${width*1.4}:${height*1.4},crop=${width}:${height}:x='(iw-${width})-(iw-${width})*t/${duration}',setpts=PTS-STARTPTS[v]`;
 
-  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 "${outPath}"`;
+  // Add -pix_fmt yuv420p and color flags, plus -preset ultrafast for max speed
+  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -c:v libx264 -preset ultrafast "${outPath}"`;
+
   console.log(`[10D][KENBURNS][${jobId}] Running FFmpeg: ${ffmpegCmd}`);
 
   return new Promise((resolve, reject) => {
-    exec(ffmpegCmd, (error, stdout, stderr) => {
+    const child = exec(ffmpegCmd, { timeout: 12000 }, (error, stdout, stderr) => {
       if (error) {
-        console.error('[10D][KENBURNS][ERR]', error, stderr);
+        if (error.killed) {
+          console.error(`[10D][KENBURNS][TIMEOUT][${jobId}] FFmpeg Ken Burns command timed out after 12s!`, error);
+        } else {
+          console.error('[10D][KENBURNS][ERR]', error, stderr);
+        }
         return reject(error);
       }
       if (!isValidFile(outPath, jobId)) {
@@ -165,6 +172,12 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
       }
       console.log(`[10D][KENBURNS][${jobId}] Ken Burns pan video created:`, outPath);
       resolve(outPath);
+    });
+
+    // In case FFmpeg hangs, force kill on timeout
+    child.on('error', (err) => {
+      console.error('[10D][KENBURNS][ERR][PROC]', err);
+      reject(err);
     });
   });
 }
@@ -204,7 +217,13 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     const outVidName = `kenburns-${uuidv4()}.mp4`;
     const outVidPath = path.join(realTmpDir, outVidName);
 
-    await makeKenBurnsVideoFromImage(imgPath, outVidPath, 5, jobId);
+    // Try ONCE — do not retry or hang forever!
+    try {
+      await makeKenBurnsVideoFromImage(imgPath, outVidPath, 5, jobId);
+    } catch (err) {
+      console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns video creation failed, skipping fallback.`, err);
+      return null;
+    }
 
     console.log(`[10D][FALLBACK][${jobId}] Ken Burns fallback video created: ${outVidPath}`);
     return outVidPath;
