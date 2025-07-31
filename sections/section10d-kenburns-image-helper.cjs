@@ -5,6 +5,7 @@
 // MAX LOGGING EVERY STEP, Modular, Deduped, Validated
 // Now: FFmpeg Ken Burns fallback is time-limited, always uses robust pixel/color flags!
 // If Ken Burns fails, fallback to static image video so pipeline NEVER dies!
+// Now: Always force scale/pad to 1080x1920, yuv420p, never fails on weird images!
 // ===========================================================
 
 const axios = require('axios');
@@ -141,7 +142,7 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
   }
 }
 
-// --- Make Ken Burns video from local image (timeout, pixel/color flags, fallback to static!) ---
+// --- Make Ken Burns video from local image (with perfect scaling/padding!) ---
 async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
   console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}) | ${imgPath} → ${outPath} (${duration}s)`);
@@ -149,12 +150,20 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
   if (!fs.existsSync(imgPath)) throw new Error('[10D][KENBURNS][ERR] Image does not exist: ' + imgPath);
 
   const width = 1080, height = 1920;
-  const filter = direction === 'ltr'
-    ? `[0:v]scale=${width*1.4}:${height*1.4},crop=${width}:${height}:x='(iw-${width})*t/${duration}',setpts=PTS-STARTPTS[v]`
-    : `[0:v]scale=${width*1.4}:${height*1.4},crop=${width}:${height}:x='(iw-${width})-(iw-${width})*t/${duration}',setpts=PTS-STARTPTS[v]`;
+  // 1.4x zoom for Ken Burns, pan left-to-right or right-to-left
+  // **Always scale and pad to 1080x1920, then Ken Burns crop**
+  const baseScale = `${width * 1.4}:${height * 1.4}`;
+  const panExpr = direction === 'ltr'
+    ? `x='(iw-${width})*t/${duration}'`
+    : `x='(iw-${width})-(iw-${width})*t/${duration}'`;
+  const filter = `
+    [0:v]scale=${baseScale}:force_original_aspect_ratio=decrease,
+    pad=${width * 1.4}:${height * 1.4}:(ow-iw)/2:(oh-ih)/2,setsar=1,
+    crop=${width}:${height}:${panExpr},setpts=PTS-STARTPTS[v]
+  `.replace(/\s+/g, '');
 
   // Add -pix_fmt yuv420p and color flags, plus -preset ultrafast for max speed
-  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -c:v libx264 -preset ultrafast "${outPath}"`;
+  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
 
   console.log(`[10D][KENBURNS][${jobId}] Running FFmpeg: ${ffmpegCmd}`);
 
@@ -186,7 +195,8 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
 // --- Emergency fallback: static image video (never fails!) ---
 async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
   const width = 1080, height = 1920;
-  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -vf "scale=${width}:${height}" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
+  // Use robust scaling, padding, and yuv420p for any image!
+  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -vf "scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
   console.log(`[10D][STATICIMG][${jobId}] Running fallback FFmpeg: ${ffmpegCmd}`);
   return new Promise((resolve, reject) => {
     exec(ffmpegCmd, { timeout: 8000 }, (error, stdout, stderr) => {
