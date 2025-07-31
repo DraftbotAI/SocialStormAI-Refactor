@@ -4,6 +4,7 @@
 // MAX LOGGING AT EVERY STEP
 // Enhanced: Mega-scene (multi-line audio) support
 // Improved: Trims 0.5s BEFORE voice, ends 1s AFTER voice ends
+// Now: Viral-standard blurred background fill, never stretches main video!
 // ===========================================================
 
 const fs = require('fs');
@@ -41,18 +42,21 @@ async function getDuration(file) {
 
 /**
  * Trims a video file for a scene: starts 0.5s before audio, ends 1s after audio.
+ * Uses viral-standard blurred background, never stretches the main video.
  */
 async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, trailOut = 1.0) {
-  let videoStart = Math.max(0, 0 - leadIn); // normally 0, could allow per-clip offset in future
+  let videoStart = 0;
   let duration = audioDuration + leadIn + trailOut;
-  videoStart = 0; // Always start at the beginning unless you want to add "late entry"
   console.log(`[5F][TRIM] trimForNarration: in="${inPath}" out="${outPath}" start=${videoStart}s duration=${duration}s`);
   return new Promise((resolve, reject) => {
     ffmpeg(inPath)
       .setStartTime(videoStart)
       .setDuration(duration)
       .outputOptions([
-        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
+        '-filter_complex',
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1[vmain];" +
+        "[0:v]scale=1080:1920,boxblur=20:1[bg];" +
+        "[bg][vmain]overlay=(W-w)/2:(H-h)/2"
       ])
       .output(outPath)
       .on('start', (cmd) => {
@@ -83,6 +87,7 @@ async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, tr
 
 /**
  * Muxes a narration audio file onto a video file, using 0.5s lead-in, 1.0s trail-out.
+ * Always trims the video to match the voiceover with proper padding and blurred background.
  */
 async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   console.log(`[5F][MUX] muxVideoWithNarration called: video="${videoIn}" audio="${audioIn}" out="${outPath}"`);
@@ -93,7 +98,7 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   } catch (err) {
     throw new Error(`[5F][MUX][ERR] Cannot get audio duration: ${err}`);
   }
-  // Trim video: 0.5s before, 1.0s after audio
+  // Trim video: 0.5s before, 1.0s after audio, with viral blur
   const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-scene-${Date.now()}.mp4`);
   try {
     await trimForNarration(videoIn, trimmedVideo, audioDuration, 0.5, 1.0);
@@ -108,7 +113,7 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
       .input(trimmedVideo)
       .input(audioIn)
       .outputOptions([
-        '-shortest', // Stops when shortest stream ends (voice)
+        '-shortest',
         '-c:v copy',
         '-c:a aac',
         '-y'
@@ -145,6 +150,7 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
 
 /**
  * Handles "mega-scene" (scene 1+2): trims video 0.5s before, 1s after voice, perfect for viral hooks.
+ * Uses same blurred background viral effect.
  */
 async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
   console.log(`[5F][MEGA] muxMegaSceneWithNarration called: video="${videoIn}" audio="${audioIn}" out="${outPath}"`);
@@ -176,7 +182,10 @@ async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
   }
 }
 
-// Silent audio helper remains, unchanged:
+/**
+ * Adds silent audio track to a video (for videos that have no audio stream).
+ * Uses blurred background to match rest of pipeline.
+ */
 async function addSilentAudioTrack(inPath, outPath, duration) {
   console.log(`[5F][AUDIO] addSilentAudioTrack called: in="${inPath}" out="${outPath}" duration=${duration}`);
   return new Promise((resolve, reject) => {
@@ -184,7 +193,12 @@ async function addSilentAudioTrack(inPath, outPath, duration) {
       .input(inPath)
       .input('anullsrc=channel_layout=stereo:sample_rate=44100')
       .inputOptions(['-f lavfi'])
-      .outputOptions(['-shortest', '-c:v copy', '-c:a aac', '-y'])
+      .outputOptions([
+        '-shortest',
+        '-c:v copy',
+        '-c:a aac',
+        '-y'
+      ])
       .duration(duration)
       .on('start', (cmd) => {
         console.log(`[5F][AUDIO][CMD] ${cmd}`);

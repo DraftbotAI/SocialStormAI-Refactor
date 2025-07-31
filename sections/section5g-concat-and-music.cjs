@@ -13,7 +13,6 @@ const { v4: uuidv4 } = require('uuid');
 console.log('[5G][INIT] Final video assembler loaded.');
 
 // === STATIC ASSET PATH HELPERS ===
-
 function getOutroPath() {
   const outroPath = path.join(__dirname, '..', 'public', 'video', 'outro.mp4');
   console.log('[5G][PATH][OUTRO] Using outro path:', outroPath);
@@ -21,7 +20,6 @@ function getOutroPath() {
 }
 
 // --- File Existence and Probe Utilities ---
-
 function assertFile(file, minSize = 10240, label = 'FILE') {
   if (!fs.existsSync(file)) {
     throw new Error(`[5G][${label}][ERR] File does not exist: ${file}`);
@@ -57,61 +55,10 @@ async function logFileProbe(file, label = 'PROBE') {
 }
 
 // === FINAL VIDEO LOGIC ===
-
 function getUniqueFinalName(prefix = 'final') {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const uuid = uuidv4();
   return `${prefix}-${timestamp}-${uuid}.mp4`;
-}
-
-/**
- * Concatenate all scene files (each with voice) into a single video.
- * Ensures proper aspect ratio and audio.
- */
-async function concatScenes(sceneFiles, workDir) {
-  console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
-  sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i+1}: ${file}`));
-  const listFile = path.resolve(workDir, 'list.txt');
-  fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
-  const concatFile = path.resolve(workDir, getUniqueFinalName('concat'));
-
-  // Pre-concat check for all scene files
-  for (let i = 0; i < sceneFiles.length; i++) {
-    try { assertFile(sceneFiles[i], 10240, `CONCAT_SCENE_${i+1}`); } catch(e) { console.error(e.message); }
-    await logFileProbe(sceneFiles[i], `CONCAT_SCENE_${i+1}`);
-  }
-
-  return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(listFile)
-      .inputOptions(['-f concat', '-safe 0'])
-      .outputOptions([
-        '-c:v libx264',
-        '-c:a aac',
-        '-movflags +faststart',
-        '-preset veryfast',
-        // === Aspect ratio fix: Always 9:16, never stretched ===
-        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
-      ])
-      .save(concatFile)
-      .on('end', async () => {
-        try {
-          assertFile(concatFile, 10240, 'CONCAT_OUT');
-          await logFileProbe(concatFile, 'CONCAT_OUT');
-          console.log(`[5G][CONCAT] Scenes concatenated: ${concatFile}`);
-          resolve(concatFile);
-        } catch (e) {
-          console.error(`[5G][CONCAT][ERR] ${e.message}`);
-          reject(e);
-        }
-      })
-      .on('error', (err, stdout, stderr) => {
-        console.error(`[5G][CONCAT][FFMPEG][ERR]`, err);
-        if (stderr) console.error(`[5G][CONCAT][STDERR]\n${stderr}`);
-        if (stdout) console.log(`[5G][CONCAT][STDOUT]\n${stdout}`);
-        reject(err);
-      });
-  });
 }
 
 /**
@@ -155,6 +102,59 @@ async function ensureAudioStream(videoPath, workDir) {
         console.error(`[5G][AUDIOFIX][FFMPEG][ERR]`, err);
         if (stderr) console.error(`[5G][AUDIOFIX][STDERR]\n${stderr}`);
         if (stdout) console.log(`[5G][AUDIOFIX][STDOUT]\n${stdout}`);
+        reject(err);
+      });
+  });
+}
+
+/**
+ * Concatenate all scene files (each with voice) into a single video.
+ * Ensures proper aspect ratio and audio. (ALWAYS runs ensureAudioStream on each clip before concat.)
+ */
+async function concatScenes(sceneFiles, workDir) {
+  console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
+  sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i+1}: ${file}`));
+
+  // --- Ensure every file has audio before concat! ---
+  const fixedScenes = await Promise.all(sceneFiles.map(f => ensureAudioStream(f, workDir)));
+  const listFile = path.resolve(workDir, 'list.txt');
+  fs.writeFileSync(listFile, fixedScenes.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
+  const concatFile = path.resolve(workDir, getUniqueFinalName('concat'));
+
+  // Pre-concat check for all scene files
+  for (let i = 0; i < fixedScenes.length; i++) {
+    try { assertFile(fixedScenes[i], 10240, `CONCAT_SCENE_${i+1}`); } catch(e) { console.error(e.message); }
+    await logFileProbe(fixedScenes[i], `CONCAT_SCENE_${i+1}`);
+  }
+
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(listFile)
+      .inputOptions(['-f concat', '-safe 0'])
+      .outputOptions([
+        '-c:v libx264',
+        '-c:a aac',
+        '-movflags +faststart',
+        '-preset veryfast',
+        // === Aspect ratio fix: Always 9:16, never stretched ===
+        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
+      ])
+      .save(concatFile)
+      .on('end', async () => {
+        try {
+          assertFile(concatFile, 10240, 'CONCAT_OUT');
+          await logFileProbe(concatFile, 'CONCAT_OUT');
+          console.log(`[5G][CONCAT] Scenes concatenated: ${concatFile}`);
+          resolve(concatFile);
+        } catch (e) {
+          console.error(`[5G][CONCAT][ERR] ${e.message}`);
+          reject(e);
+        }
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][CONCAT][FFMPEG][ERR]`, err);
+        if (stderr) console.error(`[5G][CONCAT][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][CONCAT][STDOUT]\n${stdout}`);
         reject(err);
       });
   });
