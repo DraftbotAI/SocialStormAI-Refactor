@@ -204,19 +204,22 @@ document.addEventListener('DOMContentLoaded', function() {
 
     simulatedPercent = 0;
     clearInterval(simInterval);
+
+    // Smooth progress bar: Animate up to backend percent (never > 100, never jump backwards)
     simInterval = setInterval(() => {
-      if (simulatedPercent < 94) simulatedPercent += Math.random();
+      if (simulatedPercent < 94) simulatedPercent += 0.5 + Math.random(); // Slow, steady
+      if (simulatedPercent > 99) simulatedPercent = 99;
       progressBar.style.width = `${simulatedPercent}%`;
       progressBar.textContent = `${Math.round(simulatedPercent)}%`;
-    }, 800);
+    }, 400);
 
     try {
       const payload = {
         script,
         voice,
         paidUser: isPaidUser,
-        removeWatermark: isPaidUser && document.getElementById('removeBrandingSwitch').checked,
-        addMusic: document.getElementById('addMusicSwitch').checked
+        removeWatermark: isPaidUser && document.getElementById('removeBrandingSwitch')?.checked,
+        addMusic: document.getElementById('addMusicSwitch')?.checked
       };
 
       const res = await fetch('/api/generate-video', {
@@ -233,6 +236,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const resp = await fetch(`/api/progress/${data.jobId}`);
         const p = await resp.json();
         let displayPercent = Math.max(simulatedPercent, p.percent || 0);
+        if (displayPercent > 100) displayPercent = 100;
         progressBar.style.width = `${displayPercent}%`;
         progressBar.textContent = `${Math.round(displayPercent)}%`;
         progressStatus.textContent = p.status || '';
@@ -247,7 +251,6 @@ document.addEventListener('DOMContentLoaded', function() {
             videoUrl = p.output;
             log('VIDEO', 'Using custom R2 domain for videoUrl:', videoUrl);
           } else if (p.output && p.output.startsWith('https://')) {
-            // Only fallback if absolutely necessary, never use dev R2 if custom domain should work
             videoUrl = p.output;
             logWarn('VIDEO', 'Output is not from custom R2 domain, using as fallback:', videoUrl);
           } else {
@@ -257,7 +260,14 @@ document.addEventListener('DOMContentLoaded', function() {
           if (videoUrl) {
             // Set .src directly for universal browser compatibility
             player.src = videoUrl;
-            log('VIDEO', 'Set <video> src:', player.src);
+            player.setAttribute('playsinline', 'true');
+            player.setAttribute('crossorigin', 'anonymous');
+            player.style.display = 'block';
+            player.style.width = '100%';
+            player.style.height = '100%';
+            player.style.objectFit = 'cover';    // *** KEY: always fill ***
+            player.style.aspectRatio = '9/16';   // *** KEY: always portrait ***
+            log('VIDEO', 'Set <video> src & style:', player.src);
 
             // Pause, reset, load (some browsers need this order)
             player.pause();
@@ -271,8 +281,6 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
           }
 
-          player.style.display = 'block';
-
           // Event: video loaded
           player.onloadeddata = () => {
             player.muted = false;
@@ -282,10 +290,47 @@ document.addEventListener('DOMContentLoaded', function() {
             shareBtn.style.display = 'inline-block';
             downloadBtn.href = videoUrl;
             downloadBtn.setAttribute('download', 'socialstormai-video.mp4');
-            shareBtn.onclick = () => {
-              navigator.clipboard.writeText(videoUrl);
-              alert('Video link copied!');
+
+            // Fully works on all browsers/desktops/mobiles
+            downloadBtn.onclick = (e) => {
+              e.preventDefault();
+              fetch(videoUrl)
+                .then(r => r.blob())
+                .then(blob => {
+                  const a = document.createElement('a');
+                  a.style.display = 'none';
+                  document.body.appendChild(a);
+                  const url = window.URL.createObjectURL(blob);
+                  a.href = url;
+                  a.download = 'socialstormai-video.mp4';
+                  a.click();
+                  setTimeout(() => {
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                  }, 1000);
+                })
+                .catch(() => {
+                  alert('Unable to download video. Try right-click Save As.');
+                });
             };
+
+            // Share API (with clipboard fallback)
+            shareBtn.onclick = async () => {
+              if (navigator.share) {
+                try {
+                  await navigator.share({
+                    title: 'Check out my AI video!',
+                    url: videoUrl
+                  });
+                } catch (_) {
+                  // User cancelled, do nothing
+                }
+              } else {
+                navigator.clipboard.writeText(videoUrl);
+                alert('Video link copied!');
+              }
+            };
+
             progressBar.style.width = '100%';
             progressBar.textContent = '100%';
             setTimeout(() => progressBarWrap.style.display = 'none', 2000);
@@ -296,7 +341,7 @@ document.addEventListener('DOMContentLoaded', function() {
           // Event: video error
           player.onerror = (e) => {
             progressStatus.textContent = 'Error loading video. Retry.';
-            logError('VIDEO', 'Error loading video.', videoUrl, e);
+            logError('VIDEO', 'Error loading video.', player.src, e);
           };
         }
       }, 1200);
