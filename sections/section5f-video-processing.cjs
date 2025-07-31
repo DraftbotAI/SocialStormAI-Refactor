@@ -1,11 +1,8 @@
 // ===========================================================
 // SECTION 5F: VIDEO PROCESSING & AV COMBINER
 // Handles trimming, normalizing, silent audio, muxing narration onto video
-// MAX LOGGING AT EVERY STEP
-// Enhanced: Mega-scene (multi-line audio) support
-// Now: Portrait aspect (1080x1920), viral blur, no stretch
-// Pixel Format Forced: yuv420p (prevents deprecated format warnings)
-// Parallelization-Ready: All helpers are async & pure
+// MAX LOGGING AT EVERY STEP, VIRAL PORTRAIT BLUR, NO STRETCH, NO BLACK BARS
+// Aspect always forced to 1080x1920 (portrait)
 // ===========================================================
 
 const fs = require('fs');
@@ -47,24 +44,32 @@ async function getDuration(file) {
   });
 }
 
-// ========================
-// SCENE TRIM + BLUR UTILS
-// ========================
+// ============================================================
+// SCENE TRIM + BLUR: Always portrait 1080x1920, viral style!
+// ============================================================
 async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, trailOut = 1.0) {
   const duration = audioDuration + leadIn + trailOut;
-  console.log(`[5F][TRIM] in="${inPath}" → out="${outPath}" trim to ${duration}s`);
+  console.log(`[5F][TRIM] in="${inPath}" → out="${outPath}" | trim to ${duration}s`);
+  // Command ensures viral blur with 9:16 output, with sharp video centered
   return new Promise((resolve, reject) => {
     ffmpeg(inPath)
+      .inputOptions(['-y'])
       .setStartTime(0)
       .setDuration(duration)
       .outputOptions([
         '-filter_complex',
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease," +
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[vmain];" +
-        "[0:v]scale=1080:1920,boxblur=20:1[bg];" +
-        "[bg][vmain]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
+        // Viral portrait + blur + sharp center, for ANY source aspect ratio
+        [
+          "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease," +
+          "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[vmain];" + // Main sharp
+          "[0:v]scale=1080:1920,boxblur=32:2[bg];" + // Massive blur
+          "[bg][vmain]overlay=(W-w)/2:(H-h)/2,format=yuv420p"
+        ].join(""),
+        '-r 30',
+        '-an', // Remove original audio
+        '-pix_fmt yuv420p',
+        '-y'
       ])
-      .output(outPath)
       .on('start', cmd => console.log(`[5F][TRIM][CMD] ${cmd}`))
       .on('stderr', line => console.log(`[5F][TRIM][STDERR] ${line}`))
       .on('end', () => {
@@ -83,13 +88,13 @@ async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, tr
         if (stdout) console.log(`[5F][TRIM][FFMPEG][STDOUT]\n${stdout}`);
         reject(err);
       })
-      .run();
+      .save(outPath);
   });
 }
 
-// =========================
-// SCENE MUX (AUDIO + VIDEO)
-// =========================
+// ============================================================
+// SCENE MUX: Mux sharp portrait video (trimmed) with narration
+// ============================================================
 async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   console.log(`[5F][MUX] muxVideoWithNarration: video="${videoIn}", audio="${audioIn}", out="${outPath}"`);
   let audioDuration;
@@ -101,9 +106,11 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   }
 
   const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-scene-${Date.now()}-${Math.floor(Math.random()*99999)}.mp4`);
+  let trimDone = false;
 
   try {
     await trimForNarration(videoIn, trimmedVideo, audioDuration, 0.5, 1.0);
+    trimDone = true;
   } catch (err) {
     throw new Error(`[5F][MUX][ERR] Failed to trim video for narration: ${err}`);
   }
@@ -117,6 +124,8 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
         '-map 1:a:0',
         '-c:v libx264',
         '-c:a aac',
+        '-b:v 2200k',
+        '-b:a 160k',
         '-shortest',
         '-preset ultrafast',
         '-pix_fmt yuv420p',
@@ -124,31 +133,43 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
       ])
       .on('start', cmd => console.log(`[5F][MUX][CMD] ${cmd}`))
       .on('stderr', line => console.log(`[5F][MUX][STDERR] ${line}`))
-      .save(outPath)
       .on('end', () => {
         try {
           assertFile(outPath, 10240, 'MUX_OUT');
           console.log(`[5F][MUX] ✅ Muxed video saved: ${outPath}`);
-          fs.unlinkSync(trimmedVideo);
-          console.log(`[5F][MUX][CLEANUP] Deleted temp file: ${trimmedVideo}`);
-          resolve();
         } catch (e) {
           console.error(`[5F][MUX][ERR] Final mux validation failed: ${e.message}`);
-          reject(e);
+          return reject(e);
         }
+        try {
+          if (trimDone && fs.existsSync(trimmedVideo)) {
+            fs.unlinkSync(trimmedVideo);
+            console.log(`[5F][MUX][CLEANUP] Deleted temp file: ${trimmedVideo}`);
+          }
+        } catch (e) {
+          console.warn(`[5F][MUX][WARN] Could not delete temp trimmed file: ${trimmedVideo}`, e);
+        }
+        resolve();
       })
       .on('error', (err, stdout, stderr) => {
         console.error(`[5F][MUX][ERR] FFmpeg mux failed:`, err);
         if (stderr) console.error(`[5F][MUX][STDERR]\n${stderr}`);
         if (stdout) console.log(`[5F][MUX][STDOUT]\n${stdout}`);
+        try {
+          if (trimDone && fs.existsSync(trimmedVideo)) {
+            fs.unlinkSync(trimmedVideo);
+            console.log(`[5F][MUX][CLEANUP] Deleted temp file after error: ${trimmedVideo}`);
+          }
+        } catch (e) {}
         reject(err);
-      });
+      })
+      .save(outPath);
   });
 }
 
-// ============================
-// MEGA-SCENE MUX (HOOK + MAIN)
-// ============================
+// ============================================================
+// MEGA-SCENE MUX: For hook + main scene (multi-line audio)
+// ============================================================
 async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
   console.log(`[5F][MEGA] muxMegaSceneWithNarration: video="${videoIn}", audio="${audioIn}", out="${outPath}"`);
   let audioDuration;
@@ -160,21 +181,32 @@ async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
   }
 
   const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-megascene-${Date.now()}-${Math.floor(Math.random()*99999)}.mp4`);
+  let trimDone = false;
 
   try {
     await trimForNarration(videoIn, trimmedVideo, audioDuration, 0.5, 1.0);
+    trimDone = true;
     await muxVideoWithNarration(trimmedVideo, audioIn, outPath);
-    fs.unlinkSync(trimmedVideo);
+    if (trimDone && fs.existsSync(trimmedVideo)) {
+      fs.unlinkSync(trimmedVideo);
+      console.log(`[5F][MEGA][CLEANUP] Deleted temp file: ${trimmedVideo}`);
+    }
     console.log(`[5F][MEGA] ✅ Mega-scene complete and cleaned up.`);
   } catch (err) {
     console.error(`[5F][MEGA][ERR] Mega-scene failed:`, err);
+    try {
+      if (trimDone && fs.existsSync(trimmedVideo)) {
+        fs.unlinkSync(trimmedVideo);
+        console.log(`[5F][MEGA][CLEANUP] Deleted temp file after error: ${trimmedVideo}`);
+      }
+    } catch (e) {}
     throw err;
   }
 }
 
-// ===========================
-// ADD SILENT AUDIO TO VIDEO
-// ===========================
+// ============================================================
+// ADD SILENT AUDIO TO VIDEO (for Ken Burns, image videos)
+// ============================================================
 async function addSilentAudioTrack(inPath, outPath, duration) {
   console.log(`[5F][AUDIO] Adding silent audio: ${inPath} → ${outPath} (duration: ${duration})`);
   return new Promise((resolve, reject) => {
@@ -192,7 +224,6 @@ async function addSilentAudioTrack(inPath, outPath, duration) {
       .duration(duration)
       .on('start', cmd => console.log(`[5F][AUDIO][CMD] ${cmd}`))
       .on('stderr', line => console.log(`[5F][AUDIO][STDERR] ${line}`))
-      .save(outPath)
       .on('end', () => {
         try {
           assertFile(outPath, 10240, 'AUDIO_OUT');
@@ -208,7 +239,8 @@ async function addSilentAudioTrack(inPath, outPath, duration) {
         if (stderr) console.error(`[5F][AUDIO][STDERR]\n${stderr}`);
         if (stdout) console.log(`[5F][AUDIO][STDOUT]\n${stdout}`);
         reject(err);
-      });
+      })
+      .save(outPath);
   });
 }
 
