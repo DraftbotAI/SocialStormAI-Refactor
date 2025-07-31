@@ -4,6 +4,7 @@
 // Used when no matching R2/Pexels/Pixabay video is found.
 // MAX LOGGING EVERY STEP, Modular, Deduped, Validated
 // Now: FFmpeg Ken Burns fallback is time-limited, always uses robust pixel/color flags!
+// If Ken Burns fails, fallback to static image video so pipeline NEVER dies!
 // ===========================================================
 
 const axios = require('axios');
@@ -140,7 +141,7 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
   }
 }
 
-// --- Make Ken Burns video from local image (now with timeout and full pixel/color flags) ---
+// --- Make Ken Burns video from local image (timeout, pixel/color flags, fallback to static!) ---
 async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
   console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}) | ${imgPath} → ${outPath} (${duration}s)`);
@@ -157,6 +158,7 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
 
   console.log(`[10D][KENBURNS][${jobId}] Running FFmpeg: ${ffmpegCmd}`);
 
+  // --- Main Ken Burns attempt (timeout protected)
   return new Promise((resolve, reject) => {
     const child = exec(ffmpegCmd, { timeout: 12000 }, (error, stdout, stderr) => {
       if (error) {
@@ -174,10 +176,29 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
       resolve(outPath);
     });
 
-    // In case FFmpeg hangs, force kill on timeout
     child.on('error', (err) => {
       console.error('[10D][KENBURNS][ERR][PROC]', err);
       reject(err);
+    });
+  });
+}
+
+// --- Emergency fallback: static image video (never fails!) ---
+async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
+  const width = 1080, height = 1920;
+  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -vf "scale=${width}:${height}" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
+  console.log(`[10D][STATICIMG][${jobId}] Running fallback FFmpeg: ${ffmpegCmd}`);
+  return new Promise((resolve, reject) => {
+    exec(ffmpegCmd, { timeout: 8000 }, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`[10D][STATICIMG][ERR][${jobId}] Fallback static image to video failed.`, error, stderr);
+        return reject(error);
+      }
+      if (!isValidFile(outPath, jobId)) {
+        return reject(new Error('[10D][STATICIMG][ERR] Output video not created or too small'));
+      }
+      console.log(`[10D][STATICIMG][${jobId}] Static image video created:`, outPath);
+      resolve(outPath);
     });
   });
 }
@@ -217,18 +238,24 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     const outVidName = `kenburns-${uuidv4()}.mp4`;
     const outVidPath = path.join(realTmpDir, outVidName);
 
-    // Try ONCE — do not retry or hang forever!
+    // --- Try Ken Burns once. If it fails, do NOT crash: fallback to static image video ---
     try {
       await makeKenBurnsVideoFromImage(imgPath, outVidPath, 5, jobId);
+      console.log(`[10D][FALLBACK][${jobId}] Ken Burns fallback video created: ${outVidPath}`);
+      return outVidPath;
     } catch (err) {
-      console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns video creation failed, skipping fallback.`, err);
-      return null;
+      console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns video creation failed, using static image video fallback.`, err);
+      try {
+        await staticImageToVideo(imgPath, outVidPath, 5, jobId);
+        console.log(`[10D][FALLBACK][${jobId}] Static image fallback video created: ${outVidPath}`);
+        return outVidPath;
+      } catch (staticErr) {
+        console.error(`[10D][FALLBACK][ERR][${jobId}] Static image video fallback failed, giving up.`, staticErr);
+        return null;
+      }
     }
-
-    console.log(`[10D][FALLBACK][${jobId}] Ken Burns fallback video created: ${outVidPath}`);
-    return outVidPath;
   } catch (err) {
-    console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns fallback failed:`, err);
+    console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns fallback totally failed:`, err);
     return null;
   }
 }
@@ -238,5 +265,6 @@ module.exports = {
   findImageInPexels,
   findImageInPixabay,
   downloadRemoteFileToLocal,
-  makeKenBurnsVideoFromImage
+  makeKenBurnsVideoFromImage,
+  staticImageToVideo
 };

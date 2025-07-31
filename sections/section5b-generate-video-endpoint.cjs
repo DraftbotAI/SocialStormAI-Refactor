@@ -13,12 +13,13 @@ const crypto = require('crypto');
 // R2 dependencies (S3 SDK)
 const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
 
+// === 5G Video/Music/Outro/Helpers ===
 const {
   concatScenes,
   ensureAudioStream,
   overlayMusic,
   appendOutro,
-  bulletproofScenes,
+  bulletproofScenes, // FIX: now correctly imported as a function!
   getUniqueFinalName // must be implemented in 5G!
 } = require('./section5g-concat-and-music.cjs');
 
@@ -120,24 +121,11 @@ function registerGenerateVideoEndpoint(app, deps) {
         console.log(`[5B][INPUTS] [${jobId}] Script length: ${script.length} | Voice: ${voice}`);
 
         let scenes = splitScriptToScenes(script);
+
+        // BULLETPROOF: Defensive wrapper (always array of valid scene objects)
+        scenes = bulletproofScenes(scenes);
+
         console.log(`[5B][SCENES] [${jobId}] Split into ${scenes.length} scenes.`);
-
-        let wrapped = false;
-        scenes = scenes.map((scene, i) => {
-          if (typeof scene === 'string') {
-            wrapped = true;
-            return { texts: [scene], isMegaScene: false };
-          }
-          if (!scene.texts || !Array.isArray(scene.texts)) {
-            wrapped = true;
-            return { texts: [String(scene)], isMegaScene: false };
-          }
-          return scene;
-        });
-        if (wrapped) {
-          console.warn(`[5B][WARN][${jobId}] Some scenes auto-wrapped to expected structure. You should fix Section 5C splitter!`);
-        }
-
         if (!Array.isArray(scenes) || scenes.length === 0) throw new Error('[5B][ERR] No scenes parsed from script.');
         for (let i = 0; i < scenes.length; i++) {
           const scene = scenes[i];

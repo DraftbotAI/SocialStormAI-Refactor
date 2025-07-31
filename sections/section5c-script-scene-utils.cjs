@@ -155,6 +155,52 @@ function splitScriptToScenes(script, topic = '') {
   return finalScenes;
 }
 
+// === BULLETPROOF DEFENSE: Always return array of valid scenes, never fail ===
+function bulletproofScenes(scenes) {
+  console.log('[5C][BULLETPROOF] bulletproofScenes called.');
+  if (!Array.isArray(scenes)) {
+    console.error('[5C][BULLETPROOF][ERR] Input is not an array, wrapping as single fallback scene.');
+    return [{
+      id: `scene-fallback-${uuid.v4()}`,
+      texts: [typeof scenes === 'string' ? scenes : JSON.stringify(scenes)],
+      isMegaScene: false,
+      type: 'auto-wrap',
+      origIndices: [0]
+    }];
+  }
+  // Filter out any null/undefined and make sure each is a proper scene object
+  const safe = scenes.map((scene, idx) => {
+    if (!scene || typeof scene !== 'object' || !scene.texts) {
+      console.warn(`[5C][BULLETPROOF][BUG] Scene at idx ${idx} is invalid. Wrapping as fallback.`);
+      return {
+        id: `scene${idx + 1}-fixwrap-${uuid.v4()}`,
+        texts: [typeof scene === 'string' ? scene : String(scene)],
+        isMegaScene: false,
+        type: 'auto-wrap',
+        origIndices: [idx]
+      };
+    }
+    let safeTexts = Array.isArray(scene.texts) ? scene.texts.map(t => String(t || '')) : [String(scene.texts || '')];
+    if (!safeTexts.length || !safeTexts[0]) {
+      safeTexts = [''];
+      console.warn(`[5C][BULLETPROOF][BUG] Scene ${scene.id || idx} had empty texts array. Setting to [''].`);
+    }
+    return { ...scene, texts: safeTexts };
+  });
+  if (!safe.length) {
+    console.warn('[5C][BULLETPROOF][WARN] No valid scenes found. Returning generic fallback.');
+    return [{
+      id: `scene-fallback-empty-${uuid.v4()}`,
+      texts: ['No scenes available.'],
+      isMegaScene: false,
+      type: 'auto-wrap',
+      origIndices: [0]
+    }];
+  }
+  console.log(`[5C][BULLETPROOF] ${safe.length} valid scenes returned.`);
+  return safe;
+}
+
 // === Utility: Guess main subject from all scenes (stub for future AI upgrades) ===
 function guessMainSubjectFromScenes(scenes) {
   console.log('[5C][SUBJECT] guessMainSubjectFromScenes called.');
@@ -195,6 +241,7 @@ function cleanSceneText(text) {
 
 module.exports = {
   splitScriptToScenes,
+  bulletproofScenes,
   guessMainSubjectFromScenes,
   cleanSceneText,
 };
