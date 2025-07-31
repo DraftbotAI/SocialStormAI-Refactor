@@ -233,22 +233,20 @@ document.addEventListener('DOMContentLoaded', function() {
           clearInterval(pollingInterval);
           clearInterval(simInterval);
 
-          // --- MAIN FIX: Use R2 public URL from backend, fallback to /video/${p.key} if needed ---
-          let videoUrl = p.output || (p.key ? `/video/${p.key}` : null);
-
+          // ✅ INSERTED FIX:
+          const videoUrl = p.output || (p.key ? `/video/${p.key}` : null);
           if (videoUrl && videoUrl.startsWith('http')) {
-            player.src = videoUrl;
+            document.getElementById('videoSource').src = videoUrl;
           } else if (videoUrl) {
-            player.src = videoUrl;
+            document.getElementById('videoSource').src = videoUrl;
           } else {
             out.textContent = p.status || 'Generation failed.';
             progressBarWrap.style.display = 'none';
             return;
           }
-
-          player.style.display = 'block';
           player.load();
 
+          player.style.display = 'block';
           player.onloadeddata = () => {
             player.muted = false;
             player.volume = 1.0;
@@ -259,14 +257,13 @@ document.addEventListener('DOMContentLoaded', function() {
             progressBar.textContent = '100%';
             setTimeout(() => progressBarWrap.style.display = 'none', 2000);
             showThumbUpsell();
-            log('VIDEO', 'Loaded and ready', player.src);
+            log('VIDEO', 'Loaded and ready', videoUrl);
           };
 
           player.onerror = () => {
             progressStatus.textContent = 'Error loading video. Retry.';
-            logError('VIDEO', 'Error loading video.', player.src);
+            logError('VIDEO', 'Error loading video.', videoUrl);
           };
-
         }
       }, 1200);
 
@@ -278,54 +275,8 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   };
 
-  function makeFileNameFromIdea() {
-    let idea = document.getElementById('ideaInput').value.trim();
-    return (idea ? idea.replace(/[^\w\s\-]/gi,'').replace(/\s+/g,'-') : 'SocialStormAI-Video').substring(0,32) + '.mp4';
-  }
-
   // ==============================
-  // SECTION 6: DOWNLOAD & SHARE BUTTONS
-  // ==============================
-  document.getElementById('downloadBtn').onclick = async () => {
-    const videoUrl = document.getElementById('videoPlayer').src;
-    const downloadBtn = document.getElementById('downloadBtn');
-    downloadBtn.disabled = true;
-    downloadBtn.textContent = "Preparing…";
-    try {
-      const resp = await fetch(videoUrl);
-      if (!resp.ok) throw new Error("Download failed.");
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = makeFileNameFromIdea();
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        downloadBtn.disabled = false;
-        downloadBtn.textContent = "Download Video";
-      }, 500);
-    } catch(e) {
-      logError('DOWNLOAD', e);
-      downloadBtn.disabled = false;
-      downloadBtn.textContent = "Download Video";
-    }
-  };
-
-  document.getElementById('shareBtn').onclick = () => {
-    const url = document.getElementById('videoPlayer').src;
-    const title = document.getElementById('meta-title').innerText || '';
-    const description = document.getElementById('meta-description').innerText || '';
-    const tags = document.getElementById('meta-tags').innerText || '';
-    const subject = encodeURIComponent(title || "My SocialStormAI Video");
-    const bodyText = encodeURIComponent(`${description}\n\nTags:\n${tags}\n\nWatch here:\n${url}`);
-    window.location.href = `mailto:?subject=${subject}&body=${bodyText}`;
-  };
-
-  // ==============================
-  // SECTION 7: THUMBNAIL UPSELL UI
+  // SECTION 6: THUMBNAIL UPSELL UI
   // ==============================
   function showThumbUpsell() {
     if (isProUser) {
@@ -339,12 +290,12 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   // ==============================
-  // SECTION 8: CHATBOT SPARKIE
+  // SECTION 7: CHATBOT SPARKIE
   // ==============================
   function setupSparkie() {
     document.getElementById('chatbot-bubble').onclick = () => {
       alert("Sparkie: Hey! The chat feature is coming soon. For now, send feedback or ideas through the contact page. ⚡️");
-    }
+    };
   }
 
 }); // END DOMContentLoaded

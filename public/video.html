@@ -64,6 +64,7 @@
       <textarea id="scriptTextarea" placeholder="Generated script will appear here…"></textarea>
       <div id="metaDataBox"></div>
     </section>
+
     <!-- Voice & Video Generation -->
     <section style="width:100%;">
       <h2>Pick a Voice & Generate Video</h2>
@@ -74,6 +75,7 @@
           <span class="slider"></span>
         </label>
       </div>
+
       <!-- NEW: Background music toggle -->
       <div id="musicToggleRow" class="branding-toggle-row">
         <label class="branding-label" for="addMusicSwitch">Add background music</label>
@@ -82,6 +84,7 @@
           <span class="slider"></span>
         </label>
       </div>
+
       <div style="display: flex; align-items: center; gap: 12px;">
         <select id="voiceSelect" style="flex:1;"></select>
         <button id="previewBtn" class="btn" type="button" style="white-space:nowrap;" disabled>Preview Voice</button>
@@ -93,12 +96,19 @@
         <div id="progressBar">0%</div>
       </div>
       <div id="progressStatus"></div>
+
+      <!-- CORRECTED VIDEO PLAYER -->
       <div class="video-container">
-        <video id="videoPlayer" controls playsinline preload="auto" crossorigin="anonymous" style="background:#000;"></video>
+        <video id="videoPlayer" controls playsinline preload="auto" crossorigin="anonymous" style="background:#000;">
+          <source id="videoSource" src="" type="video/mp4" />
+          Your browser does not support the video tag.
+        </video>
       </div>
+
       <button id="downloadBtn" class="btn" style="display:none;margin-top:8px;">Download Video</button>
       <button id="shareBtn" class="btn" style="display:none;margin-left:8px;">Share Video</button>
     </section>
+
     <!-- Thumbnail Upsell Section -->
     <div id="thumbnail-upsell">
       <h3>Boost Your Video with Custom Thumbnails!</h3>
