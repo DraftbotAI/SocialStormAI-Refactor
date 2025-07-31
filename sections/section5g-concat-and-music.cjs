@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
+const { v4: uuidv4 } = require('uuid');
 
 console.log('[5G][INIT] Final video assembler loaded.');
 
@@ -57,6 +58,15 @@ async function logFileProbe(file, label = 'PROBE') {
 // === FINAL VIDEO LOGIC ===
 
 /**
+ * Generate a unique filename for final output (no collisions, always traceable).
+ */
+function getUniqueFinalName(prefix = 'final') {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-'); // e.g. 2025-07-30T20-30-58-231Z
+  const uuid = uuidv4();
+  return `${prefix}-${timestamp}-${uuid}.mp4`;
+}
+
+/**
  * Concatenate all scene files (each with voice) into a single video.
  * Ensures proper aspect ratio and audio.
  */
@@ -65,7 +75,7 @@ async function concatScenes(sceneFiles, workDir) {
   sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i+1}: ${file}`));
   const listFile = path.resolve(workDir, 'list.txt');
   fs.writeFileSync(listFile, sceneFiles.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
-  const concatFile = path.resolve(workDir, 'concat.mp4');
+  const concatFile = path.resolve(workDir, getUniqueFinalName('concat'));
 
   // Pre-concat check for all scene files
   for (let i = 0; i < sceneFiles.length; i++) {
@@ -155,8 +165,9 @@ async function ensureAudioStream(videoPath, workDir) {
 /**
  * Overlay music on the FINAL video with correct volume mixing.
  */
-async function overlayMusic(videoPath, musicPath, outPath) {
-  console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
+async function overlayMusic(videoPath, musicPath, workDir) {
+  const musicOut = path.resolve(workDir, getUniqueFinalName('music'));
+  console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${musicOut}"`);
 
   try {
     await logFileProbe(videoPath, 'MUSIC_VIDEO');
@@ -183,13 +194,13 @@ async function overlayMusic(videoPath, musicPath, outPath) {
         '-shortest',
         '-y'
       ])
-      .save(outPath)
+      .save(musicOut)
       .on('end', async () => {
         try {
-          assertFile(outPath, 10240, 'MUSIC_OUT');
-          await logFileProbe(outPath, 'MUSIC_OUT');
-          console.log(`[5G][MUSIC] Music overlay complete: ${outPath}`);
-          resolve(outPath);
+          assertFile(musicOut, 10240, 'MUSIC_OUT');
+          await logFileProbe(musicOut, 'MUSIC_OUT');
+          console.log(`[5G][MUSIC] Music overlay complete: ${musicOut}`);
+          resolve(musicOut);
         } catch (e) {
           console.error(`[5G][MUSIC][ERR] ${e.message}`);
           reject(e);
@@ -207,11 +218,12 @@ async function overlayMusic(videoPath, musicPath, outPath) {
 /**
  * Append outro (video+audio) to the final video.
  */
-async function appendOutro(mainPath, outroPath, outPath, workDir) {
+async function appendOutro(mainPath, outroPath, workDir) {
   if (!outroPath) {
     outroPath = getOutroPath();
   }
-  console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outPath}"`);
+  const outroOut = path.resolve(workDir, getUniqueFinalName('final-with-outro'));
+  console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outroOut}"`);
   await logFileProbe(mainPath, 'OUTRO_MAIN');
   await logFileProbe(outroPath, 'OUTRO_OUTRO');
 
@@ -226,13 +238,13 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
       .input(listFile)
       .inputOptions(['-f concat', '-safe 0'])
       .outputOptions(['-c:v libx264', '-c:a aac', '-movflags +faststart'])
-      .save(outPath)
+      .save(outroOut)
       .on('end', async () => {
         try {
-          assertFile(outPath, 10240, 'OUTRO_OUT');
-          await logFileProbe(outPath, 'OUTRO_OUT');
-          console.log(`[5G][OUTRO] Outro appended: ${outPath}`);
-          resolve();
+          assertFile(outroOut, 10240, 'OUTRO_OUT');
+          await logFileProbe(outroOut, 'OUTRO_OUT');
+          console.log(`[5G][OUTRO] Outro appended: ${outroOut}`);
+          resolve(outroOut);
         } catch (e) {
           console.error(`[5G][OUTRO][ERR] ${e.message}`);
           reject(e);
@@ -309,4 +321,5 @@ module.exports = {
   appendOutro,
   bulletproofScenes,
   getOutroPath,
+  getUniqueFinalName // <-- Add to make available to section5b (R2 upload)
 };

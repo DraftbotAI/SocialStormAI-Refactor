@@ -11,7 +11,6 @@ const path = require('path');
 const fs = require('fs');
 
 // R2 dependencies (S3 SDK)
-// This should be imported correctly from your setup file which exports s3Client and PutObjectCommand.
 const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
 
 const {
@@ -19,7 +18,8 @@ const {
   ensureAudioStream,
   overlayMusic,
   appendOutro,
-  bulletproofScenes
+  bulletproofScenes,
+  getUniqueFinalName // import for unique filenames
 } = require('./section5g-concat-and-music.cjs');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
@@ -28,13 +28,14 @@ console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
 /**
  * Uploads a video file to Cloudflare R2 and returns the public URL
  * @param {string} localFilePath
+ * @param {string} r2FinalName
  * @param {string} jobId
  */
-async function uploadToR2(localFilePath, jobId) {
+async function uploadToR2(localFilePath, r2FinalName, jobId) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
   // Use your PUBLIC domain (either .r2.dev or your CNAME) from .env!
   const accountDomain = process.env.R2_PUBLIC_DOMAIN || 'videos.socialstormai.com';
-  const r2Key = `videos/${jobId}/final-with-outro.mp4`;
+  const r2Key = `videos/${jobId}/${r2FinalName}`;
 
   console.log(`[5B][R2 UPLOAD][START] Attempting upload for job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
   try {
@@ -54,7 +55,6 @@ async function uploadToR2(localFilePath, jobId) {
     console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
 
     // Always use PUBLIC domain! (CNAME or .r2.dev, NOT default endpoint)
-    // Do not duplicate the bucket name in the path.
     let publicUrl;
     if (accountDomain.includes('r2.dev')) {
       publicUrl = `https://${accountDomain}/${r2Key}`;
@@ -310,8 +310,9 @@ function registerGenerateVideoEndpoint(app, deps) {
             progress[jobId] = { percent: 80, status: 'Adding background music...' };
             const chosenMusic = pickMusicForMood ? await pickMusicForMood(script, workDir) : null;
             if (chosenMusic) {
-              const musicOutput = path.join(workDir, 'with-music.mp4');
-              await overlayMusic(withAudioPath, chosenMusic, musicOutput);
+              // Use getUniqueFinalName for unique file output
+              const musicOutput = path.join(workDir, getUniqueFinalName('with-music'));
+              await overlayMusic(withAudioPath, chosenMusic, workDir);
               musicPath = musicOutput;
               progress[jobId] = { percent: 82, status: 'Background music ready!' };
               console.log(`[5B][MUSIC] [${jobId}] Music overlayed: ${chosenMusic}`);
@@ -330,16 +331,18 @@ function registerGenerateVideoEndpoint(app, deps) {
 
         // === 7. Append outro (if enabled) ===
         let finalPath = musicPath;
+        let r2FinalName = getUniqueFinalName('final-with-outro');
         if (outro) {
           const outroPath = path.resolve(__dirname, '..', 'public', 'video', 'outro.mp4');
           if (fs.existsSync(outroPath)) {
             try {
               progress[jobId] = { percent: 90, status: 'Adding your outro...' };
-              const outroOutput = path.join(workDir, 'final-with-outro.mp4');
-              await appendOutro(musicPath, outroPath, outroOutput, workDir);
+              // Use unique name for final output
+              const outroOutput = path.join(workDir, r2FinalName);
+              await appendOutro(musicPath, outroPath, workDir);
               finalPath = outroOutput;
               progress[jobId] = { percent: 92, status: 'Outro added! Wrapping up...' };
-              console.log(`[5B][OUTRO] [${jobId}] Outro appended: ${outroPath}`);
+              console.log(`[5B][OUTRO] [${jobId}] Outro appended: ${outroPath} | Output: ${finalPath}`);
             } catch (e) {
               console.error(`[5B][OUTRO][ERR] [${jobId}] appendOutro failed:`, e);
               throw e;
@@ -356,7 +359,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         // === 8. Upload final video to R2 and finish ===
         try {
           progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2...' };
-          const r2VideoUrl = await uploadToR2(finalPath, jobId);
+          const r2VideoUrl = await uploadToR2(finalPath, r2FinalName, jobId);
           progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
           console.log(`[5B][SUCCESS] [${jobId}] Video job complete! Output at: ${r2VideoUrl}`);
         } catch (uploadErr) {

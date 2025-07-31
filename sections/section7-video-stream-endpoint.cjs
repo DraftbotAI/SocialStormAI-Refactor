@@ -19,13 +19,19 @@ function registerVideoStreamEndpoint(app) {
     const key = req.params.key;
     console.log(`[SECTION7][REQ] GET /video/${key}`);
 
-    // Block path traversal and require .mp4 extension
+    // Defensive: Prevent path traversal and only allow .mp4
     if (!key || typeof key !== 'string' || key.includes('..') || !key.endsWith('.mp4')) {
       console.warn('[SECTION7][VIDEO SERVE] Invalid or missing key:', key);
       return res.status(400).send('Invalid video key');
     }
 
-    const videoPath = path.join(__dirname, '..', 'public', 'video', key);
+    // Only serve from exact public/video directory
+    const videoDir = path.resolve(__dirname, '..', 'public', 'video');
+    const videoPath = path.resolve(videoDir, key);
+    if (!videoPath.startsWith(videoDir)) {
+      console.warn('[SECTION7][VIDEO SERVE] Attempted path escape:', videoPath);
+      return res.status(400).send('Invalid video key');
+    }
 
     fs.stat(videoPath, (err, stats) => {
       if (err || !stats.isFile()) {
@@ -33,8 +39,7 @@ function registerVideoStreamEndpoint(app) {
         return res.status(404).send("Video not found");
       }
 
-      console.log(`[SECTION7][SERVE] Sending video: ${videoPath}`);
-
+      // Set headers for mp4 streaming and caching
       res.setHeader('Content-Type', 'video/mp4');
       res.setHeader('Content-Disposition', `inline; filename="${key}"`);
       res.setHeader('Accept-Ranges', 'bytes');
@@ -42,11 +47,15 @@ function registerVideoStreamEndpoint(app) {
 
       const range = req.headers.range;
       if (range) {
-        const [startStr, endStr] = range.replace(/bytes=/, "").split("-");
-        const start = parseInt(startStr, 10);
-        const end = endStr ? parseInt(endStr, 10) : stats.size - 1;
-        if (isNaN(start) || isNaN(end) || start > end) {
-          console.warn('[SECTION7][SERVE] Bad range request:', range);
+        // Parse HTTP Range requests
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+        let start = 0, end = stats.size - 1;
+        if (match) {
+          if (match[1]) start = parseInt(match[1], 10);
+          if (match[2]) end = parseInt(match[2], 10);
+        }
+        if (isNaN(start) || isNaN(end) || start > end || end >= stats.size) {
+          console.warn('[SECTION7][SERVE] Bad range request:', range, `(start=${start}, end=${end}, size=${stats.size})`);
           return res.status(416).send('Requested range not satisfiable');
         }
         const chunkSize = (end - start) + 1;
@@ -56,15 +65,29 @@ function registerVideoStreamEndpoint(app) {
           'Content-Length': chunkSize,
           'Content-Type': 'video/mp4'
         });
-        fs.createReadStream(videoPath, { start, end }).pipe(res);
-        console.log(`[SECTION7][SERVE] Partial video sent: ${key} [${start}-${end}]`);
+        fs.createReadStream(videoPath, { start, end })
+          .on('open', () => {
+            console.log(`[SECTION7][SERVE] Partial video sent: ${key} [${start}-${end}]`);
+          })
+          .on('error', (streamErr) => {
+            console.error('[SECTION7][STREAM][ERR]', streamErr);
+            res.status(500).send('Stream error');
+          })
+          .pipe(res);
       } else {
         res.writeHead(200, {
           'Content-Length': stats.size,
           'Content-Type': 'video/mp4'
         });
-        fs.createReadStream(videoPath).pipe(res);
-        console.log(`[SECTION7][SERVE] Full video sent: ${key}`);
+        fs.createReadStream(videoPath)
+          .on('open', () => {
+            console.log(`[SECTION7][SERVE] Full video sent: ${key}`);
+          })
+          .on('error', (streamErr) => {
+            console.error('[SECTION7][STREAM][ERR]', streamErr);
+            res.status(500).send('Stream error');
+          })
+          .pipe(res);
       }
     });
   });

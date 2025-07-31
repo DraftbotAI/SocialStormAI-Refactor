@@ -16,7 +16,7 @@ console.log('[5D][INIT] Clip matcher orchestrator (parallel) loaded.');
 /**
  * Find the best video for a scene by running all sources in parallel.
  * Returns: local file path (preferred order: R2, Pexels, Pixabay, Ken Burns)
- * But will pick *any* valid result if some fail. Zero single-point failure.
+ * Picks any valid result if some fail. Zero single-point failure.
  *
  * @param {Object} opts
  *   @param {string} subject
@@ -57,22 +57,22 @@ async function findClipForScene({
   }
 
   // Helper to check if file is valid (exists, not empty, not dupe)
-  function isValidClip(path) {
-    if (!path) return false;
-    if (usedClips && usedClips.includes(path)) {
-      console.warn(`[5D][DUPLICATE][${jobId}] Skipping used clip: ${path}`);
+  function isValidClip(candidatePath) {
+    if (!candidatePath) return false;
+    if (usedClips && usedClips.includes(candidatePath)) {
+      console.warn(`[5D][DUPLICATE][${jobId}] Skipping used clip: ${candidatePath}`);
       return false;
     }
     try {
-      const exists = fs.existsSync(path);
-      const size = exists ? fs.statSync(path).size : 0;
+      const exists = fs.existsSync(candidatePath);
+      const size = exists ? fs.statSync(candidatePath).size : 0;
       if (!exists || size < 2048) {
-        console.warn(`[5D][INVALID][${jobId}] File invalid or too small: ${path} (size: ${size})`);
+        console.warn(`[5D][INVALID][${jobId}] File invalid or too small: ${candidatePath} (size: ${size})`);
         return false;
       }
       return true;
     } catch (err) {
-      console.error(`[5D][INVALID][${jobId}] File error: ${path}`, err);
+      console.error(`[5D][INVALID][${jobId}] File error: ${candidatePath}`, err);
       return false;
     }
   }

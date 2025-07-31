@@ -33,11 +33,10 @@ const s3Client = new S3Client({
 
 // --- UTILS ---
 function normalize(str) {
-  const norm = String(str)
+  return String(str)
     .toLowerCase()
     .replace(/[\s_\-]+/g, '')
     .replace(/[^a-z0-9]/g, '');
-  return norm;
 }
 
 async function listAllFilesInR2(prefix = '', jobId = '') {

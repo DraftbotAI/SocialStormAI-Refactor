@@ -163,7 +163,7 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
       if (!isValidFile(outPath, jobId)) {
         return reject(new Error('[10D][KENBURNS][ERR] Output video not created or too small'));
       }
-      console.log('[10D][KENBURNS][${jobId}] Ken Burns pan video created:', outPath);
+      console.log(`[10D][KENBURNS][${jobId}] Ken Burns pan video created:`, outPath);
       resolve(outPath);
     });
   });

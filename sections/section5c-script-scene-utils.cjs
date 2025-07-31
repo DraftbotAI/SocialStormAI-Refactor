@@ -26,11 +26,13 @@ function splitScriptToScenes(script) {
     return [];
   }
 
+  // Step 1: Split by line breaks
   let lines = script.split('\n').map(line => line.trim()).filter(line => !!line);
 
   // Log full lines for debug
   console.log(`[5C][SPLIT] Lines after newline split:`, JSON.stringify(lines));
 
+  // Step 2: Fallback to sentence split if only one line
   if (lines.length < 2) {
     lines = script.split(/[.?!]\s+/).map(s => s.trim()).filter(Boolean);
     console.log(`[5C][SPLIT] Fallback: Split by sentence, got ${lines.length} lines.`, JSON.stringify(lines));
@@ -44,6 +46,7 @@ function splitScriptToScenes(script) {
   const scenes = [];
   const seenIds = new Set();
 
+  // Step 3: Build scenes
   if (lines.length >= 2) {
     // Create "mega-scene" for first two lines
     const id = `megascene-1-2-${uuid.v4()}`;
