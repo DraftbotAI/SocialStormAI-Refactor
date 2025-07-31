@@ -4,6 +4,7 @@
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // Enhanced: Mega-scene (hook+main) support
 // Now: Uploads final video to Cloudflare R2 and returns public R2 URL
+// Now: Fully parallelized scene processing for max speed!
 // ===========================================================
 
 const { v4: uuidv4 } = require('uuid');
@@ -25,17 +26,9 @@ const {
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
 
 // ================= R2 UPLOAD HELPER =======================
-/**
- * Uploads a video file to Cloudflare R2 and returns the public URL
- * @param {string} localFilePath
- * @param {string} r2FinalName
- * @param {string} jobId
- */
 async function uploadToR2(localFilePath, r2FinalName, jobId) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  // This should be your "pub-xxxxx.r2.dev" base, NOT the S3 endpoint!
   const publicBase = process.env.R2_PUBLIC_DOMAIN || 'pub-5d04f1b7b3034299b5953e63a9555fb8.r2.dev';
-  // Flat file naming for direct root serving (matches Cloudflare dashboard public URL)
   const r2Key = `${jobId}-${r2FinalName}`;
   console.log(`[5B][R2 UPLOAD][START] Attempting upload for job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
   try {
@@ -53,7 +46,6 @@ async function uploadToR2(localFilePath, r2FinalName, jobId) {
 
     console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
 
-    // Always build public URL with .r2.dev!
     const publicUrl = `https://${publicBase}/${r2Key}`;
     console.log(`[5B][R2 UPLOAD][SUCCESS] File available at: ${publicUrl}`);
     return publicUrl;
@@ -72,14 +64,8 @@ function assertFileExists(file, label) {
 
 function registerGenerateVideoEndpoint(app, deps) {
   console.log('[5B][BOOT] Called registerGenerateVideoEndpoint...');
-  if (!app) {
-    console.error('[5B][FATAL] No app passed in!');
-    throw new Error('[5B][FATAL] No app passed in!');
-  }
-  if (!deps) {
-    console.error('[5B][FATAL] No dependencies passed in!');
-    throw new Error('[5B][FATAL] No dependencies passed in!');
-  }
+  if (!app) throw new Error('[5B][FATAL] No app passed in!');
+  if (!deps) throw new Error('[5B][FATAL] No dependencies passed in!');
 
   const {
     splitScriptToScenes,
@@ -92,18 +78,11 @@ function registerGenerateVideoEndpoint(app, deps) {
     muxVideoWithNarration, muxMegaSceneWithNarration,
   } = deps;
 
-  if (typeof findClipForScene !== "function") {
-    console.error('[5B][FATAL] findClipForScene not provided or not a function!');
-    throw new Error('[5B][FATAL] findClipForScene missing from deps!');
-  }
-  if (typeof createSceneAudio !== "function" || typeof createMegaSceneAudio !== "function") {
-    console.error('[5B][FATAL] Audio generation helpers missing!');
+  if (typeof findClipForScene !== "function") throw new Error('[5B][FATAL] findClipForScene missing from deps!');
+  if (typeof createSceneAudio !== "function" || typeof createMegaSceneAudio !== "function")
     throw new Error('[5B][FATAL] Audio generation helpers missing!');
-  }
-  if (typeof splitScriptToScenes !== "function") {
-    console.error('[5B][FATAL] splitScriptToScenes not provided or not a function!');
+  if (typeof splitScriptToScenes !== "function")
     throw new Error('[5B][FATAL] splitScriptToScenes missing from deps!');
-  }
 
   console.log('[5B][INFO] Registering POST /api/generate-video route...');
 
@@ -151,8 +130,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
 
         if (!Array.isArray(scenes) || scenes.length === 0) throw new Error('[5B][ERR] No scenes parsed from script.');
-        console.log(`[5B][DEBUG][SCENES STRUCTURE] First scene: ${JSON.stringify(scenes[0], null, 2)}`);
-
         for (let i = 0; i < scenes.length; i++) {
           const scene = scenes[i];
           if (
@@ -162,26 +139,17 @@ function registerGenerateVideoEndpoint(app, deps) {
             !scene.texts[0] ||
             (typeof scene.texts[0] !== 'string')
           ) {
-            console.error(`[5B][FATAL][JOB] [${jobId}] Scene ${i + 1} is invalid or missing .texts array:`, JSON.stringify(scene, null, 2));
             throw new Error(`[5B][FATAL] Scene ${i + 1} is missing .texts array or is not structured correctly!`);
           }
         }
 
-        // === 2. Find/generate video clip for each scene ===
+        // === 2. PARALLELIZED scene processing: audio, video, mux ===
         const usedClips = [];
         const sceneFiles = [];
-
-        for (let i = 0; i < scenes.length; i++) {
-          const scene = scenes[i];
+        const sceneJobs = scenes.map((scene, i) => (async () => {
           const isMegaScene = !!scene.isMegaScene;
-          progress[jobId] = { percent: 5 + i * 5, status: `Finding the perfect video for step ${i + 1}...` };
-          console.log(`[5B][SCENE] [${jobId}] Processing scene ${i + 1} / ${scenes.length} (megaScene: ${isMegaScene})`);
-
           let mainTopic = null;
-          if (
-            scenes[0] &&
-            Array.isArray(scenes[0].texts)
-          ) {
+          if (scenes[0] && Array.isArray(scenes[0].texts)) {
             mainTopic = (scenes[0].texts[1]) ? scenes[0].texts[1] : scenes[0].texts[0];
           } else {
             mainTopic = scene.texts[0];
@@ -189,7 +157,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           let subject = isMegaScene ? mainTopic : (scene.texts[0] || mainTopic);
 
           // --- CLIP MATCHING ---
-          console.log(`[5B][MATCH] [${jobId}] Scene ${i + 1}: Subject for matching: "${subject}"`);
           let clipPath = null;
           try {
             clipPath = await findClipForScene({
@@ -205,58 +172,48 @@ function registerGenerateVideoEndpoint(app, deps) {
           } catch (e) {
             console.error(`[5B][CLIP][ERR] [${jobId}] findClipForScene failed for scene ${i + 1}:`, e);
           }
-          if (!clipPath) {
-            throw new Error(`[5B][ERR] No clip found for scene ${i + 1}`);
-          }
+          if (!clipPath) throw new Error(`[5B][ERR] No clip found for scene ${i + 1}`);
           usedClips.push(clipPath);
+
           assertFileExists(clipPath, `CLIP_SCENE_${i+1}`);
-          console.log(`[5B][CLIP] [${jobId}] Scene ${i + 1}: Clip selected: ${clipPath}`);
 
           // --- AUDIO GENERATION ---
           let audioPath;
           if (isMegaScene) {
             audioPath = path.join(workDir, `scene${i + 1}-mega-audio.mp3`);
-            try {
-              progress[jobId] = { percent: 12 + i * 5, status: `Recording your viral intro...` };
-              await createMegaSceneAudio(scene.texts, voice, audioPath, provider, workDir);
-              assertFileExists(audioPath, `AUDIO_MEGA_${i+1}`);
-              console.log(`[5B][AUDIO] [${jobId}] Mega-scene audio created: ${audioPath}`);
-            } catch (e) {
-              console.error(`[5B][AUDIO][ERR] [${jobId}] Mega-scene audio gen failed:`, e);
-              throw e;
-            }
+            await createMegaSceneAudio(scene.texts, voice, audioPath, provider, workDir);
+            assertFileExists(audioPath, `AUDIO_MEGA_${i+1}`);
           } else {
             audioPath = path.join(workDir, `scene${i + 1}-audio.mp3`);
-            try {
-              progress[jobId] = { percent: 14 + i * 5, status: `Voicing scene ${i + 1}...` };
-              await createSceneAudio(scene.texts[0], voice, audioPath, provider);
-              assertFileExists(audioPath, `AUDIO_SCENE_${i+1}`);
-              console.log(`[5B][AUDIO] [${jobId}] Scene ${i + 1} audio generated: ${audioPath}`);
-            } catch (e) {
-              console.error(`[5B][AUDIO][ERR] [${jobId}] Scene ${i + 1} audio gen failed:`, e);
-              throw e;
-            }
+            await createSceneAudio(scene.texts[0], voice, audioPath, provider);
+            assertFileExists(audioPath, `AUDIO_SCENE_${i+1}`);
           }
 
-          // --- MUXING (combine) video and audio for the scene ---
+          // --- MUXING video+audio for the scene ---
           const muxedScenePath = path.join(workDir, `scene${i + 1}.mp4`);
-          try {
-            progress[jobId] = { percent: 16 + i * 5, status: `Syncing voice and visuals for step ${i + 1}...` };
-            if (isMegaScene) {
-              await muxMegaSceneWithNarration(clipPath, audioPath, muxedScenePath);
-              assertFileExists(muxedScenePath, `MUXED_MEGA_${i+1}`);
-              console.log(`[5B][MUX] [${jobId}] Mega-scene muxed: ${muxedScenePath}`);
-            } else {
-              await muxVideoWithNarration(clipPath, audioPath, muxedScenePath);
-              assertFileExists(muxedScenePath, `MUXED_SCENE_${i+1}`);
-              console.log(`[5B][MUX] [${jobId}] Scene ${i + 1} muxed: ${muxedScenePath}`);
-            }
-          } catch (e) {
-            console.error(`[5B][MUX][ERR] [${jobId}] Scene ${i + 1} mux failed:`, e);
-            throw e;
+          if (isMegaScene) {
+            await muxMegaSceneWithNarration(clipPath, audioPath, muxedScenePath);
+            assertFileExists(muxedScenePath, `MUXED_MEGA_${i+1}`);
+          } else {
+            await muxVideoWithNarration(clipPath, audioPath, muxedScenePath);
+            assertFileExists(muxedScenePath, `MUXED_SCENE_${i+1}`);
           }
-          sceneFiles.push(muxedScenePath);
+          return { idx: i, muxedScenePath };
+        })());
+
+        progress[jobId] = { percent: 10, status: `Processing all scenes in parallel...` };
+        console.log(`[5B][SCENES] [${jobId}] Starting parallel scene processing (${scenes.length} scenes)...`);
+
+        // Wait for ALL scene jobs to complete
+        let allScenes;
+        try {
+          allScenes = await Promise.all(sceneJobs);
+          // Guarantee sceneFiles in correct order
+          allScenes.sort((a, b) => a.idx - b.idx).forEach(obj => sceneFiles.push(obj.muxedScenePath));
+        } catch (err) {
+          throw new Error(`[5B][FATAL] One or more scenes failed to process: ${err}`);
         }
+
         progress[jobId] = { percent: 40, status: 'Stitching your video together...' };
         console.log(`[5B][SCENES] [${jobId}] All scenes muxed:`, sceneFiles);
 
@@ -266,16 +223,13 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 44, status: 'Checking video quality...' };
           refInfo = await getVideoInfo(sceneFiles[0]);
         } catch (e) {
-          console.error(`[5B][BULLETPROOF][ERR] [${jobId}] Failed to get video info:`, e);
-          throw e;
+          throw new Error(`[5B][BULLETPROOF][ERR] [${jobId}] Failed to get video info: ${e}`);
         }
         try {
           await bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo);
           progress[jobId] = { percent: 48, status: 'Perfecting your video quality...' };
-          console.log(`[5B][BULLETPROOF] [${jobId}] All scenes bulletproofed.`);
         } catch (e) {
-          console.error(`[5B][BULLETPROOF][ERR] [${jobId}] bulletproofScenes failed:`, e);
-          throw e;
+          throw new Error(`[5B][BULLETPROOF][ERR] [${jobId}] bulletproofScenes failed: ${e}`);
         }
 
         // === 4. Concatenate all scene files ===
@@ -284,10 +238,8 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 60, status: 'Combining everything into one amazing video...' };
           concatPath = await concatScenes(sceneFiles, workDir);
           assertFileExists(concatPath, 'CONCAT_OUT');
-          console.log(`[5B][CONCAT] [${jobId}] Scenes concatenated: ${concatPath}`);
         } catch (e) {
-          console.error(`[5B][CONCAT][ERR] [${jobId}] concatScenes failed:`, e);
-          throw e;
+          throw new Error(`[5B][CONCAT][ERR] [${jobId}] concatScenes failed: ${e}`);
         }
 
         // === 5. Ensure audio (add silence if needed) ===
@@ -296,10 +248,8 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 70, status: 'Finalizing your audio...' };
           withAudioPath = await ensureAudioStream(concatPath, workDir);
           assertFileExists(withAudioPath, 'AUDIOFIX_OUT');
-          console.log(`[5B][AUDIO] [${jobId}] Audio stream ensured: ${withAudioPath}`);
         } catch (e) {
-          console.error(`[5B][AUDIO][ERR] [${jobId}] ensureAudioStream failed:`, e);
-          throw e;
+          throw new Error(`[5B][AUDIO][ERR] [${jobId}] ensureAudioStream failed: ${e}`);
         }
 
         // === 6. Overlay background music (if enabled) ===
@@ -314,18 +264,14 @@ function registerGenerateVideoEndpoint(app, deps) {
               assertFileExists(musicOutput, 'MUSIC_OUT');
               musicPath = musicOutput;
               progress[jobId] = { percent: 82, status: 'Background music ready!' };
-              console.log(`[5B][MUSIC] [${jobId}] Music overlayed: ${chosenMusic}`);
             } else {
               progress[jobId] = { percent: 80, status: 'No music found, skipping...' };
-              console.warn(`[5B][MUSIC][WARN] [${jobId}] No background music found/skipped.`);
             }
           } catch (e) {
-            console.error(`[5B][MUSIC][ERR] [${jobId}] overlayMusic failed:`, e);
-            throw e;
+            throw new Error(`[5B][MUSIC][ERR] [${jobId}] overlayMusic failed: ${e}`);
           }
         } else {
           progress[jobId] = { percent: 80, status: 'Music skipped (user setting).' };
-          console.log(`[5B][MUSIC][SKIP] [${jobId}] Music overlay skipped (music disabled).`);
         }
 
         // === 7. Append outro (if enabled) ===
@@ -341,18 +287,14 @@ function registerGenerateVideoEndpoint(app, deps) {
               assertFileExists(outroOutput, 'OUTRO_OUT');
               finalPath = outroOutput;
               progress[jobId] = { percent: 92, status: 'Outro added! Wrapping up...' };
-              console.log(`[5B][OUTRO] [${jobId}] Outro appended: ${outroPath} | Output: ${finalPath}`);
             } catch (e) {
-              console.error(`[5B][OUTRO][ERR] [${jobId}] appendOutro failed:`, e);
-              throw e;
+              throw new Error(`[5B][OUTRO][ERR] [${jobId}] appendOutro failed: ${e}`);
             }
           } else {
             progress[jobId] = { percent: 90, status: 'Finalizing your masterpiece...' };
-            console.warn(`[5B][OUTRO][WARN] [${jobId}] Outro file missing: ${outroPath}`);
           }
         } else {
           progress[jobId] = { percent: 90, status: 'Outro skipped (user setting).' };
-          console.log(`[5B][OUTRO][SKIP] [${jobId}] Outro append skipped (outro disabled).`);
         }
 
         // === 8. Upload final video to R2 and finish ===
@@ -360,10 +302,8 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2...' };
           const r2VideoUrl = await uploadToR2(finalPath, r2FinalName, jobId);
           progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
-          console.log(`[5B][SUCCESS] [${jobId}] Video job complete! Output at: ${r2VideoUrl}`);
         } catch (uploadErr) {
           progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
-          console.error(`[5B][FATAL][JOB] [${jobId}] Cloudflare R2 upload failed, local file only:`, uploadErr);
         }
 
       } catch (err) {
@@ -373,7 +313,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         if (cleanupJob) {
           try {
             cleanupJob(jobId);
-            console.log(`[5B][CLEANUP] [${jobId}] Cleanup scheduled (delayed progress removal).`);
           } catch (e) {
             console.warn(`[5B][CLEANUP][WARN] [${jobId}] Cleanup failed:`, e);
           }

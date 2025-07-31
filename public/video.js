@@ -2,6 +2,7 @@
 // SECTION 1: DOM READY & UTILITIES
 // ================================
 document.addEventListener('DOMContentLoaded', function() {
+  // === LOGGING HELPERS ===
   function log(...args) { try { console.log('[LOG]', ...args); } catch(_){} }
   function logWarn(...args) { try { console.warn('[WARN]', ...args); } catch(_){} }
   function logError(...args) { try { console.error('[ERROR]', ...args); } catch(_){} }
@@ -174,6 +175,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const voice = document.getElementById('voiceSelect').value;
     const out = document.getElementById('output');
     const player = document.getElementById('videoPlayer');
+    const videoSource = document.getElementById('videoSource');
     const downloadBtn = document.getElementById('downloadBtn');
     const shareBtn = document.getElementById('shareBtn');
     const progressBarWrap = document.getElementById('progressBarWrap');
@@ -182,6 +184,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (!script || !voice) {
       out.textContent = !script ? 'Generate script first.' : 'Select a voice.';
+      logWarn('VIDEO', 'Missing script or voice for generation.', { script, voice });
       return;
     }
 
@@ -191,8 +194,15 @@ document.addEventListener('DOMContentLoaded', function() {
     progressBar.textContent = '0%';
     progressStatus.textContent = 'Starting…';
     player.style.display = 'none';
-    player.removeAttribute('src');
+
+    // Clear any old source for a clean reload!
+    if (videoSource) {
+      videoSource.src = '';
+      log('VIDEO', 'Cleared previous videoSource src');
+    }
+    player.removeAttribute('src'); // In case there was a direct src
     player.load();
+
     downloadBtn.style.display = shareBtn.style.display = 'none';
 
     simulatedPercent = 0;
@@ -220,6 +230,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
       const data = await res.json();
       if (!data.jobId) throw new Error('Failed to start video generation.');
+      log('VIDEO', 'Job started', data);
 
       pollingInterval = setInterval(async () => {
         const resp = await fetch(`/api/progress/${data.jobId}`);
@@ -233,20 +244,34 @@ document.addEventListener('DOMContentLoaded', function() {
           clearInterval(pollingInterval);
           clearInterval(simInterval);
 
-          // ✅ INSERTED FIX:
+          // FINAL VIDEO URL RESOLUTION
           const videoUrl = p.output || (p.key ? `/video/${p.key}` : null);
-          if (videoUrl && videoUrl.startsWith('http')) {
-            document.getElementById('videoSource').src = videoUrl;
-          } else if (videoUrl) {
-            document.getElementById('videoSource').src = videoUrl;
+          log('VIDEO', 'Received final video URL:', videoUrl);
+
+          if (videoUrl) {
+            if (videoSource) {
+              videoSource.src = videoUrl;
+              log('VIDEO', 'Set <source> src:', videoSource.src);
+            }
+            // Also set src directly on <video> for safety (double compatibility)
+            player.src = videoUrl;
+            log('VIDEO', 'Set <video> src:', player.src);
+
+            // Pause, reset, load (some browsers need this order)
+            player.pause();
+            player.currentTime = 0;
+            player.load();
+            log('VIDEO', 'Called player.load() after setting sources');
           } else {
             out.textContent = p.status || 'Generation failed.';
             progressBarWrap.style.display = 'none';
+            logError('VIDEO', 'Missing videoUrl after job finish!');
             return;
           }
-          player.load();
 
           player.style.display = 'block';
+
+          // Event: video loaded
           player.onloadeddata = () => {
             player.muted = false;
             player.volume = 1.0;
@@ -260,9 +285,10 @@ document.addEventListener('DOMContentLoaded', function() {
             log('VIDEO', 'Loaded and ready', videoUrl);
           };
 
-          player.onerror = () => {
+          // Event: video error
+          player.onerror = (e) => {
             progressStatus.textContent = 'Error loading video. Retry.';
-            logError('VIDEO', 'Error loading video.', videoUrl);
+            logError('VIDEO', 'Error loading video.', videoUrl, e);
           };
         }
       }, 1200);

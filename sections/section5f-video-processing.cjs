@@ -5,6 +5,7 @@
 // Enhanced: Mega-scene (multi-line audio) support
 // Improved: Trims 0.5s BEFORE voice, ends 1s AFTER voice ends
 // Now: Viral-standard blurred background fill, never stretches main video!
+// Parallelization-Ready: All helpers are async & pure
 // ===========================================================
 
 const fs = require('fs');
@@ -13,6 +14,9 @@ const ffmpeg = require('fluent-ffmpeg');
 
 console.log('[5F][INIT] Video processing & AV combiner loaded.');
 
+// =====================
+// UTILITY: ASSERT FILE
+// =====================
 function assertFile(file, minSize = 10240, label = 'FILE') {
   if (!fs.existsSync(file)) {
     throw new Error(`[5F][${label}][ERR] File does not exist: ${file}`);
@@ -23,6 +27,9 @@ function assertFile(file, minSize = 10240, label = 'FILE') {
   }
 }
 
+// ======================
+// UTILITY: GET DURATION
+// ======================
 async function getDuration(file) {
   return new Promise((resolve, reject) => {
     ffmpeg.ffprobe(file, (err, metadata) => {
@@ -40,6 +47,9 @@ async function getDuration(file) {
   });
 }
 
+// ========================
+// SCENE TRIM + BLUR UTILS
+// ========================
 /**
  * Trims a video file for a scene: starts 0.5s before audio, ends 1s after audio.
  * Uses viral-standard blurred background, never stretches the main video.
@@ -85,6 +95,9 @@ async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, tr
   });
 }
 
+// =========================
+// SCENE MUX (AUDIO + VIDEO)
+// =========================
 /**
  * Muxes a narration audio file onto a video file, using 0.5s lead-in, 1.0s trail-out.
  * Always trims the video to match the voiceover with proper padding and blurred background.
@@ -99,7 +112,7 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
     throw new Error(`[5F][MUX][ERR] Cannot get audio duration: ${err}`);
   }
   // Trim video: 0.5s before, 1.0s after audio, with viral blur
-  const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-scene-${Date.now()}.mp4`);
+  const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-scene-${Date.now()}-${Math.floor(Math.random()*99999)}.mp4`);
   try {
     await trimForNarration(videoIn, trimmedVideo, audioDuration, 0.5, 1.0);
     console.log(`[5F][MUX] Trimmed video for narration: ${trimmedVideo}`);
@@ -129,6 +142,7 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
         try {
           assertFile(outPath, 10240, 'MUX_OUT');
           console.log(`[5F][MUX] Muxed narration onto video: ${outPath}`);
+          // Defensive: Cleanup temp
           if (fs.existsSync(trimmedVideo)) {
             fs.unlinkSync(trimmedVideo);
             console.log(`[5F][MUX][CLEANUP] Deleted trimmed temp video: ${trimmedVideo}`);
@@ -148,6 +162,9 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   });
 }
 
+// ============================
+// MEGA-SCENE MUX (HOOK + MAIN)
+// ============================
 /**
  * Handles "mega-scene" (scene 1+2): trims video 0.5s before, 1s after voice, perfect for viral hooks.
  * Uses same blurred background viral effect.
@@ -161,7 +178,7 @@ async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
   } catch (err) {
     throw new Error(`[5F][MEGA][ERR] Cannot get audio duration for mega-scene: ${err}`);
   }
-  const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-megascene-${Date.now()}.mp4`);
+  const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-megascene-${Date.now()}-${Math.floor(Math.random()*99999)}.mp4`);
   try {
     await trimForNarration(videoIn, trimmedVideo, audioDuration, 0.5, 1.0);
     console.log(`[5F][MEGA] Trimmed main subject video for mega-scene: ${trimmedVideo}`);
@@ -170,6 +187,7 @@ async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
     throw err;
   }
   try {
+    // Mux audio onto this trimmed video
     await muxVideoWithNarration(trimmedVideo, audioIn, outPath);
     console.log(`[5F][MEGA] Muxed merged mega-scene audio to trimmed video: ${outPath}`);
     if (fs.existsSync(trimmedVideo)) {
@@ -182,6 +200,9 @@ async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
   }
 }
 
+// ===========================
+// ADD SILENT AUDIO TO VIDEO
+// ===========================
 /**
  * Adds silent audio track to a video (for videos that have no audio stream).
  * Uses blurred background to match rest of pipeline.
@@ -226,10 +247,13 @@ async function addSilentAudioTrack(inPath, outPath, duration) {
   });
 }
 
+// ===================
+// MODULE EXPORTS
+// ===================
 module.exports = {
   getDuration,
   trimForNarration,
   addSilentAudioTrack,
   muxVideoWithNarration,
-  muxMegaSceneWithNarration
+  muxMegaSceneWithNarration,
 };

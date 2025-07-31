@@ -2,23 +2,48 @@
 // SECTION 5C: SCRIPT & SCENE UTILITIES
 // Splits script into scenes, handles scene structure, utilities.
 // MAX LOGGING AT EVERY STEP
-// Enhanced: Scene 1+2 "mega-scene" grouping for continuous video
-// Bulletproof: Always returns array of scene objects, never strings
+// Enhanced: Always returns array of scene objects, never strings
+// Improved: Viral summary/hook-first logic, super robust sentence/line splitting
 // ===========================================================
 
 const uuid = require('uuid'); // For scene IDs
 
 console.log('[5C][INIT] Script & scene utilities loaded.');
 
+// === Pro Helper: Make a viral summary/hook for the intro ===
+function generateViralHookAndSummary(script, topic = '') {
+  // Use the first line as a clear, viral summary if it fits, else generate one
+  let lines = script.split('\n').map(line => line.trim()).filter(Boolean);
+  let summaryLine = '';
+  // Try to find a line that contains the topic, else fallback to first
+  if (topic && lines.some(l => l.toLowerCase().includes(topic.toLowerCase()))) {
+    summaryLine = lines.find(l => l.toLowerCase().includes(topic.toLowerCase()));
+  } else {
+    // Fallback: Use a punchy first line, strip animal metaphors
+    summaryLine = (lines[0] || '').replace(/like a[n]? [\w ]+/gi, '').trim();
+  }
+  // If all else fails, use the first complete sentence or fallback
+  if (!summaryLine || summaryLine.length < 8) {
+    let bySentence = script.split(/[.?!]\s+/).map(s => s.trim()).filter(Boolean);
+    summaryLine = bySentence[0] || lines[0] || script.trim();
+  }
+  // Avoid empties
+  if (!summaryLine) summaryLine = 'You won’t believe this!';
+  console.log(`[5C][HOOK] Viral summary/hook generated: "${summaryLine}"`);
+  return summaryLine;
+}
+
 /**
  * Enhanced split:
- * - Groups first two lines into a "mega-scene" for continuous video.
+ * - First scene is always a strong summary/hook about the topic.
+ * - Groups next 1–2 lines as a "mega-scene" if they add context.
  * - Each subsequent line is a regular scene.
  * - Each scene: { id, texts: [str], isMegaScene: bool, type, origIndices }
  * @param {string} script - Full script text, possibly multi-line.
+ * @param {string} [topic] - (optional) The main topic for summary hook
  * @returns {Array<{id: string, texts: string[], isMegaScene?: boolean, type: string, origIndices: number[]}>}
  */
-function splitScriptToScenes(script) {
+function splitScriptToScenes(script, topic = '') {
   console.log('[5C][SPLIT] splitScriptToScenes called.');
 
   if (!script || typeof script !== 'string') {
@@ -26,40 +51,51 @@ function splitScriptToScenes(script) {
     return [];
   }
 
-  // Step 1: Split by line breaks
-  let lines = script.split('\n').map(line => line.trim()).filter(line => !!line);
+  // Step 1: Clean up all lines and sentences, remove blank/junk
+  let rawLines = script.split('\n').map(line => line.trim()).filter(Boolean);
+  let bySentences = script.split(/[.?!]\s+/).map(s => s.trim()).filter(Boolean);
+
+  // Step 2: Generate a viral summary/hook as the very first scene
+  const summaryLine = generateViralHookAndSummary(script, topic);
+  let lines = [summaryLine];
+
+  // Step 3: Remove the summary from the rest (prevent dupe)
+  let restLines = rawLines.filter(l => l !== summaryLine && l.length > 4);
+  if (restLines.length < 2) restLines = bySentences.filter(l => l !== summaryLine && l.length > 4);
 
   // Log full lines for debug
-  console.log(`[5C][SPLIT] Lines after newline split:`, JSON.stringify(lines));
+  console.log(`[5C][SPLIT] Lines for scenes after hook/summary:`, JSON.stringify(restLines));
 
-  // Step 2: Fallback to sentence split if only one line
-  if (lines.length < 2) {
-    lines = script.split(/[.?!]\s+/).map(s => s.trim()).filter(Boolean);
-    console.log(`[5C][SPLIT] Fallback: Split by sentence, got ${lines.length} lines.`, JSON.stringify(lines));
-  } else {
-    console.log(`[5C][SPLIT] Script split into ${lines.length} non-empty lines.`);
-  }
-
-  // Remove empty lines again just to be sure.
-  lines = lines.filter(Boolean);
-
-  const scenes = [];
+  // Step 4: Decide grouping for mega-scene (combine next 1–2 lines if they add context)
+  let scenes = [];
   const seenIds = new Set();
 
-  // Step 3: Build scenes
-  if (lines.length >= 2) {
-    // Create "mega-scene" for first two lines
-    const id = `megascene-1-2-${uuid.v4()}`;
+  // Scene 1: The viral summary/hook
+  const hookId = `hookscene-1-${uuid.v4()}`;
+  scenes.push({
+    id: hookId,
+    texts: [summaryLine],
+    isMegaScene: false,
+    type: 'hook-summary',
+    origIndices: [0],
+  });
+  seenIds.add(hookId);
+  console.log(`[5C][HOOK] Created HOOK SCENE: "${summaryLine}" [ID: ${hookId}]`);
+
+  // Scene 2: Optional mega-scene, group next 1–2 context lines
+  if (restLines.length > 1) {
+    const megaId = `megascene-2-${uuid.v4()}`;
     scenes.push({
-      id,
-      texts: [lines[0], lines[1]],
+      id: megaId,
+      texts: [restLines[0], restLines[1]],
       isMegaScene: true,
-      type: 'hook+main',
-      origIndices: [0, 1],
+      type: 'context-mega',
+      origIndices: [1, 2],
     });
-    seenIds.add(id);
-    console.log(`[5C][MEGA] Created MEGA-SCENE for lines 1+2 [ID: ${id}]`);
-    for (let i = 2; i < lines.length; ++i) {
+    seenIds.add(megaId);
+    console.log(`[5C][MEGA] Created MEGA-SCENE for context lines [ID: ${megaId}]`);
+    // Push remaining lines as normal scenes
+    for (let i = 2; i < restLines.length; ++i) {
       const sceneId = `scene${i + 1}-${uuid.v4()}`;
       if (seenIds.has(sceneId)) {
         console.warn(`[5C][SCENE][WARN] Duplicate scene ID generated at index ${i}. Regenerating...`);
@@ -67,26 +103,24 @@ function splitScriptToScenes(script) {
       seenIds.add(sceneId);
       scenes.push({
         id: sceneId,
-        texts: [lines[i]],
+        texts: [restLines[i]],
         isMegaScene: false,
         type: 'normal',
-        origIndices: [i],
+        origIndices: [i + 1],
       });
-      console.log(`[5C][SCENE] Created scene ${i + 1}: "${lines[i]}" [ID: ${sceneId}]`);
+      console.log(`[5C][SCENE] Created scene ${i + 1}: "${restLines[i]}" [ID: ${sceneId}]`);
     }
-  } else if (lines.length === 1) {
-    const sceneId = `scene1-${uuid.v4()}`;
+  } else if (restLines.length === 1) {
+    const sceneId = `scene2-${uuid.v4()}`;
     scenes.push({
       id: sceneId,
-      texts: [lines[0]],
+      texts: [restLines[0]],
       isMegaScene: false,
       type: 'single',
-      origIndices: [0],
+      origIndices: [1],
     });
     seenIds.add(sceneId);
-    console.log(`[5C][SCENE] Only one line, created single scene [ID: ${sceneId}]`);
-  } else {
-    console.warn('[5C][SPLIT] No scenes found in script!');
+    console.log(`[5C][SCENE] Only one context line, created single scene [ID: ${sceneId}]`);
   }
 
   // Bulletproof: Make sure each scene is a proper object, texts always array of non-empty string(s)
@@ -113,7 +147,7 @@ function splitScriptToScenes(script) {
     return { ...scene, texts: safeTexts };
   });
 
-  console.log(`[5C][SPLIT] Total scenes generated (mega + singles): ${finalScenes.length}`);
+  console.log(`[5C][SPLIT] Total scenes generated (hook/summary + mega + singles): ${finalScenes.length}`);
   finalScenes.forEach((scene, idx) => {
     console.log(`[5C][SCENES][${idx}] ID: ${scene.id}, Mega: ${!!scene.isMegaScene}, Type: ${scene.type}, Lines: ${scene.texts.length}, OrigIndices: ${scene.origIndices.join(',')}, Text: "${scene.texts.join(' / ')}"`);
   });
