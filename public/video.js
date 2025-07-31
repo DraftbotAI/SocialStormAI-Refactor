@@ -175,7 +175,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const voice = document.getElementById('voiceSelect').value;
     const out = document.getElementById('output');
     const player = document.getElementById('videoPlayer');
-    const videoSource = document.getElementById('videoSource');
     const downloadBtn = document.getElementById('downloadBtn');
     const shareBtn = document.getElementById('shareBtn');
     const progressBarWrap = document.getElementById('progressBarWrap');
@@ -195,12 +194,8 @@ document.addEventListener('DOMContentLoaded', function() {
     progressStatus.textContent = 'Starting…';
     player.style.display = 'none';
 
-    // Clear any old source for a clean reload!
-    if (videoSource) {
-      videoSource.src = '';
-      log('VIDEO', 'Cleared previous videoSource src');
-    }
-    player.removeAttribute('src'); // In case there was a direct src
+    // Clear any old video for a clean reload!
+    player.removeAttribute('src');
     player.load();
 
     downloadBtn.style.display = shareBtn.style.display = 'none';
@@ -249,11 +244,7 @@ document.addEventListener('DOMContentLoaded', function() {
           log('VIDEO', 'Received final video URL:', videoUrl);
 
           if (videoUrl) {
-            if (videoSource) {
-              videoSource.src = videoUrl;
-              log('VIDEO', 'Set <source> src:', videoSource.src);
-            }
-            // Also set src directly on <video> for safety (double compatibility)
+            // Always set .src directly for universal browser compatibility
             player.src = videoUrl;
             log('VIDEO', 'Set <video> src:', player.src);
 
@@ -261,7 +252,7 @@ document.addEventListener('DOMContentLoaded', function() {
             player.pause();
             player.currentTime = 0;
             player.load();
-            log('VIDEO', 'Called player.load() after setting sources');
+            log('VIDEO', 'Called player.load() after setting src');
           } else {
             out.textContent = p.status || 'Generation failed.';
             progressBarWrap.style.display = 'none';
