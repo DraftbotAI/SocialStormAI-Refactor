@@ -2,14 +2,13 @@
 // SECTION 5B: GENERATE VIDEO ENDPOINT (Job Controller)
 // The /api/generate-video route handler. Full job orchestration.
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
-// Enhanced: Mega-scene (hook+main) support
-// Now: Uploads final video to Cloudflare R2 and returns public R2 URL
-// Now: Fully parallelized scene processing for max speed!
+// PRO+: Audio and muxed video caching, parallelized scene jobs
 // ===========================================================
 
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 // R2 dependencies (S3 SDK)
 const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
@@ -24,6 +23,16 @@ const {
 } = require('./section5g-concat-and-music.cjs');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
+
+// === CACHE DIRS ===
+const audioCacheDir = path.resolve(__dirname, '..', 'audio_cache');
+const videoCacheDir = path.resolve(__dirname, '..', 'video_cache');
+if (!fs.existsSync(audioCacheDir)) fs.mkdirSync(audioCacheDir);
+if (!fs.existsSync(videoCacheDir)) fs.mkdirSync(videoCacheDir);
+
+function hashForCache(str) {
+  return crypto.createHash('sha1').update(str).digest('hex');
+}
 
 // ================= R2 UPLOAD HELPER =======================
 async function uploadToR2(localFilePath, r2FinalName, jobId) {
@@ -143,7 +152,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           }
         }
 
-        // === 2. PARALLELIZED scene processing: audio, video, mux ===
+        // === 2. PARALLELIZED scene processing with CACHING: audio, video, mux ===
         const usedClips = [];
         const sceneFiles = [];
         const sceneJobs = scenes.map((scene, i) => (async () => {
@@ -177,38 +186,59 @@ function registerGenerateVideoEndpoint(app, deps) {
 
           assertFileExists(clipPath, `CLIP_SCENE_${i+1}`);
 
-          // --- AUDIO GENERATION ---
-          let audioPath;
-          if (isMegaScene) {
-            audioPath = path.join(workDir, `scene${i + 1}-mega-audio.mp3`);
-            await createMegaSceneAudio(scene.texts, voice, audioPath, provider, workDir);
-            assertFileExists(audioPath, `AUDIO_MEGA_${i+1}`);
+          // --- AUDIO GENERATION WITH CACHE ---
+          const audioHash = hashForCache(JSON.stringify({
+            text: scene.texts,
+            voice,
+            provider
+          }));
+          const audioCachePath = path.join(audioCacheDir, `${audioHash}.mp3`);
+          let audioPath = audioCachePath;
+
+          if (fs.existsSync(audioCachePath) && fs.statSync(audioCachePath).size > 10000) {
+            console.log(`[5B][CACHE][AUDIO] [${jobId}] Scene ${i + 1}: HIT: Using cached audio: ${audioCachePath}`);
           } else {
-            audioPath = path.join(workDir, `scene${i + 1}-audio.mp3`);
-            await createSceneAudio(scene.texts[0], voice, audioPath, provider);
-            assertFileExists(audioPath, `AUDIO_SCENE_${i+1}`);
+            if (isMegaScene) {
+              await createMegaSceneAudio(scene.texts, voice, audioCachePath, provider, workDir);
+            } else {
+              await createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
+            }
+            assertFileExists(audioCachePath, isMegaScene ? `AUDIO_MEGA_${i+1}` : `AUDIO_SCENE_${i+1}`);
+            console.log(`[5B][CACHE][AUDIO] [${jobId}] Scene ${i + 1}: MISS: Generated and cached audio: ${audioCachePath}`);
           }
 
-          // --- MUXING video+audio for the scene ---
-          const muxedScenePath = path.join(workDir, `scene${i + 1}.mp4`);
-          if (isMegaScene) {
-            await muxMegaSceneWithNarration(clipPath, audioPath, muxedScenePath);
-            assertFileExists(muxedScenePath, `MUXED_MEGA_${i+1}`);
+          // --- MUXED VIDEO CACHE ---
+          const muxHash = hashForCache(JSON.stringify({
+            text: scene.texts,
+            voice,
+            provider,
+            clip: clipPath
+          }));
+          const videoCachePath = path.join(videoCacheDir, `${muxHash}.mp4`);
+          let muxedScenePath = videoCachePath;
+
+          if (fs.existsSync(videoCachePath) && fs.statSync(videoCachePath).size > 100000) {
+            console.log(`[5B][CACHE][VIDEO] [${jobId}] Scene ${i + 1}: HIT: Using cached muxed video: ${videoCachePath}`);
           } else {
-            await muxVideoWithNarration(clipPath, audioPath, muxedScenePath);
-            assertFileExists(muxedScenePath, `MUXED_SCENE_${i+1}`);
+            if (isMegaScene) {
+              await muxMegaSceneWithNarration(clipPath, audioPath, videoCachePath);
+              assertFileExists(videoCachePath, `MUXED_MEGA_${i+1}`);
+            } else {
+              await muxVideoWithNarration(clipPath, audioPath, videoCachePath);
+              assertFileExists(videoCachePath, `MUXED_SCENE_${i+1}`);
+            }
+            console.log(`[5B][CACHE][VIDEO] [${jobId}] Scene ${i + 1}: MISS: Generated and cached muxed video: ${videoCachePath}`);
           }
           return { idx: i, muxedScenePath };
         })());
 
-        progress[jobId] = { percent: 10, status: `Processing all scenes in parallel...` };
-        console.log(`[5B][SCENES] [${jobId}] Starting parallel scene processing (${scenes.length} scenes)...`);
+        progress[jobId] = { percent: 10, status: `Processing all scenes in parallel (with caching)...` };
+        console.log(`[5B][SCENES] [${jobId}] Starting parallel scene processing (${scenes.length} scenes, caching enabled)...`);
 
         // Wait for ALL scene jobs to complete
         let allScenes;
         try {
           allScenes = await Promise.all(sceneJobs);
-          // Guarantee sceneFiles in correct order
           allScenes.sort((a, b) => a.idx - b.idx).forEach(obj => sceneFiles.push(obj.muxedScenePath));
         } catch (err) {
           throw new Error(`[5B][FATAL] One or more scenes failed to process: ${err}`);

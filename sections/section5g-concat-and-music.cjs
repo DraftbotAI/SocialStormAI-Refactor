@@ -3,6 +3,7 @@
 // Concats scenes, adds music, appends outro, validates output.
 // SUPER MAX LOGGING AT EVERY STEP — NO SILENT FAILURES
 // Aspect ratio fixed! Scenes always 9:16, never stretched.
+// Enhanced: All FFmpeg uses -preset ultrafast for max speed
 // ===========================================================
 
 const fs = require('fs');
@@ -135,7 +136,7 @@ async function concatScenes(sceneFiles, workDir) {
         '-c:v libx264',
         '-c:a aac',
         '-movflags +faststart',
-        '-preset veryfast',
+        '-preset ultrafast', // ULTRAFAST here!
         // === Aspect ratio fix: Always 9:16, never stretched ===
         '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
       ])
@@ -236,7 +237,12 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
     ffmpeg()
       .input(listFile)
       .inputOptions(['-f concat', '-safe 0'])
-      .outputOptions(['-c:v libx264', '-c:a aac', '-movflags +faststart'])
+      .outputOptions([
+        '-c:v libx264',
+        '-c:a aac',
+        '-movflags +faststart',
+        '-preset ultrafast' // ULTRAFAST here!
+      ])
       .save(outPath)
       .on('end', async () => {
         try {
