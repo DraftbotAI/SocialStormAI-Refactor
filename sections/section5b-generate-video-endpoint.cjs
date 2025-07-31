@@ -15,7 +15,7 @@ const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
 
 // === CRUCIAL: Correct import for bulletproofScenes ===
 const {
-  bulletproofScenes,          // <-- FIX: from section5c-script-scene-utils.cjs
+  bulletproofScenes,          // From 5C utils: always returns valid scene objects
   splitScriptToScenes
 } = require('./section5c-script-scene-utils.cjs');
 

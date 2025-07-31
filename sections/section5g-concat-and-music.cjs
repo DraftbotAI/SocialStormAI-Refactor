@@ -4,6 +4,7 @@
 // SUPER MAX LOGGING AT EVERY STEP — NO SILENT FAILURES
 // Aspect ratio fixed! Scenes always 9:16, never stretched.
 // Enhanced: All FFmpeg uses -preset ultrafast for max speed
+// Includes bulletproofScenes for size/audio normalization
 // ===========================================================
 
 const fs = require('fs');
@@ -59,6 +60,76 @@ async function logFileProbe(file, label = 'PROBE') {
   }
 }
 
+// BULLETPROOF: Ensures every scene is 1080x1920, yuv420p, has audio
+async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo) {
+  console.log('[5G][BULLETPROOF] bulletproofScenes called.');
+  const fixed = [];
+  for (let i = 0; i < sceneFiles.length; ++i) {
+    const file = sceneFiles[i];
+    let needsFix = false;
+    let vinfo;
+    try {
+      vinfo = await getVideoInfo(file);
+      // Must be 1080x1920 portrait, must have audio
+      if (
+        !vinfo ||
+        vinfo.width !== 1080 ||
+        vinfo.height !== 1920 ||
+        !vinfo.hasVideo ||
+        !vinfo.hasAudio
+      ) {
+        needsFix = true;
+        console.warn(`[5G][BULLETPROOF][WARN] Scene at idx ${i} is invalid:`, vinfo);
+      }
+    } catch (e) {
+      needsFix = true;
+      console.warn(`[5G][BULLETPROOF][BUG] Scene at idx ${i} probe failed:`, e);
+    }
+    if (needsFix) {
+      // Force fix to proper output
+      const fixedPath = file.replace(/\.mp4$/, `-fixed.mp4`);
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(file)
+          .outputOptions([
+            '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
+            '-pix_fmt yuv420p',
+            '-c:v libx264',
+            '-c:a aac',
+            '-ar 44100',
+            '-ac 2',
+            '-b:a 128k',
+            '-preset ultrafast',
+            '-y'
+          ])
+          .save(fixedPath)
+          .on('end', async () => {
+            try {
+              assertFile(fixedPath, 10240, `BULLETPROOF_FIXED_${i}`);
+              await logFileProbe(fixedPath, `BULLETPROOF_FIXED_${i}`);
+              console.log(`[5G][BULLETPROOF] Fixed scene: ${fixedPath}`);
+              resolve();
+            } catch (e) {
+              console.error(`[5G][BULLETPROOF][ERR] ${e.message}`);
+              reject(e);
+            }
+          })
+          .on('error', (err, stdout, stderr) => {
+            console.error(`[5G][BULLETPROOF][FFMPEG][ERR]`, err);
+            if (stderr) console.error(`[5G][BULLETPROOF][STDERR]\n${stderr}`);
+            if (stdout) console.log(`[5G][BULLETPROOF][STDOUT]\n${stdout}`);
+            reject(err);
+          });
+      });
+      fixed.push(fixedPath);
+    } else {
+      fixed.push(file);
+    }
+  }
+  console.log(`[5G][BULLETPROOF] ${fixed.length} valid scenes returned.`);
+  return fixed;
+}
+
 async function ensureAudioStream(videoPath, workDir) {
   console.log(`[5G][AUDIOFIX] ensureAudioStream called: ${videoPath}`);
   let audioStreamExists = false;
@@ -106,7 +177,31 @@ async function concatScenes(sceneFiles, workDir) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
   sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i + 1}: ${file}`));
 
-  const fixedScenes = await Promise.all(sceneFiles.map(f => ensureAudioStream(f, workDir)));
+  // Bulletproof: auto-normalize every file to 1080x1920, yuv420p, audio
+  let fixedScenes = await bulletproofScenes(
+    sceneFiles,
+    null,
+    async (file) => {
+      return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(file, (err, md) => {
+          if (err) return reject(err);
+          const v = (md.streams || []).find(s => s.codec_type === 'video');
+          const a = (md.streams || []).find(s => s.codec_type === 'audio');
+          resolve({
+            width: v?.width,
+            height: v?.height,
+            hasVideo: !!v,
+            hasAudio: !!a
+          });
+        });
+      });
+    },
+    null
+  );
+
+  // Ensure all have audio (as final fix)
+  fixedScenes = await Promise.all(fixedScenes.map(f => ensureAudioStream(f, workDir)));
+
   const listFile = path.resolve(workDir, 'list.txt');
   fs.writeFileSync(listFile, fixedScenes.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
   const concatFile = path.resolve(workDir, getUniqueFinalName('concat'));
@@ -247,5 +342,6 @@ module.exports = {
   overlayMusic,
   appendOutro,
   getOutroPath,
-  getUniqueFinalName
+  getUniqueFinalName,
+  bulletproofScenes // <-- Exported for use in 5B and others!
 };

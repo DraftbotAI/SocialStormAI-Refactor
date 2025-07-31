@@ -57,7 +57,6 @@ function splitScriptToScenes(script, topic = '') {
 
   // Step 2: Generate a viral summary/hook as the very first scene
   const summaryLine = generateViralHookAndSummary(script, topic);
-  let lines = [summaryLine];
 
   // Step 3: Remove the summary from the rest (prevent dupe)
   let restLines = rawLines.filter(l => l !== summaryLine && l.length > 4);
