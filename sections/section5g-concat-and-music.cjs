@@ -61,7 +61,7 @@ async function logFileProbe(file, label = 'PROBE') {
  * Generate a unique filename for final output (no collisions, always traceable).
  */
 function getUniqueFinalName(prefix = 'final') {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-'); // e.g. 2025-07-30T20-30-58-231Z
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const uuid = uuidv4();
   return `${prefix}-${timestamp}-${uuid}.mp4`;
 }
@@ -83,7 +83,6 @@ async function concatScenes(sceneFiles, workDir) {
     await logFileProbe(sceneFiles[i], `CONCAT_SCENE_${i+1}`);
   }
 
-  // Concat all scenes, ensure audio stream for each
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(listFile)
@@ -93,7 +92,7 @@ async function concatScenes(sceneFiles, workDir) {
         '-c:a aac',
         '-movflags +faststart',
         '-preset veryfast',
-        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1' // always vertical 9:16
+        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
       ])
       .save(concatFile)
       .on('end', async () => {
@@ -165,9 +164,8 @@ async function ensureAudioStream(videoPath, workDir) {
 /**
  * Overlay music on the FINAL video with correct volume mixing.
  */
-async function overlayMusic(videoPath, musicPath, workDir) {
-  const musicOut = path.resolve(workDir, getUniqueFinalName('music'));
-  console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${musicOut}"`);
+async function overlayMusic(videoPath, musicPath, outPath) {
+  console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
 
   try {
     await logFileProbe(videoPath, 'MUSIC_VIDEO');
@@ -194,13 +192,13 @@ async function overlayMusic(videoPath, musicPath, workDir) {
         '-shortest',
         '-y'
       ])
-      .save(musicOut)
+      .save(outPath)
       .on('end', async () => {
         try {
-          assertFile(musicOut, 10240, 'MUSIC_OUT');
-          await logFileProbe(musicOut, 'MUSIC_OUT');
-          console.log(`[5G][MUSIC] Music overlay complete: ${musicOut}`);
-          resolve(musicOut);
+          assertFile(outPath, 10240, 'MUSIC_OUT');
+          await logFileProbe(outPath, 'MUSIC_OUT');
+          console.log(`[5G][MUSIC] Music overlay complete: ${outPath}`);
+          resolve(outPath);
         } catch (e) {
           console.error(`[5G][MUSIC][ERR] ${e.message}`);
           reject(e);
@@ -218,12 +216,14 @@ async function overlayMusic(videoPath, musicPath, workDir) {
 /**
  * Append outro (video+audio) to the final video.
  */
-async function appendOutro(mainPath, outroPath, workDir) {
+async function appendOutro(mainPath, outroPath, outPath, workDir) {
   if (!outroPath) {
     outroPath = getOutroPath();
   }
-  const outroOut = path.resolve(workDir, getUniqueFinalName('final-with-outro'));
-  console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outroOut}"`);
+  if (!outPath) {
+    outPath = path.resolve(workDir, getUniqueFinalName('final-with-outro'));
+  }
+  console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outPath}"`);
   await logFileProbe(mainPath, 'OUTRO_MAIN');
   await logFileProbe(outroPath, 'OUTRO_OUTRO');
 
@@ -238,13 +238,13 @@ async function appendOutro(mainPath, outroPath, workDir) {
       .input(listFile)
       .inputOptions(['-f concat', '-safe 0'])
       .outputOptions(['-c:v libx264', '-c:a aac', '-movflags +faststart'])
-      .save(outroOut)
+      .save(outPath)
       .on('end', async () => {
         try {
-          assertFile(outroOut, 10240, 'OUTRO_OUT');
-          await logFileProbe(outroOut, 'OUTRO_OUT');
-          console.log(`[5G][OUTRO] Outro appended: ${outroOut}`);
-          resolve(outroOut);
+          assertFile(outPath, 10240, 'OUTRO_OUT');
+          await logFileProbe(outPath, 'OUTRO_OUT');
+          console.log(`[5G][OUTRO] Outro appended: ${outPath}`);
+          resolve(outPath);
         } catch (e) {
           console.error(`[5G][OUTRO][ERR] ${e.message}`);
           reject(e);
@@ -281,11 +281,9 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
       await logFileProbe(origPath, `BULLETPROOF_SCENE_${i+1}`);
       assertFile(origPath, 10240, `BULLETPROOF_SCENE_${i+1}`);
 
-      // Ensure audio stream (fix if needed)
       let fixedPath = origPath;
       fixedPath = await ensureAudioStream(fixedPath, workDir);
 
-      // Get video/audio info
       const info = await getVideoInfo(fixedPath);
       const v = (info.streams || []).find(s => s.codec_type === 'video');
       const a = (info.streams || []).find(s => s.codec_type === 'audio');
@@ -321,5 +319,5 @@ module.exports = {
   appendOutro,
   bulletproofScenes,
   getOutroPath,
-  getUniqueFinalName // <-- Add to make available to section5b (R2 upload)
+  getUniqueFinalName
 };

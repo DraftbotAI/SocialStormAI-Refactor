@@ -19,7 +19,7 @@ const {
   overlayMusic,
   appendOutro,
   bulletproofScenes,
-  getUniqueFinalName // import for unique filenames
+  getUniqueFinalName // must be implemented in 5G!
 } = require('./section5g-concat-and-music.cjs');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
@@ -33,7 +33,6 @@ console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
  */
 async function uploadToR2(localFilePath, r2FinalName, jobId) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  // Use your PUBLIC domain (either .r2.dev or your CNAME) from .env!
   const accountDomain = process.env.R2_PUBLIC_DOMAIN || 'videos.socialstormai.com';
   const r2Key = `videos/${jobId}/${r2FinalName}`;
 
@@ -44,7 +43,6 @@ async function uploadToR2(localFilePath, r2FinalName, jobId) {
     }
     const fileBuffer = fs.readFileSync(localFilePath);
 
-    // Upload to R2
     const r2Resp = await s3Client.send(new PutObjectCommand({
       Bucket: bucket,
       Key: r2Key,
@@ -54,12 +52,10 @@ async function uploadToR2(localFilePath, r2FinalName, jobId) {
 
     console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
 
-    // Always use PUBLIC domain! (CNAME or .r2.dev, NOT default endpoint)
     let publicUrl;
     if (accountDomain.includes('r2.dev')) {
       publicUrl = `https://${accountDomain}/${r2Key}`;
     } else {
-      // Custom domain (CNAME) setup should point at bucket root.
       publicUrl = `https://${accountDomain}/${r2Key}`;
     }
     console.log(`[5B][R2 UPLOAD][SUCCESS] File available at: ${publicUrl}`);
@@ -70,6 +66,12 @@ async function uploadToR2(localFilePath, r2FinalName, jobId) {
   }
 }
 // ===========================================================
+
+function assertFileExists(file, label) {
+  if (!fs.existsSync(file) || fs.statSync(file).size < 10240) {
+    throw new Error(`[5B][${label}][ERR] File does not exist or is too small: ${file}`);
+  }
+}
 
 function registerGenerateVideoEndpoint(app, deps) {
   console.log('[5B][BOOT] Called registerGenerateVideoEndpoint...');
@@ -135,7 +137,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         let scenes = splitScriptToScenes(script);
         console.log(`[5B][SCENES] [${jobId}] Split into ${scenes.length} scenes.`);
 
-        // ---- AUTO-WRAP IF SPLITTER RETURNS STRINGS (DEV PATCH) ----
         let wrapped = false;
         scenes = scenes.map((scene, i) => {
           if (typeof scene === 'string') {
@@ -153,10 +154,8 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
 
         if (!Array.isArray(scenes) || scenes.length === 0) throw new Error('[5B][ERR] No scenes parsed from script.');
-        // Debug: Log the first scene object structure
         console.log(`[5B][DEBUG][SCENES STRUCTURE] First scene: ${JSON.stringify(scenes[0], null, 2)}`);
 
-        // Defensive: Validate all scenes before running job
         for (let i = 0; i < scenes.length; i++) {
           const scene = scenes[i];
           if (
@@ -181,7 +180,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 5 + i * 5, status: `Finding the perfect video for step ${i + 1}...` };
           console.log(`[5B][SCENE] [${jobId}] Processing scene ${i + 1} / ${scenes.length} (megaScene: ${isMegaScene})`);
 
-          // Main subject for mega-scene: always from scene 1+2
           let mainTopic = null;
           if (
             scenes[0] &&
@@ -214,6 +212,7 @@ function registerGenerateVideoEndpoint(app, deps) {
             throw new Error(`[5B][ERR] No clip found for scene ${i + 1}`);
           }
           usedClips.push(clipPath);
+          assertFileExists(clipPath, `CLIP_SCENE_${i+1}`);
           console.log(`[5B][CLIP] [${jobId}] Scene ${i + 1}: Clip selected: ${clipPath}`);
 
           // --- AUDIO GENERATION ---
@@ -223,6 +222,7 @@ function registerGenerateVideoEndpoint(app, deps) {
             try {
               progress[jobId] = { percent: 12 + i * 5, status: `Recording your viral intro...` };
               await createMegaSceneAudio(scene.texts, voice, audioPath, provider, workDir);
+              assertFileExists(audioPath, `AUDIO_MEGA_${i+1}`);
               console.log(`[5B][AUDIO] [${jobId}] Mega-scene audio created: ${audioPath}`);
             } catch (e) {
               console.error(`[5B][AUDIO][ERR] [${jobId}] Mega-scene audio gen failed:`, e);
@@ -233,14 +233,12 @@ function registerGenerateVideoEndpoint(app, deps) {
             try {
               progress[jobId] = { percent: 14 + i * 5, status: `Voicing scene ${i + 1}...` };
               await createSceneAudio(scene.texts[0], voice, audioPath, provider);
+              assertFileExists(audioPath, `AUDIO_SCENE_${i+1}`);
               console.log(`[5B][AUDIO] [${jobId}] Scene ${i + 1} audio generated: ${audioPath}`);
             } catch (e) {
               console.error(`[5B][AUDIO][ERR] [${jobId}] Scene ${i + 1} audio gen failed:`, e);
               throw e;
             }
-          }
-          if (!audioPath || typeof audioPath !== 'string' || !fs.existsSync(audioPath)) {
-            throw new Error(`[5B][ERR] No audio generated for scene ${i + 1}`);
           }
 
           // --- MUXING (combine) video and audio for the scene ---
@@ -249,9 +247,11 @@ function registerGenerateVideoEndpoint(app, deps) {
             progress[jobId] = { percent: 16 + i * 5, status: `Syncing voice and visuals for step ${i + 1}...` };
             if (isMegaScene) {
               await muxMegaSceneWithNarration(clipPath, audioPath, muxedScenePath);
+              assertFileExists(muxedScenePath, `MUXED_MEGA_${i+1}`);
               console.log(`[5B][MUX] [${jobId}] Mega-scene muxed: ${muxedScenePath}`);
             } else {
               await muxVideoWithNarration(clipPath, audioPath, muxedScenePath);
+              assertFileExists(muxedScenePath, `MUXED_SCENE_${i+1}`);
               console.log(`[5B][MUX] [${jobId}] Scene ${i + 1} muxed: ${muxedScenePath}`);
             }
           } catch (e) {
@@ -286,6 +286,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         try {
           progress[jobId] = { percent: 60, status: 'Combining everything into one amazing video...' };
           concatPath = await concatScenes(sceneFiles, workDir);
+          assertFileExists(concatPath, 'CONCAT_OUT');
           console.log(`[5B][CONCAT] [${jobId}] Scenes concatenated: ${concatPath}`);
         } catch (e) {
           console.error(`[5B][CONCAT][ERR] [${jobId}] concatScenes failed:`, e);
@@ -297,6 +298,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         try {
           progress[jobId] = { percent: 70, status: 'Finalizing your audio...' };
           withAudioPath = await ensureAudioStream(concatPath, workDir);
+          assertFileExists(withAudioPath, 'AUDIOFIX_OUT');
           console.log(`[5B][AUDIO] [${jobId}] Audio stream ensured: ${withAudioPath}`);
         } catch (e) {
           console.error(`[5B][AUDIO][ERR] [${jobId}] ensureAudioStream failed:`, e);
@@ -310,9 +312,9 @@ function registerGenerateVideoEndpoint(app, deps) {
             progress[jobId] = { percent: 80, status: 'Adding background music...' };
             const chosenMusic = pickMusicForMood ? await pickMusicForMood(script, workDir) : null;
             if (chosenMusic) {
-              // Use getUniqueFinalName for unique file output
               const musicOutput = path.join(workDir, getUniqueFinalName('with-music'));
-              await overlayMusic(withAudioPath, chosenMusic, workDir);
+              await overlayMusic(withAudioPath, chosenMusic, musicOutput);
+              assertFileExists(musicOutput, 'MUSIC_OUT');
               musicPath = musicOutput;
               progress[jobId] = { percent: 82, status: 'Background music ready!' };
               console.log(`[5B][MUSIC] [${jobId}] Music overlayed: ${chosenMusic}`);
@@ -337,9 +339,9 @@ function registerGenerateVideoEndpoint(app, deps) {
           if (fs.existsSync(outroPath)) {
             try {
               progress[jobId] = { percent: 90, status: 'Adding your outro...' };
-              // Use unique name for final output
               const outroOutput = path.join(workDir, r2FinalName);
-              await appendOutro(musicPath, outroPath, workDir);
+              await appendOutro(musicPath, outroPath, outroOutput, workDir);
+              assertFileExists(outroOutput, 'OUTRO_OUT');
               finalPath = outroOutput;
               progress[jobId] = { percent: 92, status: 'Outro added! Wrapping up...' };
               console.log(`[5B][OUTRO] [${jobId}] Outro appended: ${outroPath} | Output: ${finalPath}`);
@@ -363,7 +365,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
           console.log(`[5B][SUCCESS] [${jobId}] Video job complete! Output at: ${r2VideoUrl}`);
         } catch (uploadErr) {
-          // Fallback: at least provide local output if upload fails
           progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
           console.error(`[5B][FATAL][JOB] [${jobId}] Cloudflare R2 upload failed, local file only:`, uploadErr);
         }
