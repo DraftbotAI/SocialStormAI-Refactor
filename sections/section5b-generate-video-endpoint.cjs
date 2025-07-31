@@ -34,8 +34,10 @@ console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
 async function uploadToR2(localFilePath, r2FinalName, jobId) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
   const accountDomain = process.env.R2_PUBLIC_DOMAIN || 'videos.socialstormai.com';
-  const r2Key = `videos/${jobId}/${r2FinalName}`;
-
+  // --------- FIX: Upload to root, not videos/ subfolder ---------
+  // Use jobId-prefixed filename for uniqueness (or just r2FinalName for short root filenames)
+  const r2Key = `${jobId}-${r2FinalName}`;
+  // -------------------------------------------------------------
   console.log(`[5B][R2 UPLOAD][START] Attempting upload for job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
   try {
     if (!fs.existsSync(localFilePath)) {
