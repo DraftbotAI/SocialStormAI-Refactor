@@ -136,8 +136,8 @@ async function concatScenes(sceneFiles, workDir) {
         '-c:v libx264',
         '-c:a aac',
         '-movflags +faststart',
-        '-preset ultrafast', // ULTRAFAST here!
-        // === Aspect ratio fix: Always 9:16, never stretched ===
+        '-preset ultrafast',
+        // Aspect ratio fix: Always 9:16, never stretched
         '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
       ])
       .save(concatFile)
@@ -241,7 +241,7 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
         '-c:v libx264',
         '-c:a aac',
         '-movflags +faststart',
-        '-preset ultrafast' // ULTRAFAST here!
+        '-preset ultrafast'
       ])
       .save(outPath)
       .on('end', async () => {

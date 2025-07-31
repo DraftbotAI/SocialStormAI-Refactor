@@ -101,6 +101,7 @@ async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, tr
 /**
  * Muxes a narration audio file onto a video file, using 0.5s lead-in, 1.0s trail-out.
  * Always trims the video to match the voiceover with proper padding and blurred background.
+ * Removes ALL source audio (never leaks!) and always outputs AAC/MP4 for R2 compatibility.
  */
 async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   console.log(`[5F][MUX] muxVideoWithNarration called: video="${videoIn}" audio="${audioIn}" out="${outPath}"`);
@@ -120,15 +121,17 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
     console.error(`[5F][MUX][ERR] Failed to trim video`, err);
     throw err;
   }
-  // Mux audio to trimmed video
+  // Mux audio to trimmed video, remove all source audio, ensure only voiceover is present
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(trimmedVideo)
       .input(audioIn)
       .outputOptions([
-        '-shortest',
+        '-map 0:v:0',
+        '-map 1:a:0',
         '-c:v copy',
         '-c:a aac',
+        '-shortest',
         '-y'
       ])
       .on('start', (cmd) => {
