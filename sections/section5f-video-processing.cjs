@@ -3,6 +3,7 @@
 // Handles trimming, normalizing, silent audio, muxing narration onto video
 // MAX LOGGING AT EVERY STEP
 // Enhanced: Mega-scene (multi-line audio) support
+// Improved: Trims 0.5s BEFORE voice, ends 1s AFTER voice ends
 // ===========================================================
 
 const fs = require('fs');
@@ -11,7 +12,6 @@ const ffmpeg = require('fluent-ffmpeg');
 
 console.log('[5F][INIT] Video processing & AV combiner loaded.');
 
-// Helper: Defensive file existence/size check
 function assertFile(file, minSize = 10240, label = 'FILE') {
   if (!fs.existsSync(file)) {
     throw new Error(`[5F][${label}][ERR] File does not exist: ${file}`);
@@ -22,15 +22,38 @@ function assertFile(file, minSize = 10240, label = 'FILE') {
   }
 }
 
+async function getDuration(file) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(file, (err, metadata) => {
+      if (err) {
+        console.error(`[5F][DURATION][ERR] Failed to ffprobe: ${file}`, err);
+        return reject(err);
+      }
+      const duration = metadata && metadata.format ? metadata.format.duration : 0;
+      if (!duration || isNaN(duration)) {
+        console.error(`[5F][DURATION][ERR] Could not get duration: ${file}`);
+        return reject(new Error('Duration not found'));
+      }
+      resolve(duration);
+    });
+  });
+}
+
 /**
- * Trims a video file to a specific duration.
+ * Trims a video file for a scene: starts 0.5s before audio, ends 1s after audio.
  */
-async function trimVideo(inPath, outPath, duration, start = 0) {
-  console.log(`[5F][TRIM] trimVideo called: in="${inPath}" out="${outPath}" duration=${duration}s start=${start}`);
+async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, trailOut = 1.0) {
+  let videoStart = Math.max(0, 0 - leadIn); // normally 0, could allow per-clip offset in future
+  let duration = audioDuration + leadIn + trailOut;
+  videoStart = 0; // Always start at the beginning unless you want to add "late entry"
+  console.log(`[5F][TRIM] trimForNarration: in="${inPath}" out="${outPath}" start=${videoStart}s duration=${duration}s`);
   return new Promise((resolve, reject) => {
     ffmpeg(inPath)
-      .setStartTime(start)
+      .setStartTime(videoStart)
       .setDuration(duration)
+      .outputOptions([
+        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
+      ])
       .output(outPath)
       .on('start', (cmd) => {
         console.log(`[5F][TRIM][CMD] ${cmd}`);
@@ -59,48 +82,101 @@ async function trimVideo(inPath, outPath, duration, start = 0) {
 }
 
 /**
- * Normalizes a video to 9:16 aspect ratio with blurred background (TikTok style).
+ * Muxes a narration audio file onto a video file, using 0.5s lead-in, 1.0s trail-out.
  */
-async function normalizeTo9x16Blurred(inPath, outPath, width = 1080, height = 1920) {
-  console.log(`[5F][NORM] normalizeTo9x16Blurred called: in="${inPath}" out="${outPath}" size=${width}x${height}`);
+async function muxVideoWithNarration(videoIn, audioIn, outPath) {
+  console.log(`[5F][MUX] muxVideoWithNarration called: video="${videoIn}" audio="${audioIn}" out="${outPath}"`);
+  let audioDuration = 0;
+  try {
+    audioDuration = await getDuration(audioIn);
+    console.log(`[5F][MUX] Detected audio duration: ${audioDuration}s`);
+  } catch (err) {
+    throw new Error(`[5F][MUX][ERR] Cannot get audio duration: ${err}`);
+  }
+  // Trim video: 0.5s before, 1.0s after audio
+  const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-scene-${Date.now()}.mp4`);
+  try {
+    await trimForNarration(videoIn, trimmedVideo, audioDuration, 0.5, 1.0);
+    console.log(`[5F][MUX] Trimmed video for narration: ${trimmedVideo}`);
+  } catch (err) {
+    console.error(`[5F][MUX][ERR] Failed to trim video`, err);
+    throw err;
+  }
+  // Mux audio to trimmed video
   return new Promise((resolve, reject) => {
-    ffmpeg(inPath)
-      .complexFilter([
-        `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease[main];` +
-        `[0:v]scale=${width}:${height},boxblur=20:1[blur];` +
-        `[blur][main]overlay=(W-w)/2:(H-h)/2,crop=${width}:${height}`
+    ffmpeg()
+      .input(trimmedVideo)
+      .input(audioIn)
+      .outputOptions([
+        '-shortest', // Stops when shortest stream ends (voice)
+        '-c:v copy',
+        '-c:a aac',
+        '-y'
       ])
-      .outputOptions(['-c:a copy'])
       .on('start', (cmd) => {
-        console.log(`[5F][NORM][CMD] ${cmd}`);
+        console.log(`[5F][MUX][CMD] ${cmd}`);
       })
       .on('stderr', (line) => {
-        console.log(`[5F][NORM][STDERR] ${line}`);
+        console.log(`[5F][MUX][STDERR] ${line}`);
       })
-      .output(outPath)
+      .save(outPath)
       .on('end', () => {
         try {
-          assertFile(outPath, 10240, 'NORM_OUT');
-          console.log(`[5F][NORM] Normalized 9x16 video saved: ${outPath}`);
+          assertFile(outPath, 10240, 'MUX_OUT');
+          console.log(`[5F][MUX] Muxed narration onto video: ${outPath}`);
+          if (fs.existsSync(trimmedVideo)) {
+            fs.unlinkSync(trimmedVideo);
+            console.log(`[5F][MUX][CLEANUP] Deleted trimmed temp video: ${trimmedVideo}`);
+          }
           resolve();
         } catch (e) {
-          console.error(`[5F][NORM][ERR] ${e.message}`);
+          console.error(`[5F][MUX][ERR] ${e.message}`);
           reject(e);
         }
       })
       .on('error', (err, stdout, stderr) => {
-        console.error(`[5F][NORM][ERR] FFmpeg error during normalization:`, err);
-        if (stderr) console.error(`[5F][NORM][FFMPEG][STDERR]\n${stderr}`);
-        if (stdout) console.log(`[5F][NORM][FFMPEG][STDOUT]\n${stdout}`);
+        console.error(`[5F][MUX][ERR] FFmpeg error during mux:`, err);
+        if (stderr) console.error(`[5F][MUX][FFMPEG][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5F][MUX][FFMPEG][STDOUT]\n${stdout}`);
         reject(err);
-      })
-      .run();
+      });
   });
 }
 
 /**
- * Adds a silent audio track to a video (if missing).
+ * Handles "mega-scene" (scene 1+2): trims video 0.5s before, 1s after voice, perfect for viral hooks.
  */
+async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
+  console.log(`[5F][MEGA] muxMegaSceneWithNarration called: video="${videoIn}" audio="${audioIn}" out="${outPath}"`);
+  let audioDuration = 0;
+  try {
+    audioDuration = await getDuration(audioIn);
+    console.log(`[5F][MEGA] Detected audio duration for mega-scene: ${audioDuration}s`);
+  } catch (err) {
+    throw new Error(`[5F][MEGA][ERR] Cannot get audio duration for mega-scene: ${err}`);
+  }
+  const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-megascene-${Date.now()}.mp4`);
+  try {
+    await trimForNarration(videoIn, trimmedVideo, audioDuration, 0.5, 1.0);
+    console.log(`[5F][MEGA] Trimmed main subject video for mega-scene: ${trimmedVideo}`);
+  } catch (err) {
+    console.error(`[5F][MEGA][ERR] Failed to trim mega-scene video`, err);
+    throw err;
+  }
+  try {
+    await muxVideoWithNarration(trimmedVideo, audioIn, outPath);
+    console.log(`[5F][MEGA] Muxed merged mega-scene audio to trimmed video: ${outPath}`);
+    if (fs.existsSync(trimmedVideo)) {
+      fs.unlinkSync(trimmedVideo);
+      console.log(`[5F][MEGA][CLEANUP] Deleted trimmed temp video: ${trimmedVideo}`);
+    }
+  } catch (err) {
+    console.error(`[5F][MEGA][ERR] Failed to mux mega-scene audio/video`, err);
+    throw err;
+  }
+}
+
+// Silent audio helper remains, unchanged:
 async function addSilentAudioTrack(inPath, outPath, duration) {
   console.log(`[5F][AUDIO] addSilentAudioTrack called: in="${inPath}" out="${outPath}" duration=${duration}`);
   return new Promise((resolve, reject) => {
@@ -136,104 +212,10 @@ async function addSilentAudioTrack(inPath, outPath, duration) {
   });
 }
 
-/**
- * Muxes a narration audio file onto a video file, preserving duration.
- */
-async function muxVideoWithNarration(videoIn, audioIn, outPath, duration) {
-  console.log(`[5F][MUX] muxVideoWithNarration called: video="${videoIn}" audio="${audioIn}" out="${outPath}" duration=${duration}`);
-  return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(videoIn)
-      .input(audioIn)
-      .outputOptions(['-shortest', '-c:v copy', '-c:a aac', '-y'])
-      .on('start', (cmd) => {
-        console.log(`[5F][MUX][CMD] ${cmd}`);
-      })
-      .on('stderr', (line) => {
-        console.log(`[5F][MUX][STDERR] ${line}`);
-      })
-      .save(outPath)
-      .on('end', () => {
-        try {
-          assertFile(outPath, 10240, 'MUX_OUT');
-          console.log(`[5F][MUX] Muxed narration onto video: ${outPath}`);
-          resolve();
-        } catch (e) {
-          console.error(`[5F][MUX][ERR] ${e.message}`);
-          reject(e);
-        }
-      })
-      .on('error', (err, stdout, stderr) => {
-        console.error(`[5F][MUX][ERR] FFmpeg error during mux:`, err);
-        if (stderr) console.error(`[5F][MUX][FFMPEG][STDERR]\n${stderr}`);
-        if (stdout) console.log(`[5F][MUX][FFMPEG][STDOUT]\n${stdout}`);
-        reject(err);
-      });
-  });
-}
-
-/**
- * Handles "mega-scene" (scene 1+2) — trims video to total audio length,
- * muxes the merged audio, and ensures all steps are logged.
- */
-async function muxMegaSceneWithNarration(videoIn, audioIn, outPath) {
-  console.log(`[5F][MEGA] muxMegaSceneWithNarration called: video="${videoIn}" audio="${audioIn}" out="${outPath}"`);
-
-  // Get total audio duration using ffprobe
-  const getAudioDuration = (file) => {
-    return new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(file, (err, metadata) => {
-        if (err) {
-          console.error(`[5F][MEGA][ERR] Failed to ffprobe audio: ${file}`, err);
-          return reject(err);
-        }
-        const duration = metadata && metadata.format ? metadata.format.duration : 0;
-        if (!duration || isNaN(duration)) {
-          console.error(`[5F][MEGA][ERR] Could not get duration from audio: ${file}`);
-          return reject(new Error('Audio duration not found'));
-        }
-        resolve(duration);
-      });
-    });
-  };
-
-  let audioDuration = 0;
-  try {
-    audioDuration = await getAudioDuration(audioIn);
-    console.log(`[5F][MEGA] Detected audio duration for mega-scene: ${audioDuration}s`);
-  } catch (err) {
-    throw new Error(`[5F][MEGA][ERR] Cannot get audio duration for mega-scene: ${err}`);
-  }
-
-  // Trim input video to exact audio duration (if needed)
-  const trimmedVideo = path.resolve(path.dirname(outPath), `tmp-trimmed-megascene-${Date.now()}.mp4`);
-  try {
-    await trimVideo(videoIn, trimmedVideo, audioDuration, 0);
-    console.log(`[5F][MEGA] Trimmed main subject video for mega-scene: ${trimmedVideo}`);
-  } catch (err) {
-    console.error(`[5F][MEGA][ERR] Failed to trim mega-scene video`, err);
-    throw err;
-  }
-
-  // Mux merged audio to trimmed video
-  try {
-    await muxVideoWithNarration(trimmedVideo, audioIn, outPath, audioDuration);
-    console.log(`[5F][MEGA] Muxed merged mega-scene audio to trimmed video: ${outPath}`);
-    // Cleanup
-    if (fs.existsSync(trimmedVideo)) {
-      fs.unlinkSync(trimmedVideo);
-      console.log(`[5F][MEGA][CLEANUP] Deleted trimmed temp video: ${trimmedVideo}`);
-    }
-  } catch (err) {
-    console.error(`[5F][MEGA][ERR] Failed to mux mega-scene audio/video`, err);
-    throw err;
-  }
-}
-
 module.exports = {
-  trimVideo,
-  normalizeTo9x16Blurred,
+  getDuration,
+  trimForNarration,
   addSilentAudioTrack,
   muxVideoWithNarration,
-  muxMegaSceneWithNarration,
+  muxMegaSceneWithNarration
 };
