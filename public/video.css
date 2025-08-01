@@ -256,11 +256,13 @@ textarea:focus, select:focus, input:focus { border-color: #00b3c4; }
   min-height: 405px;
   max-width: 720px;
   margin: 0 auto 1.5rem auto;
-  padding: 10px 0 10px 0;
+  padding: 10px 0;
   background: #000;
   border-radius: 18px;
   box-shadow: 0 0 32px #0002;
   aspect-ratio: 16/9;
+  position: relative;
+  overflow: hidden;              /* <<<--- This line ensures NO letterboxing, video covers container */
 }
 .video-container video {
   width: 100%;
@@ -273,7 +275,7 @@ textarea:focus, select:focus, input:focus { border-color: #00b3c4; }
   background: #000;
   border-radius: 14px;
   box-shadow: 0 0 24px #0003;
-  object-fit: contain !important;
+  object-fit: cover !important;  /* <<<--- This will crop video to always fill the box */
   display: block;
   margin: 0 auto;
   outline: 2px solid #00e0fe33;

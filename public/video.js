@@ -48,6 +48,7 @@ document.addEventListener('DOMContentLoaded', function() {
     videoContainer.style.minHeight = '405px';
     videoContainer.style.aspectRatio = '16/9';
     videoContainer.style.width = '100%';
+    videoContainer.style.overflow = 'hidden';
     log('VIDEO-CONTAINER', 'Set max-width:720px; min-height:405px; aspect-ratio:16/9');
   }
   const player = document.getElementById('videoPlayer');
@@ -58,8 +59,8 @@ document.addEventListener('DOMContentLoaded', function() {
     player.style.aspectRatio = '16/9';
     player.style.background = '#000';
     player.style.borderRadius = '14px';
-    player.style.objectFit = 'contain';
-    log('VIDEO', 'Set player to standard YouTube size');
+    player.style.objectFit = 'cover';
+    log('VIDEO', 'Set player to standard YouTube 16:9 (object-fit: cover)');
   }
 
   // Paid/Pro logic (update as needed)
@@ -369,19 +370,27 @@ document.addEventListener('DOMContentLoaded', function() {
             clearInterval(pollingInterval);
             clearInterval(simInterval);
 
-            let videoUrl = null;
-            if (p.output && p.output.startsWith('https://videos.socialstormai.com/')) {
-              videoUrl = p.output;
-              log('VIDEO', 'Using custom R2 domain for videoUrl:', videoUrl);
+            // 1. Use 16:9 (display) for player, 9:16 (download) for downloadBtn!
+            let displayUrl = null;
+            let downloadUrl = null;
+
+            // --- SUPPORT BOTH NEW AND OLD API RESPONSES ---
+            if (p.displayUrl && p.downloadUrl) {
+              displayUrl = p.displayUrl;
+              downloadUrl = p.downloadUrl;
+              log('[VIDEO] Got dual output:', { displayUrl, downloadUrl });
             } else if (p.output && p.output.startsWith('https://')) {
-              videoUrl = p.output;
-              logWarn('VIDEO', 'Output is not from custom R2 domain, using as fallback:', videoUrl);
+              // fallback for old jobs: use output for both
+              displayUrl = p.output;
+              downloadUrl = p.output;
+              logWarn('[VIDEO] Only one output URL provided by backend!');
             } else {
-              logError('VIDEO', 'Backend did not return valid video URL:', p.output);
+              logError('VIDEO', 'Backend did not return valid video URLs:', p);
             }
 
-            if (videoUrl && player) {
-              player.src = videoUrl;
+            // --- Set the PLAYER to displayUrl (16:9) ---
+            if (displayUrl && player) {
+              player.src = displayUrl;
               player.setAttribute('playsinline', 'true');
               player.setAttribute('crossorigin', 'anonymous');
               player.style.display = 'block';
@@ -389,63 +398,45 @@ document.addEventListener('DOMContentLoaded', function() {
               player.style.maxWidth = '720px';
               player.style.aspectRatio = '16/9';
               player.style.height = '';
-              player.style.objectFit = 'contain';
-              log('VIDEO', 'Set <video> src & style:', player.src);
-
+              player.style.objectFit = 'cover';
+              log('VIDEO', '[SET] <video> src & style:', player.src);
               player.pause();
               player.currentTime = 0;
               player.load();
-              log('VIDEO', 'Called player.load() after setting src');
+              log('VIDEO', '[LOAD] player.load() after setting src');
             } else {
               if (out) out.textContent = p.status || 'Generation failed.';
               if (progressBarWrap) progressBarWrap.style.display = 'none';
-              logError('VIDEO', 'Missing videoUrl after job finish!');
+              logError('VIDEO', 'Missing displayUrl after job finish!');
               return;
             }
+
+            // --- Set the DOWNLOAD button to downloadUrl (9:16) ---
+            if (downloadBtn && downloadUrl) {
+              downloadBtn.href = downloadUrl;
+              downloadBtn.setAttribute('download', 'socialstormai-vertical.mp4');
+              downloadBtn.style.display = 'inline-block';
+              log('VIDEO', '[SET] downloadBtn href (vertical output):', downloadBtn.href);
+            }
+
+            if (shareBtn) shareBtn.style.display = 'inline-block';
 
             if (player) {
               player.onloadeddata = () => {
                 player.muted = false;
                 player.volume = 1.0;
                 if (progressStatus) progressStatus.textContent = 'Click ▶︎ to play your video.';
-                if (downloadBtn) downloadBtn.style.display = 'inline-block';
-                if (shareBtn) shareBtn.style.display = 'inline-block';
-                if (downloadBtn) {
-                  downloadBtn.href = videoUrl;
-                  downloadBtn.setAttribute('download', 'socialstormai-video.mp4');
-                  downloadBtn.onclick = (e) => {
-                    e.preventDefault();
-                    fetch(videoUrl)
-                      .then(r => r.blob())
-                      .then(blob => {
-                        const a = document.createElement('a');
-                        a.style.display = 'none';
-                        document.body.appendChild(a);
-                        const url = window.URL.createObjectURL(blob);
-                        a.href = url;
-                        a.download = 'socialstormai-video.mp4';
-                        a.click();
-                        setTimeout(() => {
-                          window.URL.revokeObjectURL(url);
-                          document.body.removeChild(a);
-                        }, 1000);
-                      })
-                      .catch(() => {
-                        alert('Unable to download video. Try right-click Save As.');
-                      });
-                  };
-                }
                 if (shareBtn) {
                   shareBtn.onclick = async () => {
                     if (navigator.share) {
                       try {
                         await navigator.share({
                           title: 'Check out my AI video!',
-                          url: videoUrl
+                          url: displayUrl
                         });
                       } catch (_) {}
                     } else {
-                      navigator.clipboard.writeText(videoUrl);
+                      navigator.clipboard.writeText(displayUrl);
                       alert('Video link copied!');
                     }
                   };
@@ -456,7 +447,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 setTimeout(() => { if (progressBarWrap) progressBarWrap.style.display = 'none'; }, 2000);
                 showThumbUpsell();
-                log('VIDEO', 'Loaded and ready', videoUrl);
+                log('VIDEO', '[READY] Loaded and ready', displayUrl);
               };
               player.onerror = (e) => {
                 if (progressStatus) progressStatus.textContent = 'Error loading video. Retry.';

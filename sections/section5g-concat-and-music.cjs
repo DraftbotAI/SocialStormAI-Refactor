@@ -2,9 +2,9 @@
 // SECTION 5G: FINAL VIDEO ASSEMBLER & MUSIC/OUTRO
 // Concats scenes, adds music, appends outro, validates output.
 // SUPER MAX LOGGING AT EVERY STEP — NO SILENT FAILURES
-// Aspect ratio fixed! Scenes always 9:16, never stretched.
+// Always generates both 16:9 (display) and 9:16 (download) finals!
 // Enhanced: All FFmpeg uses -preset ultrafast for max speed
-// Includes bulletproofScenes for size/audio normalization
+// BulletproofScenes for size/audio normalization
 // AI music mood selection + random song per mood!
 // ===========================================================
 
@@ -12,9 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { v4: uuidv4 } = require('uuid');
-
-// --- Music mood selector helper ---
-const { getRandomMusicFileForMood } = require('./music-moods.cjs'); // <-- NEW
+const { getRandomMusicFileForMood } = require('./music-moods.cjs');
 
 console.log('[5G][INIT] Final video assembler loaded.');
 
@@ -90,7 +88,6 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
       console.warn(`[5G][BULLETPROOF][BUG] Scene at idx ${i} probe failed:`, e);
     }
     if (needsFix) {
-      // Force fix to proper output
       const fixedPath = file.replace(/\.mp4$/, `-fixed.mp4`);
       await new Promise((resolve, reject) => {
         ffmpeg()
@@ -177,11 +174,13 @@ async function ensureAudioStream(videoPath, workDir) {
   });
 }
 
+// ============================================
+// MAIN CONCAT: Output is 1080x1920 (portrait, shorts format, "download" file)
+// ============================================
 async function concatScenes(sceneFiles, workDir) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
   sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i + 1}: ${file}`));
 
-  // Bulletproof: auto-normalize every file to 1080x1920, yuv420p, audio
   let fixedScenes = await bulletproofScenes(
     sceneFiles,
     null,
@@ -247,10 +246,74 @@ async function concatScenes(sceneFiles, workDir) {
   });
 }
 
+// ============================================
+// FORMAT HELPERS: Create both final 16:9 and 9:16 videos, always with blurred fill
+// ============================================
+async function create16x9FromInput(inputPath, outputPath) {
+  console.log(`[5G][FORMAT][16x9] Creating 16:9 output from: ${inputPath}`);
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(inputPath)
+      .complexFilter([
+        "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2[fg];" +
+        "[0:v]scale=1280:720:force_original_aspect_ratio=increase,boxblur=40:1[bg];" +
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,crop=1280:720"
+      ])
+      .outputOptions([
+        '-c:v libx264',
+        '-preset ultrafast',
+        '-crf 22',
+        '-c:a copy',
+        '-pix_fmt yuv420p',
+        '-movflags +faststart',
+        '-y'
+      ])
+      .save(outputPath)
+      .on('end', () => {
+        console.log(`[5G][FORMAT][16x9] Output written: ${outputPath}`);
+        resolve(outputPath);
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][FORMAT][16x9][ERR]`, err);
+        reject(err);
+      });
+  });
+}
+
+async function create9x16FromInput(inputPath, outputPath) {
+  console.log(`[5G][FORMAT][9x16] Creating 9:16 output from: ${inputPath}`);
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(inputPath)
+      .complexFilter([
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[fg];" +
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,boxblur=40:1[bg];" +
+        "[bg][fg]overlay=(W-w)/2:(H-h)/2,crop=1080:1920"
+      ])
+      .outputOptions([
+        '-c:v libx264',
+        '-preset ultrafast',
+        '-crf 22',
+        '-c:a copy',
+        '-pix_fmt yuv420p',
+        '-movflags +faststart',
+        '-y'
+      ])
+      .save(outputPath)
+      .on('end', () => {
+        console.log(`[5G][FORMAT][9x16] Output written: ${outputPath}`);
+        resolve(outputPath);
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][FORMAT][9x16][ERR]`, err);
+        reject(err);
+      });
+  });
+}
+
 // === AI Music Mood Selector + Random Song ===
 async function selectMusicFileForScript(script, gptDetectMood) {
   try {
-    // Detect mood using your GPT helper function (user must implement this function in their GPT code)
     const detectedMood = await gptDetectMood(script); // Example: "suspense"
     console.log('[5G][MUSIC][AI] Detected mood from GPT:', detectedMood);
     const musicPath = getRandomMusicFileForMood(detectedMood);
@@ -360,6 +423,9 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
   });
 }
 
+// ============================================
+// MODULE EXPORTS
+// ============================================
 module.exports = {
   concatScenes,
   ensureAudioStream,
@@ -368,6 +434,7 @@ module.exports = {
   getOutroPath,
   getUniqueFinalName,
   bulletproofScenes,
-  // New export for AI music selection:
-  selectMusicFileForScript
+  selectMusicFileForScript,
+  create16x9FromInput,
+  create9x16FromInput
 };

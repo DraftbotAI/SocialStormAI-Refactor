@@ -3,6 +3,7 @@
 // The /api/generate-video route handler. Full job orchestration.
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // PRO+: Audio and muxed video caching, parallelized scene jobs
+// 2024-08: Works with new 5F and 5G logic for sync and split
 // ===========================================================
 
 const { v4: uuidv4 } = require('uuid');
@@ -15,8 +16,7 @@ const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
 
 // === CRUCIAL: Correct import for bulletproofScenes ===
 const {
-  bulletproofScenes,          // From 5C utils: always returns valid scene objects
-  splitScriptToScenes
+  bulletproofScenes, splitScriptToScenes
 } = require('./section5c-script-scene-utils.cjs');
 
 // === 5G Video/Music/Outro/Helpers ===
@@ -25,8 +25,14 @@ const {
   ensureAudioStream,
   overlayMusic,
   appendOutro,
-  getUniqueFinalName // must be implemented in 5G!
+  getUniqueFinalName
 } = require('./section5g-concat-and-music.cjs');
+
+// === 5F: AV/Scene Mux Logic ===
+const {
+  muxVideoWithNarration,
+  muxMegaSceneWithNarration,
+} = require('./section5f-video-processing.cjs');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
 
@@ -41,11 +47,8 @@ function hashForCache(str) {
 }
 
 // ================= R2 UPLOAD HELPER =======================
-// UPDATED: Always return URL with custom domain!
 async function uploadToR2(localFilePath, r2FinalName, jobId) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  // --- ONLY CUSTOM DOMAIN URL SHOULD BE USED ON FRONTEND ---
-  // Always output https://videos.socialstormai.com/<file>
   const customDomainBase = 'videos.socialstormai.com';
   const r2Key = `${jobId}-${r2FinalName}`;
   console.log(`[5B][R2 UPLOAD][START] Attempting upload for job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
@@ -64,7 +67,6 @@ async function uploadToR2(localFilePath, r2FinalName, jobId) {
 
     console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
 
-    // Return ONLY custom domain
     const publicUrl = `https://${customDomainBase}/${r2Key}`;
     console.log(`[5B][R2 UPLOAD][SUCCESS] File available at: ${publicUrl}`);
     return publicUrl;
@@ -81,6 +83,9 @@ function assertFileExists(file, label) {
   }
 }
 
+// ===========================================================
+// REGISTER ENDPOINT
+// ===========================================================
 function registerGenerateVideoEndpoint(app, deps) {
   console.log('[5B][BOOT] Called registerGenerateVideoEndpoint...');
   if (!app) throw new Error('[5B][FATAL] No app passed in!');
@@ -94,7 +99,6 @@ function registerGenerateVideoEndpoint(app, deps) {
     getAudioDuration, getVideoInfo, standardizeVideo,
     pickMusicForMood, cleanupJob,
     progress, voices, POLLY_VOICE_IDS,
-    muxVideoWithNarration, muxMegaSceneWithNarration,
   } = deps;
 
   if (typeof findClipForScene !== "function") throw new Error('[5B][FATAL] findClipForScene missing from deps!');
@@ -195,9 +199,9 @@ function registerGenerateVideoEndpoint(app, deps) {
             console.log(`[5B][CACHE][AUDIO] [${jobId}] Scene ${i + 1}: HIT: Using cached audio: ${audioCachePath}`);
           } else {
             if (isMegaScene) {
-              await createMegaSceneAudio(scene.texts, voice, audioCachePath, provider, workDir);
+              await deps.createMegaSceneAudio(scene.texts, voice, audioCachePath, provider, workDir);
             } else {
-              await createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
+              await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
             }
             assertFileExists(audioCachePath, isMegaScene ? `AUDIO_MEGA_${i+1}` : `AUDIO_SCENE_${i+1}`);
             console.log(`[5B][CACHE][AUDIO] [${jobId}] Scene ${i + 1}: MISS: Generated and cached audio: ${audioCachePath}`);
@@ -326,7 +330,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         // === 8. Upload final video to R2 and finish ===
         try {
           progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2...' };
-          // --- Fix: This URL is now always https://videos.socialstormai.com/xxx.mp4 ---
           const r2VideoUrl = await uploadToR2(finalPath, r2FinalName, jobId);
           progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
         } catch (uploadErr) {
