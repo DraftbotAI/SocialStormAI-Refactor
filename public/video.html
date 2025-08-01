@@ -28,7 +28,7 @@
       background: #10141a;
       display: flex;
       align-items: center;
-      justify-content: flex-start;
+      justify-content: space-between !important;   /* Main fix: space-between */
       padding: 0 2rem 0 1.1rem !important;
       gap: 1.5rem;
       box-shadow: 0 2px 8px rgba(0,0,0,0.14);
@@ -37,6 +37,17 @@
       display: flex;
       align-items: center;
       cursor: pointer;
+    }
+    .nav-right {
+      display: flex;
+      align-items: center;
+      gap: 2rem;
+    }
+    .nav-links {
+      display: flex;
+      gap: 2rem;
+      align-items: center;
+      margin-left: 0.5rem;
     }
     @media (max-width: 850px) {
       .nav-logo img { height: 110px !important; }
@@ -106,27 +117,29 @@
     <div class="nav-logo" onclick="location.href='index.html'">
       <img src="logo.png" alt="SocialStorm Logo" />
     </div>
-    <ul class="nav-links">
-      <li><a href="index.html">Home</a></li>
-      <li><a href="video.html" aria-current="page">Create Video</a></li>
-      <li><a href="thumbnail.html">Thumbnails</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="about.html">About</a></li>
-      <li><a href="contact.html">Contact</a></li>
-    </ul>
-    <button class="btn-primary" onclick="location.href='video.html'">Get Started</button>
-    <button class="hamburger" id="hamburgerBtn" aria-label="Open menu">
-      <span></span><span></span><span></span>
-    </button>
-    <ul class="mobile-nav" id="mobileNav">
-      <li><a href="index.html">Home</a></li>
-      <li><a href="video.html" aria-current="page">Create Video</a></li>
-      <li><a href="thumbnail.html">Thumbnails</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="about.html">About</a></li>
-      <li><a href="contact.html">Contact</a></li>
-      <li><button class="btn-primary" onclick="location.href='video.html'">Get Started</button></li>
-    </ul>
+    <div class="nav-right">
+      <ul class="nav-links">
+        <li><a href="index.html">Home</a></li>
+        <li><a href="video.html" aria-current="page">Create Video</a></li>
+        <li><a href="thumbnail.html">Thumbnails</a></li>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a href="about.html">About</a></li>
+        <li><a href="contact.html">Contact</a></li>
+      </ul>
+      <button class="btn-primary" onclick="location.href='video.html'">Get Started</button>
+      <button class="hamburger" id="hamburgerBtn" aria-label="Open menu">
+        <span></span><span></span><span></span>
+      </button>
+      <ul class="mobile-nav" id="mobileNav">
+        <li><a href="index.html">Home</a></li>
+        <li><a href="video.html" aria-current="page">Create Video</a></li>
+        <li><a href="thumbnail.html">Thumbnails</a></li>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a href="about.html">About</a></li>
+        <li><a href="contact.html">Contact</a></li>
+        <li><button class="btn-primary" onclick="location.href='video.html'">Get Started</button></li>
+      </ul>
+    </div>
   </nav>
 
   <!-- =============================== -->

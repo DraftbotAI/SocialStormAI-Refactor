@@ -20,7 +20,7 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
-  // Fix logo size at runtime (CSS will also set it, but this guarantees it)
+  // Fix logo size at runtime
   const logoImg = document.querySelector('.nav-logo img');
   if (logoImg) {
     logoImg.style.height = '200px';
@@ -51,7 +51,7 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 
   // Paid/Pro logic (update as needed)
-  const isPaidUser = false; // <--- Set to true to test as a paid user!
+  const isPaidUser = false;
   const isOverLimit = false;
   const isProUser = false;
 
@@ -92,7 +92,7 @@ document.addEventListener('DOMContentLoaded', function() {
     sel.innerHTML = '<option>Loading…</option>';
     log('VOICES', 'Loading voices...');
     try {
-      const resp = await fetch('/api/voices');
+      const resp = await fetch('/api/voices', { cache: "reload" });
       const data = await resp.json();
 
       // FIX: Must use data.voices not data directly!
@@ -119,7 +119,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
       sel.selectedIndex = defaultIdx;
       selectedVoice = voices[defaultIdx];
-      document.getElementById('previewBtn').disabled = !selectedVoice.preview;
+      document.getElementById('previewBtn').disabled = !selectedVoice?.preview;
       log('VOICES', 'Voices loaded', voices);
     } catch (e) {
       sel.innerHTML = '<option>Error loading voices</option>';
@@ -132,11 +132,11 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('voiceSelect').addEventListener('change', function() {
     selectedVoice = voices[this.selectedIndex];
     log('VOICES', 'Voice selected', selectedVoice);
-    document.getElementById('previewBtn').disabled = !selectedVoice.preview;
+    document.getElementById('previewBtn').disabled = !selectedVoice?.preview;
   });
 
   document.getElementById('previewBtn').addEventListener('click', function() {
-    if (selectedVoice?.preview) {
+    if (selectedVoice && selectedVoice.preview) {
       const audio = document.getElementById('voicePreviewAudio');
       audio.src = selectedVoice.preview;
       audio.play();
@@ -191,9 +191,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
   function showMetaData(title, description, tags) {
     document.getElementById('metaDataBox').innerHTML = `
-      <div class="meta-group"><div class="meta-label">Title<button class="copy-btn" data-copy="title"></button></div><div class="meta-value" id="meta-title">${title}</div></div>
-      <div class="meta-group"><div class="meta-label">Description<button class="copy-btn" data-copy="description"></button></div><div class="meta-value" id="meta-description">${description}</div></div>
-      <div class="meta-group"><div class="meta-label">Tags<button class="copy-btn" data-copy="tags"></button></div><div class="meta-value" id="meta-tags">${tags}</div></div>`;
+      <div class="meta-group"><div class="meta-label">Title<button class="copy-btn" data-copy="title"></button></div><div class="meta-value" id="meta-title">${title || ''}</div></div>
+      <div class="meta-group"><div class="meta-label">Description<button class="copy-btn" data-copy="description"></button></div><div class="meta-value" id="meta-description">${description || ''}</div></div>
+      <div class="meta-group"><div class="meta-label">Tags<button class="copy-btn" data-copy="tags"></button></div><div class="meta-value" id="meta-tags">${tags || ''}</div></div>`;
     setupCopyButtons();
   }
 
@@ -302,7 +302,6 @@ document.addEventListener('DOMContentLoaded', function() {
           }
 
           if (videoUrl) {
-            // Set .src directly for universal browser compatibility
             player.src = videoUrl;
             player.setAttribute('playsinline', 'true');
             player.setAttribute('crossorigin', 'anonymous');
@@ -314,7 +313,6 @@ document.addEventListener('DOMContentLoaded', function() {
             player.style.objectFit = 'contain';
             log('VIDEO', 'Set <video> src & style:', player.src);
 
-            // Pause, reset, load (some browsers need this order)
             player.pause();
             player.currentTime = 0;
             player.load();
@@ -336,7 +334,6 @@ document.addEventListener('DOMContentLoaded', function() {
             downloadBtn.href = videoUrl;
             downloadBtn.setAttribute('download', 'socialstormai-video.mp4');
 
-            // Universal download
             downloadBtn.onclick = (e) => {
               e.preventDefault();
               fetch(videoUrl)

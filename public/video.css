@@ -22,11 +22,11 @@ nav {
   background: #10141a;
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
   padding: 0 2rem 0 1.1rem;
   z-index: 1000;
   min-height: 68px;
-  height: 68px; /* Banner stays exactly this size */
+  height: 68px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.14);
   gap: 1.5rem;
 }
@@ -36,7 +36,7 @@ nav {
   cursor: pointer;
 }
 .nav-logo img {
-  height: 200px;         /* Main fix: LOGO is now 200px tall on desktop! */
+  height: 200px;
   width: auto;
   max-width: 90vw;
   display: block;
@@ -44,7 +44,11 @@ nav {
   margin: 0;
   padding: 0 0.2rem;
   transition: height 0.22s;
-  /* Logo will visually overflow the navbar, which remains at 68px tall */
+}
+.nav-right {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
 }
 .nav-links {
   display: flex;
@@ -249,8 +253,8 @@ textarea:focus, select:focus, input:focus { border-color: #00b3c4; }
   justify-content: center;
   align-items: center;
   width: 100%;
-  min-height: 405px;         /* 720x405 for standard YouTube aspect ratio */
-  max-width: 720px;          /* Standard YouTube width */
+  min-height: 405px;
+  max-width: 720px;
   margin: 0 auto 1.5rem auto;
   padding: 10px 0 10px 0;
   background: #000;
@@ -274,7 +278,6 @@ textarea:focus, select:focus, input:focus { border-color: #00b3c4; }
   margin: 0 auto;
   outline: 2px solid #00e0fe33;
 }
-/* Responsive for mobile/tablet */
 @media (max-width: 900px) {
   .video-container { max-width: 98vw; min-height: 210px; }
 }
@@ -284,7 +287,7 @@ textarea:focus, select:focus, input:focus { border-color: #00b3c4; }
 }
 
 /* ================================ */
-/* REMAINDER UNCHANGED              */
+/* REST OF ORIGINAL CSS UNCHANGED   */
 /* ================================ */
 
 #output {
