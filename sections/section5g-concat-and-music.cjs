@@ -5,12 +5,16 @@
 // Aspect ratio fixed! Scenes always 9:16, never stretched.
 // Enhanced: All FFmpeg uses -preset ultrafast for max speed
 // Includes bulletproofScenes for size/audio normalization
+// AI music mood selection + random song per mood!
 // ===========================================================
 
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { v4: uuidv4 } = require('uuid');
+
+// --- Music mood selector helper ---
+const { getRandomMusicFileForMood } = require('./music-moods.cjs'); // <-- NEW
 
 console.log('[5G][INIT] Final video assembler loaded.');
 
@@ -243,6 +247,26 @@ async function concatScenes(sceneFiles, workDir) {
   });
 }
 
+// === AI Music Mood Selector + Random Song ===
+async function selectMusicFileForScript(script, gptDetectMood) {
+  try {
+    // Detect mood using your GPT helper function (user must implement this function in their GPT code)
+    const detectedMood = await gptDetectMood(script); // Example: "suspense"
+    console.log('[5G][MUSIC][AI] Detected mood from GPT:', detectedMood);
+    const musicPath = getRandomMusicFileForMood(detectedMood);
+    if (musicPath) {
+      console.log('[5G][MUSIC][AI] Selected random music file:', musicPath);
+      return musicPath;
+    } else {
+      console.warn('[5G][MUSIC][AI][WARN] No music file found for detected mood:', detectedMood);
+      return null;
+    }
+  } catch (err) {
+    console.error('[5G][MUSIC][AI][ERR] Mood detection or file select failed:', err);
+    return null;
+  }
+}
+
 async function overlayMusic(videoPath, musicPath, outPath) {
   console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
 
@@ -343,5 +367,7 @@ module.exports = {
   appendOutro,
   getOutroPath,
   getUniqueFinalName,
-  bulletproofScenes // <-- Exported for use in 5B and others!
+  bulletproofScenes,
+  // New export for AI music selection:
+  selectMusicFileForScript
 };
