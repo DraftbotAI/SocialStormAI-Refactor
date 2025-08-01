@@ -25,7 +25,7 @@ nav {
   justify-content: flex-start;
   padding: 0 2rem 0 1.1rem;
   z-index: 1000;
-  min-height: 68px;      /* Just enough for the logo */
+  min-height: 68px;      /* Banner stays exactly this size */
   height: 68px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.14);
   gap: 1.5rem;
@@ -34,10 +34,11 @@ nav {
   display: flex;
   align-items: center;
   cursor: pointer;
-  height: 64px;
+  /* no height set here, allow image to size itself */
 }
+/* ==== LOGO: 200px tall on desktop, responsive on small screens ==== */
 .nav-logo img {
-  height: 64px;
+  height: 200px;         /* Main fix: LOGO is now 200px tall on desktop! */
   width: auto;
   max-width: 90vw;
   display: block;
@@ -45,6 +46,7 @@ nav {
   margin: 0;
   padding: 0 0.2rem;
   transition: height 0.22s;
+  /* Logo will visually overflow the navbar, which remains at 68px tall */
 }
 .nav-links {
   display: flex;
@@ -146,13 +148,13 @@ nav {
 /* SECTION 3: RESPONSIVE NAV      */
 /* ============================== */
 @media (max-width: 850px) {
-  .nav-logo img { height: 48px; }
+  .nav-logo img { height: 110px; }
   nav { min-height: 50px; height: 50px; }
   .nav-links { gap: 1.1rem; }
   .mobile-nav { top: 50px; }
 }
 @media (max-width: 700px) {
-  .nav-logo img { height: 38px; }
+  .nav-logo img { height: 70px; }
   nav { min-height: 42px; height: 42px; padding: 0 1rem; }
   .nav-links { display: none; }
   .btn-primary { display: none; }
@@ -160,6 +162,7 @@ nav {
   .mobile-nav { top: 42px; }
 }
 @media (max-width: 480px) {
+  .nav-logo img { height: 48px; }
   .mobile-nav { padding: 1rem 1rem 1.5rem 1rem; }
 }
 
@@ -248,14 +251,14 @@ textarea:focus, select:focus, input:focus { border-color: #00b3c4; }
   justify-content: center;
   align-items: center;
   width: 100%;
-  min-height: 320px;
-  max-width: 860px;            /* Nice wide look for desktop */
+  min-height: 405px;         /* Matches 720x405 (16:9) for standard YouTube */
+  max-width: 720px;          /* Standard YouTube width */
   margin: 0 auto 1.5rem auto;
   padding: 10px 0 10px 0;
   background: #000;
   border-radius: 18px;
   box-shadow: 0 0 32px #0002;
-  aspect-ratio: 16/9;          /* Wide by default */
+  aspect-ratio: 16/9;        /* Wide by default */
 }
 .video-container video {
   width: 100%;
