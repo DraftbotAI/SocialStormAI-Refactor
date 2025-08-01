@@ -20,6 +20,36 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 
+  // Fix logo size at runtime (CSS will also set it, but this guarantees it)
+  const logoImg = document.querySelector('.nav-logo img');
+  if (logoImg) {
+    logoImg.style.height = '200px';
+    logoImg.style.width = 'auto';
+    logoImg.style.maxWidth = '90vw';
+    logoImg.style.transition = 'height 0.22s';
+    log('LOGO', 'Set logo height to 200px');
+  }
+
+  // Fix video player container and video to standard YouTube size (16:9, max 720px)
+  const videoContainer = document.querySelector('.video-container');
+  if (videoContainer) {
+    videoContainer.style.maxWidth = '720px';
+    videoContainer.style.minHeight = '405px';
+    videoContainer.style.aspectRatio = '16/9';
+    videoContainer.style.width = '100%';
+    log('VIDEO-CONTAINER', 'Set max-width:720px; min-height:405px; aspect-ratio:16/9');
+  }
+  const player = document.getElementById('videoPlayer');
+  if (player) {
+    player.style.width = '100%';
+    player.style.maxWidth = '720px';
+    player.style.aspectRatio = '16/9';
+    player.style.background = '#000';
+    player.style.borderRadius = '14px';
+    player.style.objectFit = 'contain';
+    log('VIDEO', 'Set player to standard YouTube size');
+  }
+
   // Paid/Pro logic (update as needed)
   const isPaidUser = false; // <--- Set to true to test as a paid user!
   const isOverLimit = false;
@@ -64,7 +94,9 @@ document.addEventListener('DOMContentLoaded', function() {
     try {
       const resp = await fetch('/api/voices');
       const data = await resp.json();
-      if (!data.success) throw new Error(data.error);
+
+      // FIX: Must use data.voices not data directly!
+      if (!data.success || !Array.isArray(data.voices)) throw new Error(data.error || 'No voices in response.');
       voices = data.voices;
 
       voices.sort((a, b) => {
@@ -276,9 +308,10 @@ document.addEventListener('DOMContentLoaded', function() {
             player.setAttribute('crossorigin', 'anonymous');
             player.style.display = 'block';
             player.style.width = '100%';
-            player.style.height = '100%';
-            player.style.objectFit = 'cover';
-            player.style.aspectRatio = '9/16';
+            player.style.maxWidth = '720px';
+            player.style.aspectRatio = '16/9';
+            player.style.height = '';
+            player.style.objectFit = 'contain';
             log('VIDEO', 'Set <video> src & style:', player.src);
 
             // Pause, reset, load (some browsers need this order)
