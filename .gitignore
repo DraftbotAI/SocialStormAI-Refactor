@@ -1,6 +1,63 @@
+# === Node modules & dependency folders ===
 node_modules/
-tmp/
-*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+pnpm-lock.yaml
+
+# === Output & cache folders (do NOT version) ===
+audio_cache/
+video_cache/
+jobs/
+voice-previews/
+output/
+renders/
+dist/
+build/
+debug-*.mp4
+test.mp4
+test_*.mp4
+test.cjs
+test_*.cjs
+
+# === IDE and OS system files ===
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+.vscode/
+.idea/
+*.log
+
+# === Environment files & secrets ===
 .env
-socialstormai-143ba6fa27d8.json
+.env.*
+
+# === Mac OS Finder, Trash, etc ===
+.Trashes
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# === Misc other ===
+*.bak
+*.tmp
+*.cache
+*.lock
+
+# === Optional: Ignore old manual backups ===
+old server.cjs
+video-backup.html
+
+# === Public assets that are built/generated ===
+public/*.mp4
+public/*.webm
+public/*.wav
+
+# === Uncomment if you use these ===
+# coverage/
+# .nyc_output/
