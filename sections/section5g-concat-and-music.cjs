@@ -12,7 +12,6 @@ const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { v4: uuidv4 } = require('uuid');
-const { getRandomMusicFileForMood } = require('./music-moods.cjs');
 
 console.log('[5G][INIT] Final video assembler loaded.');
 
@@ -72,7 +71,6 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
     let vinfo;
     try {
       vinfo = await getVideoInfo(file);
-      // Must be 1080x1920 portrait, must have audio
       if (
         !vinfo ||
         vinfo.width !== 1080 ||
@@ -206,7 +204,8 @@ async function concatScenes(sceneFiles, workDir) {
   fixedScenes = await Promise.all(fixedScenes.map(f => ensureAudioStream(f, workDir)));
 
   const listFile = path.resolve(workDir, 'list.txt');
-  fs.writeFileSync(listFile, fixedScenes.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'));
+  fs.writeFileSync(listFile, fixedScenes.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'), {encoding: 'utf8'});
+
   const concatFile = path.resolve(workDir, getUniqueFinalName('concat'));
 
   for (let i = 0; i < fixedScenes.length; i++) {
@@ -246,9 +245,160 @@ async function concatScenes(sceneFiles, workDir) {
   });
 }
 
-// ============================================
-// FORMAT HELPERS: Create both final 16:9 and 9:16 videos, always with blurred fill
-// ============================================
+// === Outro appender (bulletproofed) ===
+async function appendOutro(mainPath, outroPath, outPath, workDir) {
+  if (!outroPath) outroPath = getOutroPath();
+  if (!outPath) outPath = path.resolve(workDir, getUniqueFinalName('final-with-outro'));
+
+  console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outPath}"`);
+  await logFileProbe(mainPath, 'OUTRO_MAIN');
+  await logFileProbe(outroPath, 'OUTRO_OUTRO');
+
+  if (!fs.existsSync(mainPath) || !fs.existsSync(outroPath)) {
+    throw new Error(`[5G][OUTRO][ERR] Main or outro video missing! main: ${mainPath} exists? ${fs.existsSync(mainPath)}, outro: ${outroPath} exists? ${fs.existsSync(outroPath)}`);
+  }
+
+  const listFile = path.resolve(workDir, 'list2.txt');
+  fs.writeFileSync(listFile, [
+    `file '${mainPath.replace(/'/g, "'\\''")}'`,
+    `file '${outroPath.replace(/'/g, "'\\''")}'`
+  ].join('\n'), {encoding: 'utf8'});
+
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(listFile)
+      .inputOptions(['-f concat', '-safe 0'])
+      .outputOptions([
+        '-c:v libx264',
+        '-c:a aac',
+        '-movflags +faststart',
+        '-preset ultrafast'
+      ])
+      .save(outPath)
+      .on('end', async () => {
+        try {
+          assertFile(outPath, 10240, 'OUTRO_OUT');
+          await logFileProbe(outPath, 'OUTRO_OUT');
+          console.log(`[5G][OUTRO] Outro appended: ${outPath}`);
+          resolve(outPath);
+        } catch (e) {
+          console.error(`[5G][OUTRO][ERR] ${e.message}`);
+          reject(e);
+        }
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][OUTRO][FFMPEG][ERR]`, err);
+        if (stderr) console.error(`[5G][OUTRO][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][OUTRO][STDOUT]\n${stdout}`);
+        reject(err);
+      });
+  });
+}
+
+// === Music overlay unchanged (already bulletproof) ===
+async function overlayMusic(videoPath, musicPath, outPath) {
+  console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
+
+  try {
+    await logFileProbe(videoPath, 'MUSIC_VIDEO');
+    await logFileProbe(musicPath, 'MUSIC_MUSIC');
+  } catch (e) {
+    console.warn('[5G][MUSIC][PROBE][WARN] Could not probe input durations.');
+  }
+
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(videoPath)
+      .input(musicPath)
+      .complexFilter([
+        '[0:a]volume=1.0[a0]',
+        '[1:a]volume=0.16[a1]',
+        '[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]'
+      ])
+      .outputOptions([
+        '-map', '0:v',
+        '-map', '[aout]',
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-shortest',
+        '-y'
+      ])
+      .save(outPath)
+      .on('end', async () => {
+        try {
+          assertFile(outPath, 10240, 'MUSIC_OUT');
+          await logFileProbe(outPath, 'MUSIC_OUT');
+          console.log(`[5G][MUSIC] Music overlay complete: ${outPath}`);
+          resolve(outPath);
+        } catch (e) {
+          console.error(`[5G][MUSIC][ERR] ${e.message}`);
+          reject(e);
+        }
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][MUSIC][FFMPEG][ERR]`, err);
+        if (stderr) console.error(`[5G][MUSIC][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][MUSIC][STDOUT]\n${stdout}`);
+        reject(err);
+      });
+  });
+}
+
+// === NEW: AI Music Mood Selector + Random Song with MAX LOGGING ===
+function getRandomMusicFileForMood(mood, lastTrack = null) {
+  // Looks in /assets/music/{mood}/ for all valid files, picks one at random (avoiding lastTrack)
+  const musicDir = path.join(__dirname, '..', 'assets', 'music', mood);
+  let files = [];
+  try {
+    files = fs.readdirSync(musicDir)
+      .filter(f => /\.(mp3|wav|aac)$/i.test(f));
+  } catch (e) {
+    console.warn('[5G][MUSIC][FOLDER][WARN] Could not read music dir:', musicDir, e.message);
+    return null;
+  }
+  console.log(`[5G][MUSIC][RANDOM] Mood "${mood}" - Found ${files.length} tracks in: ${musicDir}`, files);
+
+  if (!files.length) {
+    console.warn(`[5G][MUSIC][RANDOM][WARN] No tracks found for mood "${mood}".`);
+    return null;
+  }
+
+  // Exclude last used if possible
+  let candidates = files;
+  if (lastTrack && files.length > 1) {
+    const lastBase = path.basename(lastTrack);
+    candidates = files.filter(f => f !== lastBase);
+    if (!candidates.length) candidates = files; // fallback: all files
+  }
+
+  const idx = Math.floor(Math.random() * candidates.length);
+  const chosen = candidates[idx];
+  console.log(`[5G][MUSIC][RANDOM][PICK] Picked: ${chosen} (out of ${candidates.length} candidates, lastTrack=${lastTrack})`);
+  return path.join(musicDir, chosen);
+}
+
+// === AI Music Mood Selector + Random Song ===
+async function selectMusicFileForScript(script, gptDetectMood, lastTrack = null) {
+  // Ensures a *random* song is chosen for each video, never repeats unless all used!
+  try {
+    const detectedMood = await gptDetectMood(script); // e.g., "suspense"
+    console.log('[5G][MUSIC][AI] Detected mood from GPT:', detectedMood);
+    // Always pick a random music file for this mood
+    const musicPath = getRandomMusicFileForMood(detectedMood, lastTrack);
+    if (musicPath) {
+      console.log('[5G][MUSIC][AI] Selected random music file:', musicPath);
+      return musicPath;
+    } else {
+      console.warn('[5G][MUSIC][AI][WARN] No music file found for detected mood:', detectedMood);
+      return null;
+    }
+  } catch (err) {
+    console.error('[5G][MUSIC][AI][ERR] Mood detection or file select failed:', err);
+    return null;
+  }
+}
+
+// === 16:9/9:16 helpers unchanged ===
 async function create16x9FromInput(inputPath, outputPath) {
   console.log(`[5G][FORMAT][16x9] Creating 16:9 output from: ${inputPath}`);
   return new Promise((resolve, reject) => {
@@ -311,118 +461,6 @@ async function create9x16FromInput(inputPath, outputPath) {
   });
 }
 
-// === AI Music Mood Selector + Random Song ===
-async function selectMusicFileForScript(script, gptDetectMood) {
-  try {
-    const detectedMood = await gptDetectMood(script); // Example: "suspense"
-    console.log('[5G][MUSIC][AI] Detected mood from GPT:', detectedMood);
-    const musicPath = getRandomMusicFileForMood(detectedMood);
-    if (musicPath) {
-      console.log('[5G][MUSIC][AI] Selected random music file:', musicPath);
-      return musicPath;
-    } else {
-      console.warn('[5G][MUSIC][AI][WARN] No music file found for detected mood:', detectedMood);
-      return null;
-    }
-  } catch (err) {
-    console.error('[5G][MUSIC][AI][ERR] Mood detection or file select failed:', err);
-    return null;
-  }
-}
-
-async function overlayMusic(videoPath, musicPath, outPath) {
-  console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
-
-  try {
-    await logFileProbe(videoPath, 'MUSIC_VIDEO');
-    await logFileProbe(musicPath, 'MUSIC_MUSIC');
-  } catch (e) {
-    console.warn('[5G][MUSIC][PROBE][WARN] Could not probe input durations.');
-  }
-
-  return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(videoPath)
-      .input(musicPath)
-      .complexFilter([
-        '[0:a]volume=1.0[a0]',
-        '[1:a]volume=0.16[a1]',
-        '[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]'
-      ])
-      .outputOptions([
-        '-map', '0:v',
-        '-map', '[aout]',
-        '-c:v', 'copy',
-        '-c:a', 'aac',
-        '-shortest',
-        '-y'
-      ])
-      .save(outPath)
-      .on('end', async () => {
-        try {
-          assertFile(outPath, 10240, 'MUSIC_OUT');
-          await logFileProbe(outPath, 'MUSIC_OUT');
-          console.log(`[5G][MUSIC] Music overlay complete: ${outPath}`);
-          resolve(outPath);
-        } catch (e) {
-          console.error(`[5G][MUSIC][ERR] ${e.message}`);
-          reject(e);
-        }
-      })
-      .on('error', (err, stdout, stderr) => {
-        console.error(`[5G][MUSIC][FFMPEG][ERR]`, err);
-        if (stderr) console.error(`[5G][MUSIC][STDERR]\n${stderr}`);
-        if (stdout) console.log(`[5G][MUSIC][STDOUT]\n${stdout}`);
-        reject(err);
-      });
-  });
-}
-
-async function appendOutro(mainPath, outroPath, outPath, workDir) {
-  if (!outroPath) outroPath = getOutroPath();
-  if (!outPath) outPath = path.resolve(workDir, getUniqueFinalName('final-with-outro'));
-
-  console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outPath}"`);
-  await logFileProbe(mainPath, 'OUTRO_MAIN');
-  await logFileProbe(outroPath, 'OUTRO_OUTRO');
-
-  const listFile = path.resolve(workDir, 'list2.txt');
-  fs.writeFileSync(listFile, [
-    `file '${mainPath.replace(/'/g, "'\\''")}'`,
-    `file '${outroPath.replace(/'/g, "'\\''")}'`
-  ].join('\n'));
-
-  return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(listFile)
-      .inputOptions(['-f concat', '-safe 0'])
-      .outputOptions([
-        '-c:v libx264',
-        '-c:a aac',
-        '-movflags +faststart',
-        '-preset ultrafast'
-      ])
-      .save(outPath)
-      .on('end', async () => {
-        try {
-          assertFile(outPath, 10240, 'OUTRO_OUT');
-          await logFileProbe(outPath, 'OUTRO_OUT');
-          console.log(`[5G][OUTRO] Outro appended: ${outPath}`);
-          resolve(outPath);
-        } catch (e) {
-          console.error(`[5G][OUTRO][ERR] ${e.message}`);
-          reject(e);
-        }
-      })
-      .on('error', (err, stdout, stderr) => {
-        console.error(`[5G][OUTRO][FFMPEG][ERR]`, err);
-        if (stderr) console.error(`[5G][OUTRO][STDERR]\n${stderr}`);
-        if (stdout) console.log(`[5G][OUTRO][STDOUT]\n${stdout}`);
-        reject(err);
-      });
-  });
-}
-
 // ============================================
 // MODULE EXPORTS
 // ============================================
@@ -435,6 +473,7 @@ module.exports = {
   getUniqueFinalName,
   bulletproofScenes,
   selectMusicFileForScript,
+  getRandomMusicFileForMood,
   create16x9FromInput,
   create9x16FromInput
 };

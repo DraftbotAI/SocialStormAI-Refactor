@@ -30,16 +30,63 @@ function getMusicFolderForMood(mood) {
   return path.join(baseMusicDir, folder);
 }
 
-function getRandomMusicFileForMood(mood) {
+function getAllMusicFilesForMood(mood) {
   const folderPath = getMusicFolderForMood(mood);
-  if (!fs.existsSync(folderPath)) return null;
+  if (!fs.existsSync(folderPath)) {
+    console.warn(`[MUSIC_MOODS][WARN] Folder for mood '${mood}' does not exist: ${folderPath}`);
+    return [];
+  }
   const files = fs.readdirSync(folderPath).filter(f =>
     f.endsWith('.mp3') || f.endsWith('.wav') || f.endsWith('.ogg')
   );
-  if (!files.length) return null;
-  // Pick one at random
-  const idx = Math.floor(Math.random() * files.length);
-  return path.join(folderPath, files[idx]);
+  if (!files.length) {
+    console.warn(`[MUSIC_MOODS][WARN] No music files found for mood '${mood}' in folder: ${folderPath}`);
+  }
+  return files.map(f => path.join(folderPath, f));
 }
 
-module.exports = { getMusicFolderForMood, getRandomMusicFileForMood, musicMoods, baseMusicDir };
+// TRUE random per request, falls back to "any" if mood is empty
+function getRandomMusicFileForMood(mood = 'inspiring') {
+  let files = getAllMusicFilesForMood(mood);
+  if (!files.length) {
+    // Fallback: try random from *any* folder
+    const allFiles = [];
+    Object.keys(musicMoods).forEach(m => {
+      allFiles.push(...getAllMusicFilesForMood(m));
+    });
+    if (!allFiles.length) {
+      console.error(`[MUSIC_MOODS][ERR] No music files found in ANY mood folder!`);
+      return null;
+    }
+    files = allFiles;
+    console.warn(`[MUSIC_MOODS][WARN] Using random fallback song (no files for mood '${mood}')`);
+  }
+  const idx = Math.floor(Math.random() * files.length);
+  const pick = files[idx];
+  console.log(`[MUSIC_MOODS][PICK] Mood='${mood}' → "${pick}"`);
+  return pick;
+}
+
+// Utility: list all supported moods (for UI, debugging, or random mood picking)
+function getAllMoods() {
+  return Object.keys(musicMoods);
+}
+
+// Utility: list all tracks for ALL moods (debug/audit)
+function listAllTracks() {
+  const summary = {};
+  Object.keys(musicMoods).forEach(mood => {
+    summary[mood] = getAllMusicFilesForMood(mood);
+  });
+  return summary;
+}
+
+module.exports = {
+  getMusicFolderForMood,
+  getRandomMusicFileForMood,
+  getAllMusicFilesForMood,
+  getAllMoods,
+  listAllTracks,
+  musicMoods,
+  baseMusicDir
+};

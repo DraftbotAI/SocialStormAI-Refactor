@@ -30,8 +30,10 @@ const {
 
 // === 5F: AV/Scene Mux Logic ===
 const {
+  getDuration,
+  trimForNarration,
   muxVideoWithNarration,
-  muxMegaSceneWithNarration,
+  splitVideoForFirstTwoScenes
 } = require('./section5f-video-processing.cjs');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
@@ -75,7 +77,6 @@ async function uploadToR2(localFilePath, r2FinalName, jobId) {
     throw err;
   }
 }
-// ===========================================================
 
 function assertFileExists(file, label) {
   if (!fs.existsSync(file) || fs.statSync(file).size < 10240) {
@@ -155,6 +156,8 @@ function registerGenerateVideoEndpoint(app, deps) {
         // === 2. PARALLELIZED scene processing with CACHING: audio, video, mux ===
         const usedClips = [];
         const sceneFiles = [];
+        let megaSceneTrimmedVideos = null; // For caching mega scene trimmed outputs
+
         const sceneJobs = scenes.map((scene, i) => (async () => {
           const isMegaScene = !!scene.isMegaScene;
           let mainTopic = null;
@@ -195,8 +198,10 @@ function registerGenerateVideoEndpoint(app, deps) {
           const audioCachePath = path.join(audioCacheDir, `${audioHash}.mp3`);
           let audioPath = audioCachePath;
 
-          if (fs.existsSync(audioCachePath) && fs.statSync(audioCachePath).size > 10000) {
-            console.log(`[5B][CACHE][AUDIO] [${jobId}] Scene ${i + 1}: HIT: Using cached audio: ${audioCachePath}`);
+          // TTS step: debug file existence and size BEFORE and AFTER
+          let audioPreExists = fs.existsSync(audioCachePath) && fs.statSync(audioCachePath).size > 10000;
+          if (audioPreExists) {
+            console.log(`[5B][CACHE][AUDIO] [${jobId}] Scene ${i + 1}: HIT: Using cached audio: ${audioCachePath} (size=${fs.statSync(audioCachePath).size} bytes)`);
           } else {
             if (isMegaScene) {
               await deps.createMegaSceneAudio(scene.texts, voice, audioCachePath, provider, workDir);
@@ -204,10 +209,23 @@ function registerGenerateVideoEndpoint(app, deps) {
               await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
             }
             assertFileExists(audioCachePath, isMegaScene ? `AUDIO_MEGA_${i+1}` : `AUDIO_SCENE_${i+1}`);
-            console.log(`[5B][CACHE][AUDIO] [${jobId}] Scene ${i + 1}: MISS: Generated and cached audio: ${audioCachePath}`);
+            console.log(`[5B][CACHE][AUDIO] [${jobId}] Scene ${i + 1}: MISS: Generated and cached audio: ${audioCachePath} (size=${fs.statSync(audioCachePath).size} bytes)`);
           }
 
-          // --- MUXED VIDEO CACHE ---
+          // Extra debug: print duration of generated audio file before mux
+          let audioDuration = -1;
+          try {
+            audioDuration = fs.existsSync(audioPath) ? (await getDuration(audioPath)) : -1;
+            console.log(`[5B][AUDIO][DEBUG] [${jobId}] Scene ${i+1}: Audio file duration: ${audioDuration}s`);
+          } catch (err) {
+            console.error(`[5B][AUDIO][DEBUG][ERR] Could not get audio duration for scene ${i+1}: ${err}`);
+          }
+
+          if (audioDuration <= 0.01) {
+            throw new Error(`[5B][AUDIO][FATAL] Audio file for scene ${i+1} is empty or corrupted: ${audioPath}`);
+          }
+
+          // --- PRECISE TRIM/MUX PIPELINE ---
           const muxHash = hashForCache(JSON.stringify({
             text: scene.texts,
             voice,
@@ -215,20 +233,59 @@ function registerGenerateVideoEndpoint(app, deps) {
             clip: clipPath
           }));
           const videoCachePath = path.join(videoCacheDir, `${muxHash}.mp4`);
+
           let muxedScenePath = videoCachePath;
 
           if (fs.existsSync(videoCachePath) && fs.statSync(videoCachePath).size > 100000) {
             console.log(`[5B][CACHE][VIDEO] [${jobId}] Scene ${i + 1}: HIT: Using cached muxed video: ${videoCachePath}`);
           } else {
+            // --- MEGA SCENE (scene 1+2, shared video, different narration) ---
             if (isMegaScene) {
-              await muxMegaSceneWithNarration(clipPath, audioPath, videoCachePath);
+              // Only split and trim the mega scene clip ONCE, cache the results
+              if (!megaSceneTrimmedVideos) {
+                // Get durations for both narrations
+                const megaAudio1 = audioPath; // Mega scene narration (scene 1)
+                const nextAudioHash = hashForCache(JSON.stringify({
+                  text: scenes[1].texts,
+                  voice,
+                  provider
+                }));
+                const megaAudio2 = path.join(audioCacheDir, `${nextAudioHash}.mp3`);
+                // Defensive: If not created yet, create it now
+                if (!fs.existsSync(megaAudio2) || fs.statSync(megaAudio2).size < 10000) {
+                  await deps.createSceneAudio(scenes[1].texts[0], voice, megaAudio2, provider);
+                }
+                // Duration checks
+                let dur1 = fs.existsSync(megaAudio1) ? (await getDuration(megaAudio1)) : 0;
+                let dur2 = fs.existsSync(megaAudio2) ? (await getDuration(megaAudio2)) : 0;
+                if (dur1 < 0.01 || dur2 < 0.01) {
+                  throw new Error(`[5B][AUDIO][FATAL] Mega scene audio is empty: [${megaAudio1}] ${dur1}s, [${megaAudio2}] ${dur2}s`);
+                }
+                megaSceneTrimmedVideos = await splitVideoForFirstTwoScenes(
+                  clipPath, megaAudio1, megaAudio2, workDir
+                );
+              }
+              // Use trimmed split for scene 1 or 2
+              const [scene1Video, scene2Video] = megaSceneTrimmedVideos;
+              const trimmedVideoPath = (i === 0) ? scene1Video : scene2Video;
+              await muxVideoWithNarration(trimmedVideoPath, audioPath, videoCachePath);
               assertFileExists(videoCachePath, `MUXED_MEGA_${i+1}`);
             } else {
-              await muxVideoWithNarration(clipPath, audioPath, videoCachePath);
+              // --- NORMAL SCENE: trim video to audio duration, then mux ---
+              const narrationDuration = audioDuration;
+              const trimmedVideoPath = path.join(workDir, `scene${i+1}-trimmed.mp4`);
+              await trimForNarration(clipPath, trimmedVideoPath, narrationDuration);
+              await muxVideoWithNarration(trimmedVideoPath, audioPath, videoCachePath);
               assertFileExists(videoCachePath, `MUXED_SCENE_${i+1}`);
             }
             console.log(`[5B][CACHE][VIDEO] [${jobId}] Scene ${i + 1}: MISS: Generated and cached muxed video: ${videoCachePath}`);
           }
+          // Confirm muxed video duration
+          try {
+            const vidDur = await getDuration(videoCachePath);
+            console.log(`[5B][MUXED][DEBUG] [${jobId}] Scene ${i+1}: muxed video duration: ${vidDur}s (expected >=${audioDuration}s)`);
+          } catch(e) {}
+
           return { idx: i, muxedScenePath };
         })());
 
@@ -315,13 +372,16 @@ function registerGenerateVideoEndpoint(app, deps) {
               const outroOutput = path.join(workDir, r2FinalName);
               await appendOutro(musicPath, outroPath, outroOutput, workDir);
               assertFileExists(outroOutput, 'OUTRO_OUT');
-              finalPath = outroOutput;
+              finalPath = outroOutput; // MUST use the appended outro as the real final output
               progress[jobId] = { percent: 92, status: 'Outro added! Wrapping up...' };
+              // Debug: confirm file is truly the outro output
+              console.log(`[5B][FINAL][DEBUG] Final output (with outro): ${finalPath} (${fs.statSync(finalPath).size} bytes)`);
             } catch (e) {
               throw new Error(`[5B][OUTRO][ERR] [${jobId}] appendOutro failed: ${e}`);
             }
           } else {
             progress[jobId] = { percent: 90, status: 'Finalizing your masterpiece...' };
+            console.warn(`[5B][OUTRO][WARN] Outro file does not exist at: ${outroPath} (skipping outro step)`);
           }
         } else {
           progress[jobId] = { percent: 90, status: 'Outro skipped (user setting).' };
