@@ -25,7 +25,7 @@ function cleanQuery(str) {
 }
 
 function getKeywords(str) {
-  return String(str)
+  return String(str || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, '')
     .split(/[\s\-]+/)
@@ -84,7 +84,7 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
 
-  // Main filename/description for scoring (title, tags, and user, if present)
+  // Main filename/description for scoring (title, tags, user, etc)
   const fields = [
     (video?.user?.name || ''),
     (video?.url || ''),
@@ -94,7 +94,7 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
   ].join(' ').toLowerCase();
 
   // Phrase match
-  if (fields.includes(cleanedSubject)) score += 60;
+  if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 60;
 
   // All words present
   const allWordsPresent = subjectWords.every(w => fields.includes(w));
@@ -116,14 +116,14 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
   score += Math.floor(file.width / 120);
 
   // Penalize used/duplicate clips
-  if (usedClips && usedClips.some(u => u.includes(file.link) || file.link.includes(u))) {
+  if (usedClips && usedClips.some(u => file.link && (u.includes(file.link) || file.link.includes(u)))) {
     score -= 100;
   }
 
   // Penalize very short clips
   if (video.duration && video.duration < 4) score -= 8;
 
-  // Slight bonus for popular Pexels video IDs (higher ID is newer/higher quality)
+  // Slight bonus for popular Pexels video IDs (higher ID = newer/higher quality)
   if (video.id && Number(video.id) > 1000000) score += 2;
 
   return score;

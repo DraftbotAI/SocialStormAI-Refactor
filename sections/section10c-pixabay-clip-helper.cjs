@@ -25,7 +25,7 @@ function cleanQuery(str) {
 }
 
 function getKeywords(str) {
-  return String(str)
+  return String(str || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, '')
     .split(/[\s\-]+/)
@@ -93,7 +93,7 @@ function scorePixabayMatch(hit, vid, subject, usedClips = []) {
   ].join(' ').toLowerCase();
 
   // Strong full phrase match
-  if (fields.includes(cleanedSubject)) score += 50;
+  if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 50;
 
   // All words present
   const allWordsPresent = subjectWords.every(w => fields.includes(w));
@@ -105,13 +105,13 @@ function scorePixabayMatch(hit, vid, subject, usedClips = []) {
   });
 
   // Aspect/size: prefer portrait/landscape, HD+
-  if (vid.width > vid.height) score += 10;
-  if (vid.height / vid.width > 1.7 && vid.height > 1000) score += 12; // strong portrait
+  if (vid.width > vid.height) score += 10; // Landscape
+  if (vid.height / vid.width > 1.7 && vid.height > 1000) score += 12; // Portrait, tall
   if (vid.height >= 720) score += 5;
   score += Math.floor(vid.width / 120);
 
   // Penalize used/duplicate clips
-  if (usedClips && usedClips.some(u => u.includes(vid.url) || vid.url.includes(u))) {
+  if (usedClips && usedClips.some(u => vid.url && (u.includes(vid.url) || vid.url.includes(u)))) {
     score -= 100;
   }
 
@@ -150,7 +150,7 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
     if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
       let scored = [];
       for (const hit of resp.data.hits) {
-        const videoCandidates = Object.values(hit.videos);
+        const videoCandidates = Object.values(hit.videos || {});
         for (const vid of videoCandidates) {
           const score = scorePixabayMatch(hit, vid, subject, usedClips);
           scored.push({ hit, vid, score });

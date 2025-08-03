@@ -1,13 +1,14 @@
 // =============================================================
-// SECTION 10F: UNSPLASH IMAGE HELPER (Search & Download)
-// Searches Unsplash for a high-res image matching the subject.
+// SECTION 10F: UNSPLASH IMAGE HELPER (Search & Download & Score)
+// Searches Unsplash for the best-scoring, high-res image matching the subject.
 // Downloads to local job folder, returns file path on success.
-// MAX LOGGING, bulletproof, modular, NO DUPES!
+// MAX LOGGING, bulletproof, modular, NO DUPES, scores all matches
 // Requires: UNSPLASH_ACCESS_KEY in env
 // =============================================================
+
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
+const axios = require('axios');
 
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY || '';
 
@@ -26,15 +27,57 @@ function cleanForFilename(str) {
     .slice(0, 70);
 }
 
+function getKeywords(str) {
+  return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
+}
+
 /**
- * Search Unsplash API for an image matching subject and download it.
+ * Scoring function for Unsplash results.
+ */
+function scoreUnsplashImage(result, subject, usedClips = []) {
+  let score = 0;
+  const cleanedSubject = subject.toLowerCase();
+  const subjectWords = getKeywords(subject);
+  const desc = ((result.alt_description || '') + ' ' + (result.description || '') + ' ' + (result.user?.name || '')).toLowerCase();
+
+  // Phrase match
+  if (desc.includes(cleanedSubject)) score += 60;
+
+  // All words present
+  if (subjectWords.every(w => desc.includes(w)) && subjectWords.length > 1) score += 30;
+
+  // Each word present
+  subjectWords.forEach(word => {
+    if (desc.includes(word)) score += 5;
+  });
+
+  // Prefer portrait/HD
+  if (result.width >= 1000) score += 8;
+  if (result.height >= 1500) score += 8;
+  if (result.height > result.width) score += 10;
+
+  // Bonus for popularity (if present)
+  if (result.likes && result.likes > 100) score += 3;
+
+  // Penalize used
+  if (usedClips && usedClips.some(u => result.urls?.full && u.includes(result.urls.full))) score -= 100;
+
+  // Recent images (higher ID, slight bump)
+  if (result.id && Number(result.id) > 1000000) score += 1;
+
+  return score;
+}
+
+/**
+ * Search Unsplash API for the best-scoring image matching subject and download it.
  * @param {string} subject - The search phrase (topic, scene, keyword)
  * @param {string} workDir - Directory to save downloaded image
  * @param {number} sceneIdx - Scene index (for filename uniqueness)
  * @param {string} jobId - For logging
+ * @param {Array<string>} usedClips - List of used image URLs to prevent dupes
  * @returns {Promise<string|null>} Local file path if successful, else null
  */
-async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId = 'nojob') {
+async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId = 'nojob', usedClips = []) {
   if (!UNSPLASH_ACCESS_KEY) {
     console.error('[10F][NO_API_KEY][%s] Unsplash API key missing.', jobId);
     return null;
@@ -45,35 +88,41 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
   }
 
   const query = encodeURIComponent(subject);
-  const apiUrl = `https://api.unsplash.com/search/photos?query=${query}&orientation=portrait&per_page=1&client_id=${UNSPLASH_ACCESS_KEY}`;
+  const apiUrl = `https://api.unsplash.com/search/photos?query=${query}&orientation=portrait&per_page=10&client_id=${UNSPLASH_ACCESS_KEY}`;
 
   console.log(`[10F][REQ][${jobId}] Searching Unsplash: "${subject}"`);
 
   let json;
   try {
-    json = await new Promise((resolve, reject) => {
-      https.get(apiUrl, res => {
-        let data = '';
-        res.on('data', chunk => { data += chunk; });
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(data);
-            resolve(parsed);
-          } catch (e) {
-            reject(e);
-          }
-        });
-      }).on('error', reject);
-    });
+    const response = await axios.get(apiUrl, { timeout: 15000 });
+    json = response.data;
   } catch (err) {
-    console.error(`[10F][API_ERR][${jobId}] Unsplash API error:`, err);
+    console.error(`[10F][API_ERR][${jobId}] Unsplash API error:`, err?.response?.data || err.message || err);
     return null;
   }
 
-  // Pick first result (if exists)
-  const result = json && Array.isArray(json.results) && json.results[0];
-  if (!result || !result.urls || !result.urls.full) {
+  if (!json || !Array.isArray(json.results) || !json.results.length) {
     console.warn(`[10F][NO_RESULT][${jobId}] No Unsplash image found for: "${subject}"`);
+    return null;
+  }
+
+  // Score all results, skip used
+  let scored = json.results.map(result => ({
+    result,
+    score: scoreUnsplashImage(result, subject, usedClips),
+    url: result.urls.full
+  })).filter(item => item.score >= 0 && item.url && !usedClips.some(u => u.includes(item.url)));
+
+  scored.sort((a, b) => b.score - a.score);
+
+  // Log top candidates
+  scored.slice(0, 5).forEach((s, i) => {
+    console.log(`[10F][CANDIDATE][${jobId}] [${i + 1}] url=${s.url} | score=${s.score} | desc="${s.result.alt_description || ''}"`);
+  });
+
+  const best = scored[0];
+  if (!best || !best.url || best.score < 20) {
+    console.warn(`[10F][NO_GOOD][${jobId}] No strong Unsplash match for "${subject}" (best score: ${best ? best.score : 'none'})`);
     return null;
   }
 
@@ -88,19 +137,22 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
   }
 
   try {
+    const response = await axios({
+      url: best.url,
+      method: 'GET',
+      responseType: 'stream',
+      timeout: 15000
+    });
+
     await new Promise((resolve, reject) => {
       const file = fs.createWriteStream(outPath);
-      https.get(result.urls.full, response => {
-        if (response.statusCode !== 200) {
-          reject(new Error(`HTTP ${response.statusCode} when downloading Unsplash image`));
-          return;
-        }
-        response.pipe(file);
-        file.on('finish', () => file.close(resolve));
-      }).on('error', err => {
+      response.data.pipe(file);
+      file.on('finish', () => file.close(resolve));
+      file.on('error', err => {
         fs.unlink(outPath, () => reject(err));
       });
     });
+
     if (fs.existsSync(outPath) && fs.statSync(outPath).size > 10 * 1024) {
       console.log(`[10F][DOWNLOAD][${jobId}] OK: Saved Unsplash image to ${outPath}`);
       return outPath;

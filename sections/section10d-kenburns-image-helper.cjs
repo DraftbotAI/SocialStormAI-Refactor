@@ -1,9 +1,8 @@
 // ===========================================================
 // SECTION 10D: KEN BURNS IMAGE VIDEO HELPER (Bulletproofed!)
-// Finds fallback still images, downloads them, creates slow-pan videos
-// Used when no matching R2/Pexels/Pixabay video is found.
-// Now: All images are re-encoded with sharp for 100% JPEG compatibility!
-// MAX LOGGING EVERY STEP, Modular, Deduped, Validated, Never dies
+// Finds fallback still images from Unsplash, Pexels, Pixabay.
+// Downloads, scores, creates slow-pan video with FFmpeg.
+// MAX LOGGING EVERY STEP, Modular, Deduped, Never dies
 // ===========================================================
 
 const axios = require('axios');
@@ -15,6 +14,7 @@ const sharp = require('sharp');
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
+const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
 console.log('[10D][INIT] Ken Burns image video helper loaded.');
 
@@ -37,22 +37,130 @@ function isValidFile(fp, jobId) {
   }
 }
 
-// --- Find an image on Pexels ---
-async function findImageInPexels(subject) {
-  console.log(`[10D][PEXELS-IMG] Searching for still image | subject="${subject}"`);
+// --- Clean/score helpers ---
+function cleanQuery(str) {
+  if (!str) return '';
+  return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
+}
+function getKeywords(str) {
+  return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
+}
+
+// --- SCORING: Works for all image APIs ---
+function scoreImage(candidate, subject, usedClips = [], extra = {}) {
+  let score = 0;
+  const cleanedSubject = cleanQuery(subject).toLowerCase();
+  const subjectWords = getKeywords(subject);
+
+  // Fields: description, alt, tags, etc (all lowercased)
+  let fields = '';
+  if (candidate.api === 'unsplash') {
+    fields = [
+      candidate.alt_description || '',
+      candidate.description || '',
+      (candidate.tags || []).map(t => (t.title || t)).join(' '),
+      candidate.user?.name || '',
+      candidate.urls?.full || ''
+    ].join(' ').toLowerCase();
+  } else if (candidate.api === 'pexels') {
+    fields = [
+      candidate.alt || '',
+      candidate.photographer || '',
+      candidate.src?.original || '',
+      candidate.url || ''
+    ].join(' ').toLowerCase();
+  } else if (candidate.api === 'pixabay') {
+    fields = [
+      candidate.tags || '',
+      candidate.user || '',
+      candidate.pageURL || '',
+      candidate.largeImageURL || ''
+    ].join(' ').toLowerCase();
+  }
+
+  // Phrase match
+  if (fields.includes(cleanedSubject)) score += 60;
+  // All words present
+  if (subjectWords.every(w => fields.includes(w)) && subjectWords.length > 1) score += 30;
+  // Each word present
+  subjectWords.forEach(word => { if (fields.includes(word)) score += 5; });
+
+  // HD preference
+  if (candidate.width && candidate.width >= 1000) score += 7;
+  if (candidate.height && candidate.height >= 1000) score += 7;
+  if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8; // portrait
+
+  // Penalize used/dup
+  if (usedClips && candidate.url && usedClips.some(u => u.includes(candidate.url) || candidate.url.includes(u))) score -= 60;
+  // Bonus for Unsplash editorial/high download count (if present)
+  if (candidate.downloads && candidate.downloads > 10000) score += 4;
+  // Bonus for newer image
+  if (candidate.id && Number(candidate.id) > 1000000) score += 1;
+  return score;
+}
+
+// --- Find an image on Unsplash ---
+async function findImageInUnsplash(subject, usedClips = []) {
+  if (!UNSPLASH_ACCESS_KEY) {
+    console.warn('[10D][UNSPLASH] No access key set.');
+    return null;
+  }
+  try {
+    const query = encodeURIComponent(subject);
+    const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=10&orientation=portrait&client_id=${UNSPLASH_ACCESS_KEY}`;
+    console.log(`[10D][UNSPLASH] Request: ${url}`);
+    const resp = await axios.get(url);
+    if (resp.data && resp.data.results && resp.data.results.length > 0) {
+      // Score all candidates
+      let candidates = resp.data.results.map(item => ({
+        ...item,
+        api: 'unsplash',
+        url: item.urls.full
+      }));
+      candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
+      candidates.sort((a, b) => b.score - a.score);
+      candidates.slice(0, 4).forEach((c, i) => {
+        console.log(`[10D][UNSPLASH][CANDIDATE][${i + 1}] ${c.urls.full} | score=${c.score} | desc="${c.description || c.alt_description || ''}"`);
+      });
+      return candidates[0]?.urls.full || null;
+    }
+    console.log(`[10D][UNSPLASH] No images found for: "${subject}"`);
+    return null;
+  } catch (err) {
+    if (err.response) {
+      console.error(`[10D][UNSPLASH][ERR] Status: ${err.response.status}, Data:`, err.response.data);
+    } else {
+      console.error('[10D][UNSPLASH][ERR]', err);
+    }
+    return null;
+  }
+}
+
+// --- Find an image on Pexels (with scoring) ---
+async function findImageInPexels(subject, usedClips = []) {
   if (!PEXELS_API_KEY) {
     console.warn('[10D][PEXELS-IMG] No API key set.');
     return null;
   }
   try {
     const query = encodeURIComponent(subject);
-    const url = `https://api.pexels.com/v1/search?query=${query}&per_page=5`;
+    const url = `https://api.pexels.com/v1/search?query=${query}&per_page=8&orientation=portrait`;
     console.log(`[10D][PEXELS-IMG] Request: ${url}`);
     const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY } });
     if (resp.data && resp.data.photos && resp.data.photos.length > 0) {
-      const best = resp.data.photos[0];
-      console.log(`[10D][PEXELS-IMG] Found image: ${best.src.original}`);
-      return best.src.original;
+      let candidates = resp.data.photos.map(item => ({
+        ...item,
+        api: 'pexels',
+        url: item.src.original,
+        width: item.width,
+        height: item.height
+      }));
+      candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
+      candidates.sort((a, b) => b.score - a.score);
+      candidates.slice(0, 4).forEach((c, i) => {
+        console.log(`[10D][PEXELS-IMG][CANDIDATE][${i + 1}] ${c.src.original} | score=${c.score} | photographer="${c.photographer || ''}"`);
+      });
+      return candidates[0]?.src.original || null;
     }
     console.log(`[10D][PEXELS-IMG] No images found for: "${subject}"`);
     return null;
@@ -66,24 +174,31 @@ async function findImageInPexels(subject) {
   }
 }
 
-// --- Find an image on Pixabay ---
-async function findImageInPixabay(subject) {
-  console.log(`[10D][PIXABAY-IMG] Searching for still image | subject="${subject}"`);
+// --- Find an image on Pixabay (with scoring) ---
+async function findImageInPixabay(subject, usedClips = []) {
   if (!PIXABAY_API_KEY) {
     console.warn('[10D][PIXABAY-IMG] No API key set.');
     return null;
   }
   try {
     const query = encodeURIComponent(subject);
-    const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=5`;
+    const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=8&orientation=vertical`;
     console.log(`[10D][PIXABAY-IMG] Request: ${url}`);
     const resp = await axios.get(url);
     if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
-      const best = resp.data.hits[0];
-      if (best && best.largeImageURL) {
-        console.log(`[10D][PIXABAY-IMG] Found image: ${best.largeImageURL}`);
-        return best.largeImageURL;
-      }
+      let candidates = resp.data.hits.map(item => ({
+        ...item,
+        api: 'pixabay',
+        url: item.largeImageURL,
+        width: item.imageWidth,
+        height: item.imageHeight
+      }));
+      candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
+      candidates.sort((a, b) => b.score - a.score);
+      candidates.slice(0, 4).forEach((c, i) => {
+        console.log(`[10D][PIXABAY-IMG][CANDIDATE][${i + 1}] ${c.largeImageURL} | score=${c.score} | tags="${c.tags}"`);
+      });
+      return candidates[0]?.largeImageURL || null;
     }
     console.log(`[10D][PIXABAY-IMG] No images found for: "${subject}"`);
     return null;
@@ -160,7 +275,7 @@ async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
   }
 }
 
-// --- Make Ken Burns video from local image (with perfect scaling/padding!) ---
+// --- Make Ken Burns video from local image ---
 async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
   console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}) | ${imgPath} → ${outPath} (${duration}s)`);
@@ -232,27 +347,45 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
   try {
     console.log(`[10D][FALLBACK][${jobId}] Attempting Ken Burns fallback video for "${subject}" | workDir="${workDir}" | sceneIdx=${sceneIdx}`);
 
-    // Look for an image that hasn't been used yet
-    let imageUrl = await findImageInPexels(subject);
-    if (!imageUrl) imageUrl = await findImageInPixabay(subject);
+    // --- Try all sources and score them ---
+    let candidates = [];
 
-    let tryCount = 0;
-    while (imageUrl && usedClips && usedClips.some(u => u.includes(imageUrl)) && tryCount < 3) {
-      console.warn(`[10D][FALLBACK][${jobId}] Image already used (${imageUrl}), trying next...`);
-      imageUrl = await findImageInPixabay(subject + ' ' + (Math.random() * 10000).toFixed(0));
-      tryCount++;
+    // Unsplash
+    if (UNSPLASH_ACCESS_KEY) {
+      const url = await findImageInUnsplash(subject, usedClips);
+      if (url) candidates.push({ url, api: 'unsplash', score: 100 }); // Score will be recalculated below
+    }
+    // Pexels
+    if (PEXELS_API_KEY) {
+      const url = await findImageInPexels(subject, usedClips);
+      if (url) candidates.push({ url, api: 'pexels', score: 100 });
+    }
+    // Pixabay
+    if (PIXABAY_API_KEY) {
+      const url = await findImageInPixabay(subject, usedClips);
+      if (url) candidates.push({ url, api: 'pixabay', score: 100 });
     }
 
-    if (!imageUrl) {
+    // Score all, remove used or blank
+    candidates = candidates.filter(c => c.url && !usedClips.some(u => u.includes(c.url)));
+    for (let c of candidates) {
+      c.score = scoreImage({ ...c, url: c.url }, subject, usedClips);
+    }
+    candidates.sort((a, b) => b.score - a.score);
+
+    if (!candidates.length) {
       console.warn(`[10D][FALLBACK][${jobId}] No fallback image found for "${subject}"`);
       return null;
     }
+
+    const best = candidates[0];
+    console.log(`[10D][FALLBACK][${jobId}] Using fallback image: ${best.url} (api: ${best.api}, score: ${best.score})`);
 
     const realTmpDir = workDir || path.join(__dirname, 'tmp');
     if (!fs.existsSync(realTmpDir)) fs.mkdirSync(realTmpDir, { recursive: true });
 
     const rawImgPath = path.join(realTmpDir, `kenburns-raw-${uuidv4()}.jpg`);
-    await downloadRemoteFileToLocal(imageUrl, rawImgPath, jobId);
+    await downloadRemoteFileToLocal(best.url, rawImgPath, jobId);
 
     // ALWAYS preprocess image to bulletproof JPEG
     const jpegImgPath = path.join(realTmpDir, `kenburns-prepped-${uuidv4()}.jpg`);
@@ -286,8 +419,9 @@ module.exports = {
   fallbackKenBurnsVideo,
   findImageInPexels,
   findImageInPixabay,
+  findImageInUnsplash,
   downloadRemoteFileToLocal,
   makeKenBurnsVideoFromImage,
   staticImageToVideo,
-  preprocessImageToJpeg
+  preprocessImageToJpeg,
 };

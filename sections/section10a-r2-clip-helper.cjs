@@ -3,7 +3,7 @@
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for parallel dedupe/scan)
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Parallel safe: no temp file collisions
-// Upgraded 2024-08: Smarter matching, phrase/keyword scoring, logs, static export
+// Upgraded 2024-08: Smarter scoring, phrase/keyword matching, verbose logs
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
@@ -34,14 +34,14 @@ const s3Client = new S3Client({
 
 // === UTILS ===
 function normalize(str) {
-  return String(str)
+  return String(str || '')
     .toLowerCase()
     .replace(/[\s_\-\.]+/g, '')
     .replace(/[^a-z0-9]/g, '');
 }
 
 function getKeywords(str) {
-  return String(str)
+  return String(str || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s\-]/g, '')
     .split(/[\s\-]+/)
@@ -76,19 +76,19 @@ async function listAllFilesInR2(prefix = '', jobId = '') {
   }
 }
 
-// === MATCHING: Score for each file based on subject/keywords ===
+// === ADVANCED SCORING: Score for each file based on subject/keywords ===
 function scoreR2Match(file, subject, extraPhrases = []) {
   const normFile = normalize(file);
   const normSubject = normalize(subject);
   let score = 0;
 
-  // Exact full match
-  if (normFile === normSubject) return 100;
+  // Exact full match (e.g. "gorilla")
+  if (normFile === normSubject && normSubject.length > 2) return 100;
 
   // Strong phrase match
-  if (normFile.includes(normSubject)) score += 80;
+  if (normFile.includes(normSubject) && normSubject.length > 2) score += 80;
 
-  // All keywords present
+  // All keywords present (phrase split)
   const subjectWords = getKeywords(subject);
   let wordsMatched = 0;
   for (let word of subjectWords) {
@@ -99,10 +99,13 @@ function scoreR2Match(file, subject, extraPhrases = []) {
   // Partial/keyword fallback
   if (wordsMatched > 0) score += 10 * wordsMatched;
 
-  // Extra phrases boost
+  // Extra phrases boost (e.g. "chimpanzee", "primate", "gorilla")
   for (let p of extraPhrases) {
     if (normFile.includes(normalize(p))) score += 15;
   }
+  // Add a small bump for long keyword matches
+  if (normFile.includes(normSubject) && normSubject.length > 6) score += 15;
+
   return score;
 }
 
@@ -156,31 +159,25 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
     );
 
     // Score all files (and log details)
-    let bestScore = -1;
-    let bestFile = null;
-    let allScores = [];
-
-    for (let file of mp4Files) {
-      const score = scoreR2Match(file, subject, extraPhrases);
-      allScores.push({ file, score });
-      if (score > bestScore) {
-        bestScore = score;
-        bestFile = file;
-      }
-    }
-
-    // Sort by score descending for debugging
+    let allScores = mp4Files.map(file => ({
+      file,
+      score: scoreR2Match(file, subject, extraPhrases),
+    }));
     allScores.sort((a, b) => b.score - a.score);
+
+    // Log top 10 matches
     console.log(`[10A][R2][${jobId}][SCORES] Top R2 file scores for "${subject}":`);
     allScores.slice(0, 10).forEach((s, i) =>
       console.log(`  [${i + 1}] ${s.file} -> ${s.score}`)
     );
 
-    // Choose only files with a "good" match (score >= 50)
-    if (!bestFile || bestScore < 50) {
-      console.log(`[10A][R2][${jobId}] No strong R2 match for "${subject}" (best score: ${bestScore})`);
+    // Best file logic: must be a "good" match (score >= 50)
+    const best = allScores[0];
+    if (!best || best.score < 50) {
+      console.log(`[10A][R2][${jobId}] No strong R2 match for "${subject}" (best score: ${best ? best.score : -1})`);
       return null;
     }
+    const bestFile = best.file;
 
     // Unique filename for every download attempt (parallel safe)
     const unique = uuidv4();
