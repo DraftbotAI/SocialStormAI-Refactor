@@ -1,13 +1,14 @@
 // ===========================================================
 // SECTION 5H: JOB CLEANUP & PROGRESS TRACKING
 // Handles cleanup of temp files, progress map, error logging
-// Post-job: Ingests any queued external clips to R2 in background!
-// MAX LOGGING EVERY STEP
+// Post-job: Ingests any queued scene clips to R2 in background!
+// SUPER MAX LOGGING EVERY STEP — NO SILENT FAILURES
 // ===========================================================
 
 const fs = require('fs');
 const path = require('path');
-const { uploadToR2 } = require('./section10e-upload-to-r2.cjs');
+const { uploadSceneClipToR2 } = require('./section10e-upload-to-r2.cjs');
+const { postProcessSceneClipArchiving } = require('./section5g-concat-and-music.cjs');
 
 console.log('[5H][INIT] Cleanup & progress module loaded.');
 
@@ -26,44 +27,37 @@ function safeDeleteProgressEntry(jobId) {
 }
 
 /**
- * Fires off post-job R2 ingestion of all external clips queued in jobContext.clipsToIngest.
- * Runs as background, does not block cleanup or delivery!
- * @param {object} jobContext - Should have .clipsToIngest array
+ * Kicks off async, fire-and-forget archiving of all scene clips from sceneClipMetaList.
+ * Does NOT block cleanup, runs in background. Logs all results.
+ * @param {Array} sceneClipMetaList - Array of { localFilePath, subject, sceneIdx, source, category }
  * @param {string} jobId
  */
-function fireAndForgetPostJobUploads(jobContext, jobId = '') {
-  if (
-    jobContext &&
-    Array.isArray(jobContext.clipsToIngest) &&
-    jobContext.clipsToIngest.length
-  ) {
-    console.log(`[5H][UPLOAD][${jobId}] Starting post-job R2 ingestion for ${jobContext.clipsToIngest.length} clips...`);
-    jobContext.clipsToIngest.forEach(clip => {
-      if (!clip.localPath || !clip.subject || clip.sceneIdx === undefined || !clip.source) {
-        console.error(`[5H][UPLOAD][${jobId}] Missing info for queued clip:`, clip);
-        return;
+function fireAndForgetPostJobSceneArchiving(sceneClipMetaList, jobId = '') {
+  if (Array.isArray(sceneClipMetaList) && sceneClipMetaList.length) {
+    console.log(`[5H][ARCHIVE][${jobId}] Starting async R2 archiving for ${sceneClipMetaList.length} scene clips...`);
+    // Use Section 5G's postProcessSceneClipArchiving for bulk processing (await inside fire-and-forget)
+    postProcessSceneClipArchiving(
+      sceneClipMetaList,
+      async (meta) => {
+        // [10E] Helper for correct foldering and de-dupe
+        const r2Path = await uploadSceneClipToR2(
+          meta.localFilePath,
+          meta.subject,
+          meta.sceneIdx,
+          meta.source,
+          meta.category
+        );
+        if (r2Path) {
+          console.log(`[5H][ARCHIVE][${jobId}] Scene archived:`, r2Path);
+        } else {
+          console.error(`[5H][ARCHIVE][${jobId}] Failed to archive scene:`, meta.localFilePath);
+        }
       }
-      // Pass categoryFolder if present (for smart foldering)
-      uploadToR2(
-        clip.localPath,
-        clip.subject,
-        clip.sceneIdx,
-        clip.source,
-        clip.categoryFolder || null
-      )
-        .then(r2Dest => {
-          if (r2Dest) {
-            console.log(`[5H][UPLOAD][${jobId}] Uploaded to R2: ${r2Dest}`);
-          } else {
-            console.error(`[5H][UPLOAD][${jobId}] Failed to upload:`, clip.localPath);
-          }
-        })
-        .catch(err => {
-          console.error(`[5H][UPLOAD][${jobId}] R2 upload error:`, err);
-        });
+    ).catch(err => {
+      console.error(`[5H][ARCHIVE][${jobId}] Async archiving error:`, err);
     });
   } else {
-    console.log(`[5H][UPLOAD][${jobId}] No clips queued for post-job R2 ingestion.`);
+    console.log(`[5H][ARCHIVE][${jobId}] No scene clips provided for post-job archiving.`);
   }
 }
 
@@ -71,16 +65,20 @@ function fireAndForgetPostJobUploads(jobContext, jobId = '') {
  * Cleans up all temp files and folders for a given job.
  * DELAYS removal from progress map by 30 seconds to allow frontend to fetch final result.
  * @param {string} jobId - The job's unique identifier
- * @param {object} [jobContext] - Optional, for post-job R2 uploads
+ * @param {object} [jobContext] - Optional, must have .sceneClipMetaList for archiving
  */
 function cleanupJob(jobId, jobContext = null) {
   console.log(`[5H][CLEANUP] Called for job: ${jobId}`);
 
-  // 1. Trigger post-job R2 ingestion (fire-and-forget, does not block)
+  // 1. Trigger post-job scene archiving (fire-and-forget, does not block)
   try {
-    fireAndForgetPostJobUploads(jobContext, jobId);
+    if (jobContext && Array.isArray(jobContext.sceneClipMetaList) && jobContext.sceneClipMetaList.length) {
+      fireAndForgetPostJobSceneArchiving(jobContext.sceneClipMetaList, jobId);
+    } else {
+      console.log(`[5H][CLEANUP][${jobId}] No sceneClipMetaList in jobContext, skipping archiving.`);
+    }
   } catch (err) {
-    console.error(`[5H][CLEANUP][${jobId}] Error launching post-job R2 ingestion:`, err);
+    console.error(`[5H][CLEANUP][${jobId}] Error launching post-job archiving:`, err);
   }
 
   // 2. Remove temp files
@@ -139,7 +137,7 @@ function updateJobProgress(jobId, statusObj) {
  * @param {string} jobId
  * @param {string} errorMsg
  * @param {object} [err] - Optional error object
- * @param {object} [jobContext] - Optional, for post-job R2 uploads
+ * @param {object} [jobContext] - Optional, for post-job scene archiving
  */
 function jobFatalError(jobId, errorMsg, err = null, jobContext = null) {
   const prog = getGlobalProgressMap();
@@ -153,5 +151,5 @@ module.exports = {
   getGlobalProgressMap,
   updateJobProgress,
   jobFatalError,
-  fireAndForgetPostJobUploads
+  fireAndForgetPostJobSceneArchiving
 };

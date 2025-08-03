@@ -13,9 +13,7 @@ console.log('[5C][INIT] Script & scene utilities loaded.');
 // === Pro Helper: Extracts the viral summary/hook (line 1, always topic-rich) ===
 function generateViralHookAndSummary(script, topic = '') {
   let lines = script.split('\n').map(line => line.trim()).filter(Boolean);
-  // Always grab the first line (script generator now always ensures it's a good hook)
   let summaryLine = lines[0] || '';
-  // Backup: If it's empty or generic, build one from topic
   if (!summaryLine || summaryLine.length < 8 || (topic && !summaryLine.toLowerCase().includes(topic.toLowerCase()))) {
     summaryLine = topic
       ? `Here’s why ${topic.replace(/^(the|a|an)\s+/i, '').trim()} is blowing up right now.`
@@ -28,11 +26,9 @@ function generateViralHookAndSummary(script, topic = '') {
 
 // === Visual Subject Extraction (AI/GPT-ready) ===
 function extractVisualSubject(line, mainTopic = '') {
-  // If main topic is in the line, always return that (anchors to video subject)
   if (mainTopic && line.toLowerCase().includes(mainTopic.toLowerCase())) {
     return mainTopic;
   }
-  // Fallback: return first strong noun/keyword
   const candidates = (line.match(/\b([A-Za-z]{4,})\b/g) || [])
     .filter(word =>
       !['this', 'that', 'they', 'will', 'have', 'with', 'from', 'your', 'about', 'there', 'their', 'which', 'when', 'just'].includes(word.toLowerCase())
@@ -55,23 +51,18 @@ function splitScriptToScenes(script, topic = '') {
     return [];
   }
 
-  // Step 1: Parse lines, remove blank/junk
   let rawLines = script.split('\n').map(line => line.trim()).filter(Boolean);
 
-  // Step 2: Extract viral summary/hook for scene 1
   const summaryLine = generateViralHookAndSummary(script, topic);
 
-  // Step 3: Remove summary/hook from remaining lines (prevent dupe)
   let restLines = rawLines.filter(l => l !== summaryLine && l.length > 4);
 
-  // Step 4: Main topic for all scene visual matching
   const mainTopic = topic && typeof topic === 'string' && topic.length > 1 ? topic : guessMainSubjectFromScenes(restLines);
 
-  // Step 5: Build scenes array, robust and bulletproof
   const scenes = [];
   const seenIds = new Set();
 
-  // === Scene 1: HOOK (always first line, always main topic)
+  // === Scene 1: HOOK
   const hookId = `hookscene-1-${uuid.v4()}`;
   scenes.push({
     id: hookId,
@@ -88,7 +79,7 @@ function splitScriptToScenes(script, topic = '') {
   if (restLines.length > 1) {
     const megaId = `megascene-2-${uuid.v4()}`;
     const megaTexts = [restLines[0], restLines[1]];
-    const megaSubject = extractVisualSubject(restLines[1], mainTopic); // Use second line for visual anchor
+    const megaSubject = extractVisualSubject(restLines[1], mainTopic);
     scenes.push({
       id: megaId,
       texts: megaTexts,
@@ -100,7 +91,7 @@ function splitScriptToScenes(script, topic = '') {
     seenIds.add(megaId);
     console.log(`[5C][MEGA] Created MEGA-SCENE: "${megaTexts[0]}" / "${megaTexts[1]}" [ID: ${megaId}] visualSubject="${megaSubject}"`);
 
-    // Scenes 3+: Each is normal (skip [0] and [1], included above)
+    // Scenes 3+: Each is normal (skip [0] and [1])
     for (let i = 2; i < restLines.length; ++i) {
       const sceneId = `scene${i + 1}-${uuid.v4()}`;
       if (seenIds.has(sceneId)) {
@@ -119,7 +110,6 @@ function splitScriptToScenes(script, topic = '') {
       console.log(`[5C][SCENE] Created scene ${i + 1}: "${restLines[i]}" [ID: ${sceneId}] visualSubject="${subject}"`);
     }
   } else if (restLines.length === 1) {
-    // Only one line left after hook
     const sceneId = `scene2-${uuid.v4()}`;
     const subject = extractVisualSubject(restLines[0], mainTopic);
     scenes.push({

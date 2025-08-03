@@ -13,7 +13,7 @@ const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { v4: uuidv4 } = require('uuid');
 
-// Use external music-moods (preferred, never repeats) if present
+// === Load music moods (if available) ===
 let musicMoods = null;
 try {
   musicMoods = require('./music-moods.cjs');
@@ -73,7 +73,7 @@ async function logFileProbe(file, label = 'PROBE') {
 }
 
 // === Bulletproof scenes (format/audio normalization) ===
-async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo) {
+async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo, sceneClipMetaList = null) {
   console.log('[5G][BULLETPROOF] bulletproofScenes called.');
   const fixed = [];
   for (let i = 0; i < sceneFiles.length; ++i) {
@@ -132,8 +132,10 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
           });
       });
       fixed.push(fixedPath);
+      if (sceneClipMetaList) sceneClipMetaList[i].localFilePath = fixedPath;
     } else {
       fixed.push(file);
+      if (sceneClipMetaList) sceneClipMetaList[i].localFilePath = file;
     }
   }
   console.log(`[5G][BULLETPROOF] ${fixed.length} valid scenes returned.`);
@@ -225,10 +227,18 @@ async function bulletproofFile(inputPath, workDir, label) {
 // ============================================
 // MAIN CONCAT: Output is 1080x1920 (portrait, shorts format)
 // ============================================
-async function concatScenes(sceneFiles, workDir) {
+/**
+ * Concat scenes, returns final concat file path.
+ * @param {string[]} sceneFiles - Array of scene .mp4s
+ * @param {string} workDir
+ * @param {Object[]} sceneClipMetaList - [NEW] Optional: Array of metadata for each scene (for archiving)
+ * @returns {Promise<string>}
+ */
+async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
   sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i + 1}: ${file}`));
 
+  // [NEW] Pass meta list to bulletproofScenes for accurate tracking after fixes
   let fixedScenes = await bulletproofScenes(
     sceneFiles,
     null,
@@ -247,7 +257,8 @@ async function concatScenes(sceneFiles, workDir) {
         });
       });
     },
-    null
+    null,
+    sceneClipMetaList // <--- track per-clip file path fixes
   );
 
   // Ensure all have audio
@@ -296,6 +307,34 @@ async function concatScenes(sceneFiles, workDir) {
         reject(err);
       });
   });
+}
+
+// === Async Scene Clip Archiver Hook (call this from 5H job cleanup) ===
+/**
+ * Called after video is finished. Kick off archiving scene clips to R2.
+ * @param {Object[]} sceneClipMetaList - Array of scene meta: { localFilePath, subject, sceneIdx, source, category }
+ * @param {Function} asyncArchiveFn - Function to call for each scene ({ localFilePath, subject, sceneIdx, source, category })
+ */
+async function postProcessSceneClipArchiving(sceneClipMetaList, asyncArchiveFn) {
+  if (!Array.isArray(sceneClipMetaList) || !sceneClipMetaList.length) {
+    console.warn('[5G][ARCHIVE][WARN] No sceneClipMetaList provided.');
+    return;
+  }
+  if (typeof asyncArchiveFn !== 'function') {
+    console.warn('[5G][ARCHIVE][WARN] No asyncArchiveFn provided.');
+    return;
+  }
+  console.log(`[5G][ARCHIVE][START] Archiving ${sceneClipMetaList.length} scene clips to R2...`);
+  for (let i = 0; i < sceneClipMetaList.length; i++) {
+    const meta = sceneClipMetaList[i];
+    try {
+      await asyncArchiveFn(meta);
+      console.log(`[5G][ARCHIVE][OK] Archived scene ${i + 1}/${sceneClipMetaList.length}:`, meta.localFilePath);
+    } catch (err) {
+      console.error(`[5G][ARCHIVE][ERR] Failed to archive scene ${i + 1}:`, meta.localFilePath, err);
+    }
+  }
+  console.log('[5G][ARCHIVE][DONE] All scene clips processed.');
 }
 
 // === Outro appender (bulletproof, both files forced to perfect audio/video for concat) ===
@@ -581,7 +620,7 @@ async function create9x16FromInput(inputPath, outputPath) {
 // MODULE EXPORTS
 // ============================================
 module.exports = {
-  concatScenes,
+  concatScenes, // (sceneFiles, workDir, sceneClipMetaList)
   ensureAudioStream,
   overlayMusic,
   appendOutro,
@@ -592,5 +631,6 @@ module.exports = {
   getRandomMusicFileForMood,
   simpleDetectMood,
   create16x9FromInput,
-  create9x16FromInput
+  create9x16FromInput,
+  postProcessSceneClipArchiving // NEW: bulk-archive scene clips after job
 };

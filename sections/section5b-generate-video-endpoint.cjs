@@ -28,7 +28,7 @@ const {
   overlayMusic,
   appendOutro,
   getUniqueFinalName,
-  pickMusicForMood // <-- handles mood, last track, anti-repeat, etc.
+  pickMusicForMood
 } = require('./section5g-concat-and-music.cjs');
 
 // === 5F: AV/Scene Mux Logic ===
@@ -91,7 +91,6 @@ function assertFileExists(file, label) {
 }
 
 // --- CATEGORY/TOPIC MAPPING ---
-// This ONLY returns "animals" (or similar) if mainTopic really matches
 function getCategoryFolder(mainTopic) {
   const lower = (mainTopic || '').toLowerCase();
   if (/haunt|castle|ghost|lore|myth|mystery|history|horror/.test(lower)) return 'lore_history_mystery_horror';
@@ -142,9 +141,9 @@ function registerGenerateVideoEndpoint(app, deps) {
     (async () => {
       const workDir = path.join(__dirname, '..', 'jobs', jobId);
 
-      // === 1. Init job context with queued clips and topic folder ===
+      // === 1. Init job context with scene metadata ===
       const jobContext = {
-        clipsToIngest: []
+        sceneClipMetaList: []
       };
 
       try {
@@ -156,13 +155,11 @@ function registerGenerateVideoEndpoint(app, deps) {
         const { script = '', voice = '', music = true, outro = true, provider = 'polly' } = req.body || {};
         if (!script || !voice) throw new Error('Missing script or voice');
         console.log(`[5B][INPUTS][${jobId}] Script length: ${script.length} | Voice: ${voice}`);
-
-        // SUPER LOGGING for debugging script parsing
         console.log(`[5B][SCRIPT][${jobId}] Full script input:\n${script}`);
 
         let scenes = depSplitScriptToScenes(script);
 
-        // BULLETPROOF: ensure valid objects, force visualSubject extraction for all
+        // Defensive scene handling & subject extraction (as before)
         scenes = Array.isArray(scenes) ? scenes : [];
         scenes = scenes.map((scene, idx) => {
           if (!scene || typeof scene !== 'object' || !Array.isArray(scene.texts)) {
@@ -187,54 +184,25 @@ function registerGenerateVideoEndpoint(app, deps) {
           return { ...scene, visualSubject: subject || scene.visualSubject || '' };
         });
 
-        // DIAGNOSTIC LOGGING: Show exact type and content
-        console.log(`[5B][SCENES][${jobId}] [TYPE] scenes typeof: ${typeof scenes}, Array: ${Array.isArray(scenes)}, Length: ${scenes?.length}`);
-        if (Array.isArray(scenes)) {
-          console.log(`[5B][SCENES][${jobId}] [ELEMENT TYPES]`, scenes.map((s, idx) =>
-            `[${idx}] type=${typeof s} texts=${s && typeof s === 'object' && s.texts ? 'OK' : 'NO'} subject="${s.visualSubject}"`
-          ));
-        }
-        console.log(`[5B][SCENES][${jobId}] Raw split scenes:`, JSON.stringify(scenes, null, 2));
-
-        if (!Array.isArray(scenes) || scenes.length === 0) throw new Error('[5B][ERR] No scenes parsed from script.');
-
-        // BULLETPROOF: If we detect array of strings, auto-wrap as objects
-        if (typeof scenes[0] === 'string') {
-          console.error(`[5B][DEFENSE][AUTO-FIX] scenes[] is array of strings, auto-wrapping...`);
-          scenes = scenes.map((line, idx) => ({
-            id: `autofix-scene${idx+1}-${uuidv4()}`,
-            texts: [line],
-            isMegaScene: false,
-            type: 'auto-wrap',
-            origIndices: [idx],
-            visualSubject: ''
-          }));
-          console.log(`[5B][DEFENSE][AUTO-FIX] scenes after wrap:`, JSON.stringify(scenes, null, 2));
-        }
-
-        // HARD DEFENSE: Filter out malformed scenes before mapping!
+        // Defensive filtering (as before)
         scenes = scenes.filter(s =>
           s && Array.isArray(s.texts) && typeof s.texts[0] === 'string' && s.texts[0].length > 0
         );
-        console.log(`[5B][SCENES][${jobId}] After filtering, valid scenes:`, JSON.stringify(scenes, null, 2));
+        if (!scenes.length) throw new Error('[5B][FATAL] No valid scenes found after filter!');
 
-        if (!scenes.length) {
-          throw new Error('[5B][FATAL] No valid scenes found after filter!');
-        }
-
-        // === Category folder auto-detection (based on main topic/scene 1) ===
+        // === Category folder detection ===
         const allSceneTexts = scenes.flatMap(s => Array.isArray(s.texts) ? s.texts : []);
         const mainTopic = allSceneTexts[0] || 'misc';
         const categoryFolder = getCategoryFolder(mainTopic);
         jobContext.categoryFolder = categoryFolder;
 
-        // === 2. SCENE/CLIP ASSIGNMENT (NO REPEATS, MEGA-SCENE LOGIC) ===
+        // === 2. SCENE/CLIP ASSIGNMENT ===
         const usedClips = [];
         const sceneFiles = [];
         let megaClipPath = null;
         let megaSceneTrimmedVideos = null;
 
-        // === 2a. MEGA-SUBJECT is always the *extracted subject* of the mega scene
+        // === 2a. Mega subject/clip logic (as before) ===
         let megaSubject = scenes.length > 1 && scenes[1].isMegaScene ? scenes[1].visualSubject : allSceneTexts[1] || allSceneTexts[0];
         if (!megaSubject || typeof megaSubject !== 'string' || megaSubject.length < 2) {
           megaSubject = allSceneTexts[1] || allSceneTexts[0];
@@ -243,9 +211,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         if (GENERIC_SUBJECTS.includes((megaSubject || '').toLowerCase())) {
           megaSubject = allSceneTexts[0];
         }
-        console.log(`[5B][MEGA-SUBJECT][${jobId}] Mega subject for main topic: "${megaSubject}"`);
-
-        // === 2b. Find mega-clip for scenes 1+2 (never reused for any other scene!)
         if (scenes.length > 1) {
           megaClipPath = await findClipForScene({
             subject: megaSubject,
@@ -258,30 +223,28 @@ function registerGenerateVideoEndpoint(app, deps) {
             jobId,
             megaSubject: megaSubject,
             jobContext,
-            categoryFolder // <-- Pass down for R2 ingestion!
+            categoryFolder
           });
           if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for mega-subject: "${megaSubject}"`);
           usedClips.push(megaClipPath);
-          console.log(`[5B][MEGA-CLIP][${jobId}] Mega clip selected: ${megaClipPath}`);
         }
 
         // === 2c. Process all scenes (assign unique clips, audio, mux, etc.) ===
         const sceneJobs = scenes.map((scene, i) => (async () => {
           let isMegaScene = !!scene.isMegaScene;
           let clipPath = null;
+          let sceneSubject = scene.visualSubject || (Array.isArray(scene.texts) && scene.texts[0]) || allSceneTexts[i];
+          if (GENERIC_SUBJECTS.includes((sceneSubject || '').toLowerCase())) {
+            sceneSubject = allSceneTexts[0];
+          }
 
-          // CLIP MATCHING (1+2 always share, rest unique, never reused)
+          // CLIP MATCHING
           if (i === 0 || isMegaScene) {
             clipPath = megaClipPath;
-            console.log(`[5B][CLIP][${jobId}] Scene ${i + 1}: Using MEGA clip: ${clipPath}`);
           } else {
-            let subject = scene.visualSubject || (Array.isArray(scene.texts) && scene.texts[0]) || allSceneTexts[i];
-            if (GENERIC_SUBJECTS.includes((subject || '').toLowerCase())) {
-              subject = allSceneTexts[0];
-            }
             try {
               clipPath = await findClipForScene({
-                subject,
+                subject: sceneSubject,
                 sceneIdx: i,
                 allSceneTexts,
                 mainTopic: allSceneTexts[0],
@@ -290,17 +253,25 @@ function registerGenerateVideoEndpoint(app, deps) {
                 workDir,
                 jobId,
                 jobContext,
-                categoryFolder // <-- Pass down for R2 ingestion!
+                categoryFolder
               });
             } catch (e) {
               console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for scene ${i + 1}:`, e);
             }
             if (!clipPath) throw new Error(`[5B][ERR] No clip found for scene ${i + 1}`);
             usedClips.push(clipPath);
-            console.log(`[5B][CLIP][${jobId}] Scene ${i + 1}: Clip selected: ${clipPath}`);
           }
-
           assertFileExists(clipPath, `CLIP_SCENE_${i+1}`);
+
+          // === SCENE CLIP ARCHIVING METADATA ===
+          // Add metadata for this scene to jobContext.sceneClipMetaList
+          jobContext.sceneClipMetaList.push({
+            localFilePath: clipPath,
+            subject: sceneSubject,
+            sceneIdx: i,
+            source: (clipPath || '').includes('pexels') ? 'pexels' : (clipPath || '').includes('pixabay') ? 'pixabay' : 'r2',
+            category: categoryFolder
+          });
 
           // AUDIO GENERATION WITH CACHE
           const audioHash = hashForCache(JSON.stringify({
@@ -312,26 +283,19 @@ function registerGenerateVideoEndpoint(app, deps) {
           let audioPath = audioCachePath;
 
           let audioPreExists = fs.existsSync(audioCachePath) && fs.statSync(audioCachePath).size > 10000;
-          if (audioPreExists) {
-            console.log(`[5B][CACHE][AUDIO][${jobId}] Scene ${i + 1}: HIT: Using cached audio: ${audioCachePath}`);
-          } else {
+          if (!audioPreExists) {
             if (isMegaScene) {
               await deps.createMegaSceneAudio(scene.texts, voice, audioCachePath, provider, workDir);
             } else {
               await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
             }
             assertFileExists(audioCachePath, isMegaScene ? `AUDIO_MEGA_${i+1}` : `AUDIO_SCENE_${i+1}`);
-            console.log(`[5B][CACHE][AUDIO][${jobId}] Scene ${i + 1}: MISS: Generated and cached audio: ${audioCachePath}`);
           }
 
-          // Audio duration
           let audioDuration = -1;
           try {
             audioDuration = fs.existsSync(audioPath) ? (await getDuration(audioPath)) : -1;
-            console.log(`[5B][AUDIO][DEBUG][${jobId}] Scene ${i+1}: Audio file duration: ${audioDuration}s`);
-          } catch (err) {
-            console.error(`[5B][AUDIO][DEBUG][ERR] Could not get audio duration for scene ${i+1}: ${err}`);
-          }
+          } catch (err) {}
           if (audioDuration <= 0.01) {
             throw new Error(`[5B][AUDIO][FATAL] Audio file for scene ${i+1} is empty or corrupted: ${audioPath}`);
           }
@@ -347,12 +311,11 @@ function registerGenerateVideoEndpoint(app, deps) {
           let muxedScenePath = videoCachePath;
 
           if (fs.existsSync(videoCachePath) && fs.statSync(videoCachePath).size > 100000) {
-            console.log(`[5B][CACHE][VIDEO][${jobId}] Scene ${i + 1}: HIT: Using cached muxed video: ${videoCachePath}`);
+            // Cache hit
           } else {
-            // MEGA-SCENE: Only split and trim mega scene clip ONCE, cache both
             if (isMegaScene) {
               if (!megaSceneTrimmedVideos) {
-                const megaAudio1 = audioPath; // scene 1
+                const megaAudio1 = audioPath;
                 const nextAudioHash = hashForCache(JSON.stringify({
                   text: scenes[1].texts,
                   voice,
@@ -376,29 +339,17 @@ function registerGenerateVideoEndpoint(app, deps) {
               await muxVideoWithNarration(trimmedVideoPath, audioPath, videoCachePath);
               assertFileExists(videoCachePath, `MUXED_MEGA_${i+1}`);
             } else {
-              // NORMAL SCENE
               const narrationDuration = audioDuration;
               const trimmedVideoPath = path.join(workDir, `scene${i+1}-trimmed.mp4`);
               await trimForNarration(clipPath, trimmedVideoPath, narrationDuration);
               await muxVideoWithNarration(trimmedVideoPath, audioPath, videoCachePath);
               assertFileExists(videoCachePath, `MUXED_SCENE_${i+1}`);
             }
-            console.log(`[5B][CACHE][VIDEO][${jobId}] Scene ${i + 1}: MISS: Generated and cached muxed video: ${videoCachePath}`);
           }
-
-          // Confirm muxed video duration
-          try {
-            const vidDur = await getDuration(videoCachePath);
-            console.log(`[5B][MUXED][DEBUG][${jobId}] Scene ${i+1}: muxed video duration: ${vidDur}s (expected >=${audioDuration}s)`);
-          } catch(e) {}
-
           return { idx: i, muxedScenePath };
         })());
 
         progress[jobId] = { percent: 10, status: `Processing all scenes in parallel (with caching)...` };
-        console.log(`[5B][SCENES][${jobId}] Starting parallel scene processing (${scenes.length} scenes, caching enabled)...`);
-
-        // Wait for ALL scene jobs to complete
         let allScenes;
         try {
           allScenes = await Promise.all(sceneJobs);
@@ -408,7 +359,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
 
         progress[jobId] = { percent: 40, status: 'Stitching your video together...' };
-        console.log(`[5B][SCENES][${jobId}] All scenes muxed:`, sceneFiles);
 
         // === 3. Bulletproof video scenes (codec/size) ===
         let refInfo = null;
@@ -429,7 +379,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         let concatPath;
         try {
           progress[jobId] = { percent: 60, status: 'Combining everything into one amazing video...' };
-          concatPath = await concatScenes(sceneFiles, workDir);
+          concatPath = await concatScenes(sceneFiles, workDir, jobContext.sceneClipMetaList);
           assertFileExists(concatPath, 'CONCAT_OUT');
         } catch (e) {
           throw new Error(`[5B][CONCAT][ERR][${jobId}] concatScenes failed: ${e}`);
@@ -452,7 +402,6 @@ function registerGenerateVideoEndpoint(app, deps) {
             progress[jobId] = { percent: 80, status: 'Adding background music...' };
             const chosenMusic = pickMusicForMood ? await pickMusicForMood(script, workDir, jobId) : null;
             if (chosenMusic) {
-              console.log(`[5B][MUSIC][${jobId}] Music mood selected:`, chosenMusic);
               const musicOutput = path.join(workDir, getUniqueFinalName('with-music'));
               await overlayMusic(withAudioPath, chosenMusic, musicOutput);
               assertFileExists(musicOutput, 'MUSIC_OUT');
@@ -460,14 +409,12 @@ function registerGenerateVideoEndpoint(app, deps) {
               progress[jobId] = { percent: 82, status: 'Background music ready!' };
             } else {
               progress[jobId] = { percent: 80, status: 'No music found, skipping...' };
-              console.warn(`[5B][MUSIC][WARN][${jobId}] No music was selected by mood selector (skipping)`);
             }
           } catch (e) {
             throw new Error(`[5B][MUSIC][ERR][${jobId}] overlayMusic failed: ${e}`);
           }
         } else {
           progress[jobId] = { percent: 80, status: 'Music skipped (user setting).' };
-          console.log(`[5B][MUSIC][${jobId}] Music overlay skipped by user setting.`);
         }
 
         // === 7. Append outro (if enabled) ===
@@ -483,17 +430,14 @@ function registerGenerateVideoEndpoint(app, deps) {
               assertFileExists(outroOutput, 'OUTRO_OUT');
               finalPath = outroOutput;
               progress[jobId] = { percent: 92, status: 'Outro added! Wrapping up...' };
-              console.log(`[5B][FINAL][DEBUG] Final output (with outro): ${finalPath} (${fs.statSync(finalPath).size} bytes)`);
             } catch (e) {
               throw new Error(`[5B][OUTRO][ERR][${jobId}] appendOutro failed: ${e}`);
             }
           } else {
             progress[jobId] = { percent: 90, status: 'Finalizing your masterpiece...' };
-            console.warn(`[5B][OUTRO][WARN] Outro file does not exist at: ${outroPath} (skipping outro step)`);
           }
         } else {
           progress[jobId] = { percent: 90, status: 'Outro skipped (user setting).' };
-          console.log(`[5B][OUTRO][${jobId}] Outro skipped by user setting.`);
         }
 
         // === 8. Upload final video to R2 and finish ===
@@ -503,7 +447,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
         } catch (uploadErr) {
           progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
-          console.error(`[5B][R2][ERR][${jobId}] Cloudflare upload failed:`, uploadErr);
         }
 
       } catch (err) {
@@ -512,7 +455,7 @@ function registerGenerateVideoEndpoint(app, deps) {
       } finally {
         if (cleanupJob) {
           try {
-            cleanupJob(jobId, jobContext); // <-- Pass jobContext for post-job ingestion!
+            cleanupJob(jobId, jobContext); // <--- Pass jobContext for async R2 archiving!
           } catch (e) {
             console.warn(`[5B][CLEANUP][WARN][${jobId}] Cleanup failed:`, e);
           }

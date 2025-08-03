@@ -6,6 +6,7 @@
 // Upgraded: Main subject/mega-scene anchoring for visual continuity
 // Dedupes all clips used per job. Bulletproof R2 matching.
 // R2 ingestion is now queued, not blocking, with categoryFolder!
+// 2024-08: STRICT SUBJECT MATCHING — Never allows unrelated clips
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
@@ -26,6 +27,15 @@ const GENERIC_SUBJECTS = [
 // --- Fuzzy normalize: lower, remove space, hyphen, underscore, dot ---
 function normalizeStr(str) {
   return (str || '').toLowerCase().replace(/[\s_\-\.]/g, '');
+}
+
+// === STRICT SUBJECT CHECK ===
+// Only accepts results (filename/metadata) that contain *exact* subject as a word
+function subjectInFilename(filename, subject) {
+  if (!filename || !subject) return false;
+  const safeSubject = cleanForFilename(subject);
+  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|$)`, 'i');
+  return re.test(cleanForFilename(filename));
 }
 
 // --- Main orchestrator ---
@@ -50,7 +60,7 @@ async function findClipForScene({
   megaSubject = null,
   forceClipPath = null,
   jobContext = {},
-  categoryFolder // <--- must be passed in from your orchestrator!
+  categoryFolder
 }) {
   // === Main subject selection logic ===
   let searchSubject = subject;
@@ -64,7 +74,7 @@ async function findClipForScene({
       searchSubject = mainTopic;
       console.log(`[5D][ANCHOR][${jobId}] Fallback to mainTopic for mega-scene: "${searchSubject}"`);
     } else {
-      searchSubject = allSceneTexts[0]; // absolute fallback
+      searchSubject = allSceneTexts[0];
       console.log(`[5D][ANCHOR][${jobId}] Final fallback to first scene text: "${searchSubject}"`);
     }
   }
@@ -78,6 +88,11 @@ async function findClipForScene({
       searchSubject = allSceneTexts[0];
       console.log(`[5D][FALLBACK][${jobId}] Subject was generic, using first scene text: "${searchSubject}"`);
     }
+  }
+
+  if (!searchSubject || searchSubject.length < 2) {
+    console.error(`[5D][FATAL][${jobId}] No valid subject for scene ${sceneIdx + 1}.`);
+    return null;
   }
 
   // For debugging, optionally force a specific clip path
@@ -96,148 +111,160 @@ async function findClipForScene({
     return null;
   }
 
-  // --- Dedicated R2 clip search with advanced fuzzy deduping logic ---
+  // --- Dedicated R2 clip search: Strict subject enforcement! ---
   async function findDedupedR2Clip(searchPhrase, usedClipsArr) {
     try {
       const r2Files = await findR2ClipForScene.getAllFiles
         ? await findR2ClipForScene.getAllFiles()
         : [];
-      const normPhrase = normalizeStr(searchPhrase);
+      const safePhrase = cleanForFilename(searchPhrase);
       let found = null;
-      console.log(`[5D][R2][${jobId}] Searching for phrase: "${searchPhrase}" (norm: "${normPhrase}")`);
+      console.log(`[5D][R2][${jobId}] Searching for strict subject: "${searchPhrase}" (safe: "${safePhrase}")`);
       for (const fname of r2Files) {
         const base = path.basename(fname);
-        const normBase = normalizeStr(base);
         if (usedClipsArr.includes(fname)) {
           console.log(`[5D][R2][${jobId}] SKIP used: "${base}"`);
           continue;
         }
-        if (normBase.includes(normPhrase) || normPhrase.includes(normBase)) {
+        if (subjectInFilename(base, searchPhrase)) {
           found = fname;
-          console.log(`[5D][R2][${jobId}] MATCHED: "${base}" for "${searchPhrase}"`);
+          console.log(`[5D][R2][${jobId}] STRICT MATCH: "${base}" contains subject "${safePhrase}"`);
           break;
         } else {
-          console.log(`[5D][R2][${jobId}] No match: "${base}"`);
+          console.log(`[5D][R2][${jobId}] No strict subject match: "${base}"`);
         }
       }
       if (!found) {
-        const phraseTokens = normPhrase.split(/[\s\-_\.\+]/).filter(Boolean);
-        for (const fname of r2Files) {
-          const base = path.basename(fname);
-          const normBase = normalizeStr(base);
-          if (usedClipsArr.includes(fname)) continue;
-          if (phraseTokens.some(token => normBase.includes(token))) {
-            found = fname;
-            console.log(`[5D][R2][${jobId}] PARTIAL TOKEN MATCH: "${base}" <- ${phraseTokens.join(", ")}`);
-            break;
-          }
-        }
-      }
-      if (!found) {
-        console.log(`[5D][R2][${jobId}] No valid R2 match for: "${searchPhrase}"`);
+        console.log(`[5D][R2][${jobId}] No valid R2 strict subject match for: "${searchPhrase}"`);
       }
       return found;
     } catch (err) {
-      console.error(`[5D][R2][ERR][${jobId}] Error during advanced R2 matching:`, err);
+      console.error(`[5D][R2][ERR][${jobId}] Error during strict R2 matching:`, err);
       return null;
     }
   }
 
-  // --- START MATCHING, R2 always preferred ---
+  // --- R2 is always preferred, strict subject required ---
   let r2Result = null;
   if (findR2ClipForScene.getAllFiles) {
     r2Result = await findDedupedR2Clip(searchSubject, usedClips);
     if (r2Result) {
-      console.log(`[5D][PICK][${jobId}] R2 deduped match: ${r2Result}`);
+      console.log(`[5D][PICK][${jobId}] R2 strict subject match: ${r2Result}`);
       return r2Result;
     }
-    console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
+    console.log(`[5D][FALLBACK][${jobId}] No strict R2 found, trying Pexels/Pixabay/Unsplash.`);
   } else {
     try {
       r2Result = await findR2ClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
-      if (r2Result && !usedClips.includes(r2Result)) {
-        console.log(`[5D][PICK][${jobId}] R2 legacy match: ${r2Result}`);
+      if (r2Result && !usedClips.includes(r2Result) && subjectInFilename(r2Result, searchSubject)) {
+        console.log(`[5D][PICK][${jobId}] R2 legacy strict subject match: ${r2Result}`);
         return r2Result;
       }
     } catch (e) {
       console.error(`[5D][R2][ERR][${jobId}]`, e);
     }
-    console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
+    console.log(`[5D][FALLBACK][${jobId}] No strict R2 found, trying Pexels/Pixabay/Unsplash.`);
   }
 
-  // --- Try Pexels ---
+  // --- Try Pexels (STRICT subject in description/tags) ---
   let pexelsResult = null;
   try {
     pexelsResult = await findPexelsClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
     if (pexelsResult && !usedClips.includes(pexelsResult)) {
-      console.log(`[5D][PICK][${jobId}] Pexels match: ${pexelsResult}`);
-      // === NEW: Queue for post-job R2 ingestion, do not upload now!
-      if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
-        jobContext.clipsToIngest.push({
-          localPath: pexelsResult,
-          subject: searchSubject,
-          sceneIdx,
-          source: 'pexels',
-          categoryFolder
-        });
-        console.log(`[5D][QUEUE][${jobId}] Queued Pexels clip for R2 upload:`, pexelsResult, '→', categoryFolder);
+      // ENFORCE subject match in filename or API tags/desc (assume helper supports .meta)
+      let valid = false;
+      if (pexelsResult.meta && Array.isArray(pexelsResult.meta.tags)) {
+        valid = pexelsResult.meta.tags.some(tag => cleanForFilename(tag) === cleanForFilename(searchSubject));
+      } else if (typeof pexelsResult === 'string') {
+        valid = subjectInFilename(pexelsResult, searchSubject);
       }
-      return pexelsResult;
+      if (valid) {
+        console.log(`[5D][PICK][${jobId}] Pexels strict subject match: ${pexelsResult.path || pexelsResult}`);
+        if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
+          jobContext.clipsToIngest.push({
+            localPath: pexelsResult.path || pexelsResult,
+            subject: searchSubject,
+            sceneIdx,
+            source: 'pexels',
+            categoryFolder
+          });
+          console.log(`[5D][QUEUE][${jobId}] Queued Pexels clip for R2 upload:`, pexelsResult.path || pexelsResult, '→', categoryFolder);
+        }
+        return pexelsResult.path || pexelsResult;
+      } else {
+        console.warn(`[5D][PEXELS][${jobId}] Pexels clip rejected (no subject match): ${pexelsResult.path || pexelsResult}`);
+      }
     }
   } catch (e) {
     console.error(`[5D][PEXELS][ERR][${jobId}]`, e);
   }
 
-  // --- Try Pixabay ---
+  // --- Try Pixabay (STRICT subject in description/tags) ---
   let pixabayResult = null;
   try {
     pixabayResult = await findPixabayClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
     if (pixabayResult && !usedClips.includes(pixabayResult)) {
-      console.log(`[5D][PICK][${jobId}] Pixabay match: ${pixabayResult}`);
-      // === NEW: Queue for post-job R2 ingestion, do not upload now!
-      if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
-        jobContext.clipsToIngest.push({
-          localPath: pixabayResult,
-          subject: searchSubject,
-          sceneIdx,
-          source: 'pixabay',
-          categoryFolder
-        });
-        console.log(`[5D][QUEUE][${jobId}] Queued Pixabay clip for R2 upload:`, pixabayResult, '→', categoryFolder);
+      let valid = false;
+      if (pixabayResult.meta && Array.isArray(pixabayResult.meta.tags)) {
+        valid = pixabayResult.meta.tags.some(tag => cleanForFilename(tag) === cleanForFilename(searchSubject));
+      } else if (typeof pixabayResult === 'string') {
+        valid = subjectInFilename(pixabayResult, searchSubject);
       }
-      return pixabayResult;
+      if (valid) {
+        console.log(`[5D][PICK][${jobId}] Pixabay strict subject match: ${pixabayResult.path || pixabayResult}`);
+        if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
+          jobContext.clipsToIngest.push({
+            localPath: pixabayResult.path || pixabayResult,
+            subject: searchSubject,
+            sceneIdx,
+            source: 'pixabay',
+            categoryFolder
+          });
+          console.log(`[5D][QUEUE][${jobId}] Queued Pixabay clip for R2 upload:`, pixabayResult.path || pixabayResult, '→', categoryFolder);
+        }
+        return pixabayResult.path || pixabayResult;
+      } else {
+        console.warn(`[5D][PIXABAY][${jobId}] Pixabay clip rejected (no subject match): ${pixabayResult.path || pixabayResult}`);
+      }
     }
   } catch (e) {
     console.error(`[5D][PIXABAY][ERR][${jobId}]`, e);
   }
 
-  // --- Try Unsplash (image fallback, not video) ---
+  // --- Try Unsplash (image fallback, not video, strict match) ---
   let unsplashResult = null;
   try {
     unsplashResult = await findUnsplashImageForScene(searchSubject, workDir, sceneIdx, jobId, usedClips, jobContext);
     if (unsplashResult && !usedClips.includes(unsplashResult)) {
-      console.log(`[5D][PICK][${jobId}] Unsplash image fallback match: ${unsplashResult}`);
-      // (Already queued in helper if jobContext given)
-      return unsplashResult;
+      if (subjectInFilename(unsplashResult, searchSubject)) {
+        console.log(`[5D][PICK][${jobId}] Unsplash image strict subject match: ${unsplashResult}`);
+        return unsplashResult;
+      } else {
+        console.warn(`[5D][UNSPLASH][${jobId}] Unsplash image rejected (no subject match): ${unsplashResult}`);
+      }
     }
   } catch (e) {
     console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
   }
 
-  // --- Final fallback: Ken Burns still ---
+  // --- Final fallback: Ken Burns still (strict subject in file/image name) ---
   let kenBurnsResult = null;
   try {
     kenBurnsResult = await fallbackKenBurnsVideo(searchSubject, workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsResult && !usedClips.includes(kenBurnsResult)) {
-      console.log(`[5D][PICK][${jobId}] KenBurns fallback match: ${kenBurnsResult}`);
-      return kenBurnsResult;
+      if (subjectInFilename(kenBurnsResult, searchSubject)) {
+        console.log(`[5D][PICK][${jobId}] KenBurns fallback strict subject match: ${kenBurnsResult}`);
+        return kenBurnsResult;
+      } else {
+        console.warn(`[5D][KENBURNS][${jobId}] KenBurns fallback rejected (no subject match): ${kenBurnsResult}`);
+      }
     }
   } catch (e) {
     console.error(`[5D][KENBURNS][ERR][${jobId}]`, e);
   }
 
-  // If nothing at all was found:
-  console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for "${searchSubject}" (scene ${sceneIdx + 1})`);
+  // === If nothing at all was found ===
+  console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for STRICT SUBJECT "${searchSubject}" (scene ${sceneIdx + 1})`);
   return null;
 }
 
