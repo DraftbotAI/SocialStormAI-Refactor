@@ -39,6 +39,9 @@ const {
   splitVideoForFirstTwoScenes
 } = require('./section5f-video-processing.cjs');
 
+// === 5H: Job Cleanup (with post-job R2 ingestion) ===
+const { cleanupJob } = require('./section5h-job-cleanup.cjs');
+
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
 
 // === CACHE DIRS ===
@@ -87,6 +90,16 @@ function assertFileExists(file, label) {
   }
 }
 
+// --- CATEGORY/TOPIC MAPPING (simple example) ---
+function getCategoryFolder(mainTopic) {
+  const lower = (mainTopic || '').toLowerCase();
+  if (/haunt|castle|ghost|lore|myth|mystery|history|horror/.test(lower)) return 'lore_history_mystery_horror';
+  if (/basketball|soccer|sports|lebron|fitness|exercise|workout|football/.test(lower)) return 'sports_fitness';
+  if (/car|truck|tesla|vehicle|drive|race/.test(lower)) return 'cars_vehicles';
+  // ... add more rules as you wish
+  return 'misc';
+}
+
 // ===========================================================
 // REGISTER ENDPOINT
 // ===========================================================
@@ -101,7 +114,6 @@ function registerGenerateVideoEndpoint(app, deps) {
     createSceneAudio,
     createMegaSceneAudio,
     getAudioDuration, getVideoInfo, standardizeVideo,
-    cleanupJob,
     progress, voices, POLLY_VOICE_IDS,
   } = deps;
 
@@ -127,6 +139,12 @@ function registerGenerateVideoEndpoint(app, deps) {
     // --- MAIN VIDEO JOB HANDLER ---
     (async () => {
       const workDir = path.join(__dirname, '..', 'jobs', jobId);
+
+      // === 1. Init job context with queued clips and topic folder ===
+      const jobContext = {
+        clipsToIngest: []
+      };
+
       try {
         fs.mkdirSync(workDir, { recursive: true });
         progress[jobId] = { percent: 2, status: 'Setting up your project...' };
@@ -202,13 +220,17 @@ function registerGenerateVideoEndpoint(app, deps) {
           throw new Error('[5B][FATAL] No valid scenes found after filter!');
         }
 
+        // === Category folder auto-detection (based on main topic/scene 1) ===
+        const allSceneTexts = scenes.flatMap(s => Array.isArray(s.texts) ? s.texts : []);
+        const mainTopic = allSceneTexts[0] || 'misc';
+        const categoryFolder = getCategoryFolder(mainTopic);
+        jobContext.categoryFolder = categoryFolder;
+
         // === 2. SCENE/CLIP ASSIGNMENT (NO REPEATS, MEGA-SCENE LOGIC) ===
         const usedClips = [];
         const sceneFiles = [];
         let megaClipPath = null;
         let megaSceneTrimmedVideos = null;
-
-        const allSceneTexts = scenes.flatMap(s => Array.isArray(s.texts) ? s.texts : []);
 
         // === 2a. MEGA-SUBJECT is always the *extracted subject* of the mega scene
         let megaSubject = scenes.length > 1 && scenes[1].isMegaScene ? scenes[1].visualSubject : allSceneTexts[1] || allSceneTexts[0];
@@ -232,7 +254,9 @@ function registerGenerateVideoEndpoint(app, deps) {
             usedClips,
             workDir,
             jobId,
-            megaSubject: megaSubject
+            megaSubject: megaSubject,
+            jobContext,
+            categoryFolder // <-- Pass down for R2 ingestion!
           });
           if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for mega-subject: "${megaSubject}"`);
           usedClips.push(megaClipPath);
@@ -262,7 +286,9 @@ function registerGenerateVideoEndpoint(app, deps) {
                 isMegaScene: false,
                 usedClips,
                 workDir,
-                jobId
+                jobId,
+                jobContext,
+                categoryFolder // <-- Pass down for R2 ingestion!
               });
             } catch (e) {
               console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for scene ${i + 1}:`, e);
@@ -422,7 +448,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         if (music) {
           try {
             progress[jobId] = { percent: 80, status: 'Adding background music...' };
-            // Use jobId as anti-repeat token for pickMusicForMood, so never repeats in parallel
             const chosenMusic = pickMusicForMood ? await pickMusicForMood(script, workDir, jobId) : null;
             if (chosenMusic) {
               console.log(`[5B][MUSIC][${jobId}] Music mood selected:`, chosenMusic);
@@ -485,7 +510,7 @@ function registerGenerateVideoEndpoint(app, deps) {
       } finally {
         if (cleanupJob) {
           try {
-            cleanupJob(jobId);
+            cleanupJob(jobId, jobContext); // <-- Pass jobContext for post-job ingestion!
           } catch (e) {
             console.warn(`[5B][CLEANUP][WARN][${jobId}] Cleanup failed:`, e);
           }

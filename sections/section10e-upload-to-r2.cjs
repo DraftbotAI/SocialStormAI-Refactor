@@ -1,0 +1,76 @@
+// ========================================================
+// SECTION 10E: UPLOAD TO R2 HELPER (Auto-ingest for library)
+// Uploads to socialstorm-library/[category]/ with bulletproof naming
+// ========================================================
+const fs = require('fs');
+const path = require('path');
+const { s3Client, PutObjectCommand, HeadObjectCommand } = require('./section1-setup.cjs');
+
+/**
+ * Cleans any string for use as a folder or filename.
+ */
+function cleanForFilename(str) {
+  return (str || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')  // Replace non-alphanum with underscore
+    .replace(/_+/g, '_')          // Collapse underscores
+    .replace(/^_+|_+$/g, '')      // Trim leading/trailing
+    .slice(0, 70);
+}
+
+/**
+ * Uploads a file to R2 in the /socialstorm-library/[category]/ folder with detailed filename.
+ * @param {string} localFilePath - Path to local file (video/image)
+ * @param {string} subject - Main subject/scene description (for filename)
+ * @param {number} sceneIdx - Scene index (for filename)
+ * @param {string} source - Source (pexels, pixabay, unsplash, bing, etc)
+ * @param {string} categoryFolder - Top-level topic/folder (e.g. "lore_history_mystery_horror")
+ * @returns {Promise<string|false>} - Returns R2 path string on success, false on fail
+ */
+async function uploadToR2(localFilePath, subject, sceneIdx, source, categoryFolder) {
+  try {
+    if (!fs.existsSync(localFilePath)) {
+      console.error('[10E][UPLOAD][FAIL] Local file not found:', localFilePath);
+      return false;
+    }
+
+    const ext = path.extname(localFilePath) || '.mp4';
+    const baseName = path.basename(localFilePath, ext);
+    const subjectClean = cleanForFilename(subject);
+    const safeSource = cleanForFilename(source);
+    const catFolder = cleanForFilename(categoryFolder);
+
+    // Final R2 path: socialstorm-library/category/subject__sceneIdx-source-original.ext
+    const r2DestPath = `socialstorm-library/${catFolder}/${subjectClean}__${sceneIdx}-${safeSource}-${baseName}${ext}`;
+
+    // Skip upload if already present in R2
+    try {
+      await s3Client.send(new HeadObjectCommand({
+        Bucket: process.env.R2_VIDEOS_BUCKET,
+        Key: r2DestPath
+      }));
+      console.log(`[10E][UPLOAD][SKIP] File already exists in R2: ${r2DestPath}`);
+      return r2DestPath; // Already there, skip
+    } catch (_) {
+      // Not found, continue to upload
+    }
+
+    const fileBuffer = fs.readFileSync(localFilePath);
+    await s3Client.send(new PutObjectCommand({
+      Bucket: process.env.R2_VIDEOS_BUCKET,
+      Key: r2DestPath,
+      Body: fileBuffer,
+      ACL: 'public-read',
+      ContentType: localFilePath.endsWith('.mp4')
+        ? 'video/mp4'
+        : (localFilePath.endsWith('.jpg') || localFilePath.endsWith('.jpeg')) ? 'image/jpeg' : 'application/octet-stream'
+    }));
+    console.log(`[10E][UPLOAD][OK] Uploaded to R2: ${r2DestPath}`);
+    return r2DestPath;
+  } catch (err) {
+    console.error('[10E][UPLOAD][FAIL]', err);
+    return false;
+  }
+}
+
+module.exports = { uploadToR2, cleanForFilename };
