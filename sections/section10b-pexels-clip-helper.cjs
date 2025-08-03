@@ -3,6 +3,7 @@
 // Finds and downloads best-matching video from Pexels API
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Parallel-safe: unique file output per job/scene
+// 2024-08: Upgraded scoring, logging, and multi-word matching
 // ===========================================================
 
 const axios = require('axios');
@@ -20,20 +21,27 @@ if (!PEXELS_API_KEY) {
 // --- Utility: Defensive keyword cleaning for Pexels queries ---
 function cleanQuery(str) {
   if (!str) return '';
-  // Remove quotes, weird chars, and extra spaces
   return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
 }
 
+function getKeywords(str) {
+  return String(str)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .split(/[\s\-]+/)
+    .filter(w => w.length > 2);
+}
+
 // --- File validation ---
-function isValidClip(path, jobId) {
+function isValidClip(filePath, jobId) {
   try {
-    if (!fs.existsSync(path)) {
-      console.warn(`[10B][DL][${jobId}] File does not exist: ${path}`);
+    if (!fs.existsSync(filePath)) {
+      console.warn(`[10B][DL][${jobId}] File does not exist: ${filePath}`);
       return false;
     }
-    const size = fs.statSync(path).size;
+    const size = fs.statSync(filePath).size;
     if (size < 2048) {
-      console.warn(`[10B][DL][${jobId}] File too small or broken: ${path} (${size} bytes)`);
+      console.warn(`[10B][DL][${jobId}] File too small or broken: ${filePath} (${size} bytes)`);
       return false;
     }
     return true;
@@ -70,6 +78,57 @@ async function downloadPexelsVideoToLocal(url, outPath, jobId) {
   }
 }
 
+// --- Scoring function: Smartest possible match (phrase, keywords, aspect, etc) ---
+function scorePexelsMatch(video, file, subject, usedClips = []) {
+  let score = 0;
+  const cleanedSubject = cleanQuery(subject).toLowerCase();
+  const subjectWords = getKeywords(subject);
+
+  // Main filename/description for scoring (title, tags, and user, if present)
+  const fields = [
+    (video?.user?.name || ''),
+    (video?.url || ''),
+    (file?.link || ''),
+    (file?.file_type || ''),
+    ...(video?.tags ? video.tags.map(t => t.title || t) : [])
+  ].join(' ').toLowerCase();
+
+  // Phrase match
+  if (fields.includes(cleanedSubject)) score += 60;
+
+  // All words present
+  const allWordsPresent = subjectWords.every(w => fields.includes(w));
+  if (allWordsPresent && subjectWords.length > 1) score += 30;
+
+  // Each individual keyword present
+  subjectWords.forEach(word => {
+    if (fields.includes(word)) score += 5;
+  });
+
+  // Aspect ratio: prefer portrait (9:16), then 16:9
+  if (file.width > file.height) score += 10; // Landscape slightly preferred for shorts (background blur)
+  if (file.width / file.height > 1.4 && file.width / file.height < 2.0) score += 6; // 16:9-ish
+  if (file.height / file.width > 1.7 && file.height / file.width < 2.1) score += 12; // 9:16 portrait perfect
+
+  // Video quality/length
+  score += file.height >= 720 ? 5 : 0;
+  score += file.file_type === 'video/mp4' ? 2 : 0;
+  score += Math.floor(file.width / 120);
+
+  // Penalize used/duplicate clips
+  if (usedClips && usedClips.some(u => u.includes(file.link) || file.link.includes(u))) {
+    score -= 100;
+  }
+
+  // Penalize very short clips
+  if (video.duration && video.duration < 4) score -= 8;
+
+  // Slight bonus for popular Pexels video IDs (higher ID is newer/higher quality)
+  if (video.id && Number(video.id) > 1000000) score += 2;
+
+  return score;
+}
+
 /**
  * Finds and downloads the best Pexels video for a given subject/scene,
  * using context, deduping, and max logging.
@@ -89,52 +148,36 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
   }
   try {
     const query = encodeURIComponent(cleanQuery(subject));
-    const url = `https://api.pexels.com/videos/search?query=${query}&per_page=8`;
+    const url = `https://api.pexels.com/videos/search?query=${query}&per_page=10`;
     console.log(`[10B][PEXELS][${jobId}] Searching: ${url}`);
     const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY } });
 
     if (resp.data && resp.data.videos && resp.data.videos.length > 0) {
-      // Score and filter results for best match
-      let best = null;
-      let bestScore = -1;
-      const scores = [];
+      let scored = [];
       for (const video of resp.data.videos) {
-        // Prefer HD, then max duration, then closest aspect ratio to 9:16 or 16:9
-        const file = video.video_files.find(f => f.quality === 'hd' && f.width >= 720) || video.video_files[0];
-        if (!file || !file.link) continue;
-
-        // Score: penalize duplicates, prefer long videos, prefer portrait/landscape based on aspect
-        let score = 0;
-        if (file.width > file.height) score += 10; // Landscape preferred
-        if (file.width / file.height > 1.4 && file.width / file.height < 2.0) score += 5; // 16:9-ish
-        score += file.height >= 720 ? 3 : 0;
-        score += file.file_type === 'video/mp4' ? 1 : 0;
-        score += Math.floor(file.width / 100);
-
-        // Check for dupe
-        if (usedClips && usedClips.some(u => u.includes(file.link) || file.link.includes(u))) {
-          score -= 100;
-        }
-
-        scores.push({ file, score });
-        if (score > bestScore) {
-          best = file;
-          bestScore = score;
+        const files = (video.video_files || []).filter(f => f.file_type === 'video/mp4');
+        for (const file of files) {
+          const score = scorePexelsMatch(video, file, subject, usedClips);
+          scored.push({ video, file, score });
         }
       }
-      scores.sort((a, b) => b.score - a.score);
-      console.log(`[10B][PEXELS][${jobId}] Top Pexels file scores:`, scores.slice(0, 3).map(s => ({ url: s.file.link, score: s.score })));
+      // Sort high to low, log all
+      scored.sort((a, b) => b.score - a.score);
+      scored.slice(0, 7).forEach((s, i) =>
+        console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`)
+      );
 
-      if (best && best.link && bestScore >= 0) {
-        // Always unique per job/scene/clip
+      const best = scored[0];
+      if (best && best.score >= 20) {
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
-        return await downloadPexelsVideoToLocal(best.link, outPath, jobId);
+        return await downloadPexelsVideoToLocal(best.file.link, outPath, jobId);
       }
+      console.warn(`[10B][PEXELS][${jobId}] No strong Pexels match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
+    } else {
+      console.log(`[10B][PEXELS][${jobId}] No Pexels video results found for "${subject}"`);
     }
-    console.log(`[10B][PEXELS][${jobId}] No video match found for "${subject}"`);
     return null;
   } catch (err) {
-    // Log actual error payload from Pexels if present
     if (err.response?.data) {
       console.error('[10B][PEXELS][ERR]', JSON.stringify(err.response.data));
     } else {

@@ -84,12 +84,12 @@ async function convertMp3ToWav(mp3Path, wavPath) {
 
 // ============================================================
 // SCENE BUILDER: Slices video for scene 1 & 2 (shared clip, two lines)
-// Returns [scene1Path, scene2Path, scene1Len, scene2Len] (all trimmed to perfect durations)
+// Returns [scene1Path, scene2Path] (both trimmed to perfect durations)
 // ============================================================
 async function splitVideoForFirstTwoScenes(
-  videoIn, 
-  audio1, 
-  audio2, 
+  videoIn,
+  audio1,
+  audio2,
   outDir = path.dirname(videoIn)
 ) {
   console.log(`[5F][SPLIT][START] Splitting "${videoIn}" for scenes 1+2, two voice lines...`);
@@ -105,15 +105,27 @@ async function splitVideoForFirstTwoScenes(
   const scene1Len = 0.5 + dur1 + 1.0;
   const scene2Len = 0.5 + dur2 + 1.0;
 
-  // Outputs
-  const scene1Path = path.resolve(outDir, `scene1-${Date.now()}-${Math.floor(Math.random()*99999)}.mp4`);
-  const scene2Path = path.resolve(outDir, `scene2-${Date.now()}-${Math.floor(Math.random()*99999)}.mp4`);
+  // Get input video duration
+  let videoTotalLen = 0;
+  try {
+    videoTotalLen = await getDuration(videoIn);
+  } catch (err) {
+    console.error(`[5F][SPLIT][ERR] Could not get video duration: ${err}`);
+  }
 
-  // 1. Scene 1: [0, scene1Len]
+  // Defensive: If the video is too short for two non-overlapping splits, just use the same start point for both (will look like a jump cut)
+  let scene1Start = 0;
+  let scene2Start = (videoTotalLen >= scene1Len + scene2Len) ? scene1Len : 0;
+
+  // Outputs
+  const scene1Path = path.resolve(outDir, `scene1-${Date.now()}-${Math.floor(Math.random() * 99999)}.mp4`);
+  const scene2Path = path.resolve(outDir, `scene2-${Date.now()}-${Math.floor(Math.random() * 99999)}.mp4`);
+
+  // SCENE 1: [scene1Start, scene1Len]
   await new Promise((resolve, reject) => {
     ffmpeg(videoIn)
       .inputOptions(['-y'])
-      .setStartTime(0)
+      .setStartTime(scene1Start)
       .setDuration(scene1Len)
       .outputOptions([
         '-filter_complex',
@@ -146,11 +158,11 @@ async function splitVideoForFirstTwoScenes(
       .save(scene1Path);
   });
 
-  // 2. Scene 2: [scene1Len, scene1Len + scene2Len]
+  // SCENE 2: Try to use non-overlapping segment if possible, otherwise fallback to [0, scene2Len]
   await new Promise((resolve, reject) => {
     ffmpeg(videoIn)
       .inputOptions(['-y'])
-      .setStartTime(scene1Len)
+      .setStartTime(scene2Start)
       .setDuration(scene2Len)
       .outputOptions([
         '-filter_complex',
@@ -183,7 +195,7 @@ async function splitVideoForFirstTwoScenes(
       .save(scene2Path);
   });
 
-  return [scene1Path, scene2Path, scene1Len, scene2Len];
+  return [scene1Path, scene2Path];
 }
 
 // ============================================================
@@ -246,7 +258,7 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   // === Convert MP3 to WAV for bulletproof audio ===
   const wavTemp = path.join(
     os.tmpdir(),
-    `ssai-wav-${Date.now()}-${Math.floor(Math.random()*999999)}.wav`
+    `ssai-wav-${Date.now()}-${Math.floor(Math.random() * 999999)}.wav`
   );
   await convertMp3ToWav(audioIn, wavTemp);
 
@@ -275,11 +287,11 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
           assertFile(outPath, 10240, 'MUX_OUT');
           console.log(`[5F][MUX] ✅ Muxed video saved: ${outPath}`);
           // Cleanup temp wav
-          try { fs.unlinkSync(wavTemp); } catch(e){}
+          try { fs.unlinkSync(wavTemp); } catch (e) {}
           resolve();
         } catch (e) {
           console.error(`[5F][MUX][ERR] Final mux validation failed: ${e.message}`);
-          try { fs.unlinkSync(wavTemp); } catch(e){}
+          try { fs.unlinkSync(wavTemp); } catch (e) {}
           return reject(e);
         }
       })
@@ -287,7 +299,7 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
         console.error(`[5F][MUX][ERR] FFmpeg mux failed:`, err);
         if (stderr) console.error(`[5F][MUX][STDERR]\n${stderr}`);
         if (stdout) console.log(`[5F][MUX][STDOUT]\n${stdout}`);
-        try { fs.unlinkSync(wavTemp); } catch(e){}
+        try { fs.unlinkSync(wavTemp); } catch (e) {}
         reject(err);
       })
       .save(outPath);

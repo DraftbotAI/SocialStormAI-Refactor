@@ -1,11 +1,11 @@
 // ===========================================================
 // SECTION 5G: FINAL VIDEO ASSEMBLER & MUSIC/OUTRO
 // Concats scenes, adds music, appends outro, validates output.
-// SUPER MAX LOGGING AT EVERY STEP — NO SILENT FAILURES
-// Always generates both 16:9 (display) and 9:16 (download) finals!
-// Enhanced: All FFmpeg uses -preset ultrafast for max speed
+// SUPER MAX LOGGING EVERY STEP — NO SILENT FAILURES
+// All FFmpeg uses -preset ultrafast for max speed
 // BulletproofScenes for size/audio normalization
-// AI music mood selection + random song per mood!
+// Never repeats same song twice! AI mood detection fallback!
+// 2024-08: PRO — Always 9:16 output, validated output, logging
 // ===========================================================
 
 const fs = require('fs');
@@ -13,10 +13,20 @@ const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { v4: uuidv4 } = require('uuid');
 
+// Use external music-moods (preferred, never repeats) if present
+let musicMoods = null;
+try {
+  musicMoods = require('./music-moods.cjs');
+  console.log('[5G][INIT] Loaded music-moods.cjs for AI mood detection and non-repeating music.');
+} catch (err) {
+  console.warn('[5G][INIT][WARN] music-moods.cjs not found. Falling back to internal logic.');
+}
+
 console.log('[5G][INIT] Final video assembler loaded.');
 
+// === Static Asset Paths ===
 function getOutroPath() {
-  const outroPath = path.join(__dirname, '..', 'public', 'video', 'outro.mp4');
+  const outroPath = path.join(__dirname, '..', 'public', 'assets', 'outro.mp4');
   console.log('[5G][PATH][OUTRO] Using outro path:', outroPath);
   return outroPath;
 }
@@ -35,6 +45,7 @@ function assertFile(file, minSize = 10240, label = 'FILE') {
   if (sz < minSize) {
     throw new Error(`[5G][${label}][ERR] File too small (${sz} bytes): ${file}`);
   }
+  return true;
 }
 
 async function logFileProbe(file, label = 'PROBE') {
@@ -61,7 +72,7 @@ async function logFileProbe(file, label = 'PROBE') {
   }
 }
 
-// BULLETPROOF: Ensures every scene is 1080x1920, yuv420p, has audio
+// === Bulletproof scenes (format/audio normalization) ===
 async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo) {
   console.log('[5G][BULLETPROOF] bulletproofScenes called.');
   const fixed = [];
@@ -86,7 +97,7 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
       console.warn(`[5G][BULLETPROOF][BUG] Scene at idx ${i} probe failed:`, e);
     }
     if (needsFix) {
-      const fixedPath = file.replace(/\.mp4$/, `-fixed.mp4`);
+      const fixedPath = file.replace(/\.mp4$/, `-fixed-${uuidv4()}.mp4`);
       await new Promise((resolve, reject) => {
         ffmpeg()
           .input(file)
@@ -129,6 +140,7 @@ async function bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeV
   return fixed;
 }
 
+// === Ensure every video has audio stream (not just silence) ===
 async function ensureAudioStream(videoPath, workDir) {
   console.log(`[5G][AUDIOFIX] ensureAudioStream called: ${videoPath}`);
   let audioStreamExists = false;
@@ -144,7 +156,7 @@ async function ensureAudioStream(videoPath, workDir) {
   }
   if (audioStreamExists) return videoPath;
 
-  const fixedPath = path.resolve(workDir, `audiofix-${path.basename(videoPath)}`);
+  const fixedPath = path.resolve(workDir, `audiofix-${path.basename(videoPath, '.mp4')}-${uuidv4()}.mp4`);
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
@@ -172,8 +184,46 @@ async function ensureAudioStream(videoPath, workDir) {
   });
 }
 
+// === Bulletproof single file (force to proper audio/video params for outro concat) ===
+async function bulletproofFile(inputPath, workDir, label) {
+  const output = path.join(workDir, `${path.basename(inputPath, '.mp4')}-bp-${uuidv4()}.mp4`);
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(inputPath)
+      .outputOptions([
+        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1',
+        '-pix_fmt yuv420p',
+        '-c:v libx264',
+        '-c:a aac',
+        '-ar 44100',
+        '-ac 2',
+        '-b:a 128k',
+        '-preset ultrafast',
+        '-y'
+      ])
+      .save(output)
+      .on('end', async () => {
+        try {
+          assertFile(output, 10240, label || 'BPFILE');
+          await logFileProbe(output, label || 'BPFILE');
+          console.log(`[5G][BPFILE] Bulletproofed ${inputPath} -> ${output}`);
+          resolve(output);
+        } catch (e) {
+          console.error(`[5G][BPFILE][ERR] ${e.message}`);
+          reject(e);
+        }
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][BPFILE][ERR]`, err);
+        if (stderr) console.error(`[5G][BPFILE][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][BPFILE][STDOUT]\n${stdout}`);
+        reject(err);
+      });
+  });
+}
+
 // ============================================
-// MAIN CONCAT: Output is 1080x1920 (portrait, shorts format, "download" file)
+// MAIN CONCAT: Output is 1080x1920 (portrait, shorts format)
 // ============================================
 async function concatScenes(sceneFiles, workDir) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
@@ -200,11 +250,11 @@ async function concatScenes(sceneFiles, workDir) {
     null
   );
 
-  // Ensure all have audio (as final fix)
+  // Ensure all have audio
   fixedScenes = await Promise.all(fixedScenes.map(f => ensureAudioStream(f, workDir)));
 
   const listFile = path.resolve(workDir, 'list.txt');
-  fs.writeFileSync(listFile, fixedScenes.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'), {encoding: 'utf8'});
+  fs.writeFileSync(listFile, fixedScenes.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n'), { encoding: 'utf8' });
 
   const concatFile = path.resolve(workDir, getUniqueFinalName('concat'));
 
@@ -220,6 +270,9 @@ async function concatScenes(sceneFiles, workDir) {
       .outputOptions([
         '-c:v libx264',
         '-c:a aac',
+        '-ar 44100',
+        '-ac 2',
+        '-b:a 128k',
         '-movflags +faststart',
         '-preset ultrafast',
         '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
@@ -245,9 +298,9 @@ async function concatScenes(sceneFiles, workDir) {
   });
 }
 
-// === Outro appender (bulletproofed) ===
+// === Outro appender (bulletproof, both files forced to perfect audio/video for concat) ===
 async function appendOutro(mainPath, outroPath, outPath, workDir) {
-  if (!outroPath) outroPath = getOutroPath();
+  outroPath = getOutroPath();
   if (!outPath) outPath = path.resolve(workDir, getUniqueFinalName('final-with-outro'));
 
   console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outPath}"`);
@@ -258,11 +311,16 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
     throw new Error(`[5G][OUTRO][ERR] Main or outro video missing! main: ${mainPath} exists? ${fs.existsSync(mainPath)}, outro: ${outroPath} exists? ${fs.existsSync(outroPath)}`);
   }
 
+  // Bulletproof both files for concat audio/video params
+  const bpMain = await bulletproofFile(mainPath, workDir, 'BP_MAIN');
+  const bpOutro = await bulletproofFile(outroPath, workDir, 'BP_OUTRO');
+
+  // Always use a fresh concat list for FFmpeg concat demuxer
   const listFile = path.resolve(workDir, 'list2.txt');
   fs.writeFileSync(listFile, [
-    `file '${mainPath.replace(/'/g, "'\\''")}'`,
-    `file '${outroPath.replace(/'/g, "'\\''")}'`
-  ].join('\n'), {encoding: 'utf8'});
+    `file '${bpMain.replace(/'/g, "'\\''")}'`,
+    `file '${bpOutro.replace(/'/g, "'\\''")}'`
+  ].join('\n'), { encoding: 'utf8' });
 
   return new Promise((resolve, reject) => {
     ffmpeg()
@@ -271,8 +329,12 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
       .outputOptions([
         '-c:v libx264',
         '-c:a aac',
+        '-ar 44100',
+        '-ac 2',
+        '-b:a 128k',
         '-movflags +faststart',
-        '-preset ultrafast'
+        '-preset ultrafast',
+        '-vf scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1'
       ])
       .save(outPath)
       .on('end', async () => {
@@ -295,7 +357,7 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
   });
 }
 
-// === Music overlay unchanged (already bulletproof) ===
+// === Music overlay (max logging, bulletproof random) ===
 async function overlayMusic(videoPath, musicPath, outPath) {
   console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
 
@@ -320,6 +382,8 @@ async function overlayMusic(videoPath, musicPath, outPath) {
         '-map', '[aout]',
         '-c:v', 'copy',
         '-c:a', 'aac',
+        '-ar', '44100',
+        '-ac', '2',
         '-shortest',
         '-y'
       ])
@@ -344,61 +408,113 @@ async function overlayMusic(videoPath, musicPath, outPath) {
   });
 }
 
-// === NEW: AI Music Mood Selector + Random Song with MAX LOGGING ===
-function getRandomMusicFileForMood(mood, lastTrack = null) {
-  // Looks in /assets/music/{mood}/ for all valid files, picks one at random (avoiding lastTrack)
-  const musicDir = path.join(__dirname, '..', 'assets', 'music', mood);
-  let files = [];
+// === Main Mood Picker (non-repeating/random) ===
+let _lastTrack = null;
+/**
+ * pickMusicForMood: Detects mood (via music-moods if present, else fallback), then randomizes and prevents repeats.
+ * @param {string} script - Full script text for mood detection
+ * @param {string} workDir - Work directory for job (for logging/future)
+ * @returns {string} Full path to music file, or null
+ */
+async function pickMusicForMood(script, workDir) {
+  let detectedMood;
   try {
-    files = fs.readdirSync(musicDir)
-      .filter(f => /\.(mp3|wav|aac)$/i.test(f));
-  } catch (e) {
-    console.warn('[5G][MUSIC][FOLDER][WARN] Could not read music dir:', musicDir, e.message);
-    return null;
-  }
-  console.log(`[5G][MUSIC][RANDOM] Mood "${mood}" - Found ${files.length} tracks in: ${musicDir}`, files);
-
-  if (!files.length) {
-    console.warn(`[5G][MUSIC][RANDOM][WARN] No tracks found for mood "${mood}".`);
-    return null;
-  }
-
-  // Exclude last used if possible
-  let candidates = files;
-  if (lastTrack && files.length > 1) {
-    const lastBase = path.basename(lastTrack);
-    candidates = files.filter(f => f !== lastBase);
-    if (!candidates.length) candidates = files; // fallback: all files
-  }
-
-  const idx = Math.floor(Math.random() * candidates.length);
-  const chosen = candidates[idx];
-  console.log(`[5G][MUSIC][RANDOM][PICK] Picked: ${chosen} (out of ${candidates.length} candidates, lastTrack=${lastTrack})`);
-  return path.join(musicDir, chosen);
-}
-
-// === AI Music Mood Selector + Random Song ===
-async function selectMusicFileForScript(script, gptDetectMood, lastTrack = null) {
-  // Ensures a *random* song is chosen for each video, never repeats unless all used!
-  try {
-    const detectedMood = await gptDetectMood(script); // e.g., "suspense"
-    console.log('[5G][MUSIC][AI] Detected mood from GPT:', detectedMood);
-    // Always pick a random music file for this mood
-    const musicPath = getRandomMusicFileForMood(detectedMood, lastTrack);
-    if (musicPath) {
-      console.log('[5G][MUSIC][AI] Selected random music file:', musicPath);
-      return musicPath;
+    if (musicMoods && typeof musicMoods.detectMusicMood === 'function') {
+      detectedMood = musicMoods.detectMusicMood(script);
+      console.log(`[5G][MUSIC][AI] Mood detected (music-moods): "${detectedMood}"`);
     } else {
-      console.warn('[5G][MUSIC][AI][WARN] No music file found for detected mood:', detectedMood);
-      return null;
+      detectedMood = simpleDetectMood(script);
+      console.log(`[5G][MUSIC][FALLBACK] Mood detected (fallback): "${detectedMood}"`);
     }
   } catch (err) {
-    console.error('[5G][MUSIC][AI][ERR] Mood detection or file select failed:', err);
+    detectedMood = 'motivation_inspiration_uplifting';
+    console.warn('[5G][MUSIC][MOOD][ERR] Mood detection failed, defaulting.');
+  }
+
+  let chosen;
+  if (musicMoods && typeof musicMoods.getRandomMusicFileForMood === 'function') {
+    chosen = musicMoods.getRandomMusicFileForMood(detectedMood, _lastTrack);
+  } else {
+    chosen = getRandomMusicFileForMood(detectedMood, _lastTrack);
+  }
+  if (!chosen) {
+    console.warn(`[5G][MUSIC][MOOD][WARN] No music found for mood "${detectedMood}".`);
     return null;
   }
+  _lastTrack = chosen;
+  return chosen;
 }
 
-// === 16:9/9:16 helpers unchanged ===
+// === Simple Fallback Mood Detector (basic keyword rules) ===
+function simpleDetectMood(script) {
+  const txt = (script || '').toLowerCase();
+  if (/excite|amazing|funny|lol|hilarious|shocking/.test(txt)) return 'funny_quirky_whimsical';
+  if (/sad|heart|emotional|tear|loss|cry/.test(txt)) return 'sad_emotional_reflective';
+  if (/mystery|ghost|secret|hidden|unsolved|dark/.test(txt)) return 'spooky_creepy_mystery_horror';
+  if (/motivat|inspir|success|achiev|overcome|dream|goal/.test(txt)) return 'motivation_inspiration_uplifting';
+  if (/calm|relax|chill|soothing|gentle/.test(txt)) return 'lofi_chill_ambient';
+  if (/danger|intense|epic|battle|action|fight/.test(txt)) return 'action_sports_intense';
+  if (/fact|info|knowledge|history/.test(txt)) return 'news_documentary_neutral';
+  if (/historic|history|empire|war/.test(txt)) return 'historical';
+  if (/pop|upbeat|energetic/.test(txt)) return 'upbeat_energetic_pop';
+  if (/cinematic|epic|adventure/.test(txt)) return 'cinematic_epic_adventure';
+  if (/fantasy|magic|wizard|dragon/.test(txt)) return 'fantasy_magical';
+  if (/nature|ocean|forest|animal|mountain|tree/.test(txt)) return 'nature_ambient_relaxing';
+  if (/corporate|business|office|meeting|education|lesson/.test(txt)) return 'corporate_educational_explainer';
+  if (/game|arcade|8-bit|retro/.test(txt)) return 'retro_8-bit_gaming';
+  if (/tech|ai|future|robot|science|space/.test(txt)) return 'science_tech_futuristic';
+  // Default fallback
+  return 'motivation_inspiration_uplifting';
+}
+
+// === Minimal fallback (if no music-moods) ===
+function getRandomMusicFileForMood(mood, lastTrack = null) {
+  const musicDir = path.join(__dirname, '..', 'public', 'assets', 'music_library', mood);
+  let files = [];
+  try {
+    files = fs.readdirSync(musicDir).filter(f => /\.(mp3|wav|aac)$/i.test(f));
+  } catch (e) {
+    console.warn('[5G][MUSIC][FOLDER][WARN] Could not read music dir:', musicDir, e.message);
+    files = [];
+  }
+  if (!files.length) {
+    if (mood !== 'motivation_inspiration_uplifting') return getRandomMusicFileForMood('motivation_inspiration_uplifting', lastTrack);
+    // fallback: any
+    const rootMusic = path.join(__dirname, '..', 'public', 'assets', 'music_library');
+    let allMusic = [];
+    try {
+      fs.readdirSync(rootMusic).forEach(dir => {
+        const dirPath = path.join(rootMusic, dir);
+        if (fs.statSync(dirPath).isDirectory()) {
+          allMusic = allMusic.concat(
+            fs.readdirSync(dirPath).filter(f => /\.(mp3|wav|aac)$/i.test(f)).map(f => path.join(dirPath, f))
+          );
+        }
+      });
+    } catch (err) {}
+    if (allMusic.length) {
+      let pick = allMusic;
+      if (lastTrack && allMusic.length > 1) pick = allMusic.filter(f => path.basename(f) !== path.basename(lastTrack));
+      const chosen = pick[Math.floor(Math.random() * pick.length)];
+      console.log(`[5G][MUSIC][FALLBACK] Picked ANY track: ${chosen}`);
+      return chosen;
+    }
+    console.warn(`[5G][MUSIC][FALLBACK][ERR] No music files at all!`);
+    return null;
+  }
+  // Avoid lastTrack if possible
+  let candidates = files;
+  if (lastTrack && files.length > 1) {
+    candidates = files.filter(f => f !== path.basename(lastTrack));
+    if (!candidates.length) candidates = files;
+  }
+  const idx = Math.floor(Math.random() * candidates.length);
+  const chosen = path.join(musicDir, candidates[idx]);
+  console.log(`[5G][MUSIC][RANDOM][PICK] Mood="${mood}" Picked: ${chosen} (lastTrack=${lastTrack})`);
+  return chosen;
+}
+
+// === Extra Export: (16:9/9:16 quick thumbnail/video formatters) ===
 async function create16x9FromInput(inputPath, outputPath) {
   console.log(`[5G][FORMAT][16x9] Creating 16:9 output from: ${inputPath}`);
   return new Promise((resolve, reject) => {
@@ -472,8 +588,9 @@ module.exports = {
   getOutroPath,
   getUniqueFinalName,
   bulletproofScenes,
-  selectMusicFileForScript,
+  pickMusicForMood,
   getRandomMusicFileForMood,
+  simpleDetectMood,
   create16x9FromInput,
   create9x16FromInput
 };

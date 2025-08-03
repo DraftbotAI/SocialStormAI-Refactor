@@ -23,20 +23,26 @@ registerGenerateScriptEndpoint(app, section1.openai);
 
 // === Section 5: Video generator ===
 console.log('[SERVER][INFO] Loading Section 5 (Video Generator)...');
-// Import ALL required helpers for Section 5B
+
+// === Import ALL required helpers for Section 5B ===
 const { findClipForScene } = require('./sections/section5d-clip-matcher.cjs');
 const { createSceneAudio, createMegaSceneAudio } = require('./sections/section5e-audio-generator.cjs');
+
+// === Import the music mood selector, bulletproof (always from music-moods to avoid circular dependency) ===
+const { selectMusicFileForScript } = require('./sections/music-moods.cjs');
+
 const registerGenerateVideoEndpoint = require('./sections/section5b-generate-video-endpoint.cjs');
 
-// Hand off ALL helpers (spread section1, inject others to avoid "not a function" errors)
+// === Hand off ALL helpers (spread section1, inject others to avoid "not a function" errors) ===
 registerGenerateVideoEndpoint(app, {
     ...section1,
     progress,
     voices: section1.voices,
     POLLY_VOICE_IDS: section1.POLLY_VOICE_IDS,
-    findClipForScene,               // required by 5b
-    createSceneAudio,               // required by 5b
-    createMegaSceneAudio            // required by 5b
+    findClipForScene,                  // required by 5b
+    createSceneAudio,                  // required by 5b
+    createMegaSceneAudio,              // required by 5b
+    pickMusicForMood: selectMusicFileForScript // KEY: passes music mood selector!
 });
 
 // === Section 6: Thumbnails ===

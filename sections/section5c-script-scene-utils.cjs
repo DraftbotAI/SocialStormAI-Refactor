@@ -1,9 +1,8 @@
 // ===========================================================
-// SECTION 5C: SCRIPT & SCENE UTILITIES
+// SECTION 5C: SCRIPT & SCENE UTILITIES (PRO FIXED)
 // Splits script into scenes, handles scene structure, utilities.
-// MAX LOGGING EVERY STEP, MEGA-SCENE + HOOK LOGIC
-// Enhanced: Always returns array of scene objects, never strings
-// Improved: Viral summary/hook-first logic, super robust sentence/line splitting
+// HOOK, MEGA-SCENE, and VISUAL SUBJECT (GPT/AI-ready)
+// Max logging every step, bulletproof output
 // ===========================================================
 
 const uuid = require('uuid'); // For scene IDs
@@ -28,12 +27,22 @@ function generateViralHookAndSummary(script, topic = '') {
   return summaryLine;
 }
 
+// === Visual Subject Extraction (AI/GPT-ready) ===
+function extractVisualSubject(line, mainTopic = '') {
+  if (mainTopic && line.toLowerCase().includes(mainTopic.toLowerCase())) {
+    return mainTopic;
+  }
+  const candidates = (line.match(/\b([A-Za-z]{4,})\b/g) || [])
+    .filter(word => !['this','that','they','will','have','with','from','your','about','there','their','which','when','just'].includes(word.toLowerCase()));
+  return candidates.length ? candidates[0] : line.trim().split(' ').slice(0,3).join(' ');
+}
+
 /**
  * Enhanced split:
  * - Scene 1: Strong hook/summary (from topic or first punchy line)
- * - Scene 2: Mega-scene (group next 2 lines, as context chunk)
+ * - Scene 2: Mega-scene (group next 2 lines into *one* scene, not two!)
  * - Scenes 3+: Each line becomes a normal scene.
- * Each scene: { id, texts: [str], isMegaScene: bool, type, origIndices }
+ * Each scene: { id, texts: [str], isMegaScene: bool, type, origIndices, visualSubject }
  */
 function splitScriptToScenes(script, topic = '') {
   console.log('[5C][SPLIT] splitScriptToScenes called.');
@@ -56,11 +65,14 @@ function splitScriptToScenes(script, topic = '') {
 
   console.log(`[5C][SPLIT] Lines for scenes after hook/summary:`, JSON.stringify(restLines));
 
-  // Step 4: Group into scenes
+  // Step 4: Group into scenes (must return array of scene objects!)
   let scenes = [];
   const seenIds = new Set();
 
-  // Scene 1: Viral hook
+  // Main topic for scene matching (use topic or fallback to best guess)
+  const mainTopic = topic && typeof topic === 'string' && topic.length > 1 ? topic : guessMainSubjectFromScenes(restLines);
+
+  // Scene 1: Viral hook (always use main topic for matching)
   const hookId = `hookscene-1-${uuid.v4()}`;
   scenes.push({
     id: hookId,
@@ -68,49 +80,60 @@ function splitScriptToScenes(script, topic = '') {
     isMegaScene: false,
     type: 'hook-summary',
     origIndices: [0],
+    visualSubject: mainTopic
   });
   seenIds.add(hookId);
-  console.log(`[5C][HOOK] Created HOOK SCENE: "${summaryLine}" [ID: ${hookId}]`);
+  console.log(`[5C][HOOK] Created HOOK SCENE: "${summaryLine}" [ID: ${hookId}] visualSubject="${mainTopic}"`);
 
-  // Scene 2: MEGA-SCENE (group next 2 lines if possible)
+  // Scene 2: MEGA-SCENE (group next 2 lines into ONE scene!)
   if (restLines.length > 1) {
+    // Fix: Combine [restLines[0], restLines[1]] into a single scene (never split).
     const megaId = `megascene-2-${uuid.v4()}`;
+    const megaTexts = [restLines[0], restLines[1]];
+    const megaSubject = extractVisualSubject(restLines[1], mainTopic); // Use the second line as visual anchor
     scenes.push({
       id: megaId,
-      texts: [restLines[0], restLines[1]],
+      texts: megaTexts,
       isMegaScene: true,
       type: 'context-mega',
       origIndices: [1, 2],
+      visualSubject: megaSubject
     });
     seenIds.add(megaId);
-    console.log(`[5C][MEGA] Created MEGA-SCENE: "${restLines[0]}" / "${restLines[1]}" [ID: ${megaId}]`);
-    // Scenes 3+ are normal
+    console.log(`[5C][MEGA] Created MEGA-SCENE: "${megaTexts[0]}" / "${megaTexts[1]}" [ID: ${megaId}] visualSubject="${megaSubject}"`);
+
+    // Scenes 3+ are normal (skip restLines[0] and restLines[1], already included above)
     for (let i = 2; i < restLines.length; ++i) {
       const sceneId = `scene${i + 1}-${uuid.v4()}`;
       if (seenIds.has(sceneId)) {
         console.warn(`[5C][SCENE][WARN] Duplicate scene ID generated at index ${i}. Regenerating...`);
       }
       seenIds.add(sceneId);
+      const subject = extractVisualSubject(restLines[i], mainTopic);
       scenes.push({
         id: sceneId,
         texts: [restLines[i]],
         isMegaScene: false,
         type: 'normal',
         origIndices: [i + 1],
+        visualSubject: subject
       });
-      console.log(`[5C][SCENE] Created scene ${i + 1}: "${restLines[i]}" [ID: ${sceneId}]`);
+      console.log(`[5C][SCENE] Created scene ${i + 1}: "${restLines[i]}" [ID: ${sceneId}] visualSubject="${subject}"`);
     }
   } else if (restLines.length === 1) {
+    // Only one line left after hook: single normal scene
     const sceneId = `scene2-${uuid.v4()}`;
+    const subject = extractVisualSubject(restLines[0], mainTopic);
     scenes.push({
       id: sceneId,
       texts: [restLines[0]],
       isMegaScene: false,
       type: 'single',
       origIndices: [1],
+      visualSubject: subject
     });
     seenIds.add(sceneId);
-    console.log(`[5C][SCENE] Only one context line, created single scene [ID: ${sceneId}]`);
+    console.log(`[5C][SCENE] Only one context line, created single scene [ID: ${sceneId}] visualSubject="${subject}"`);
   }
 
   // Bulletproof: Make sure each scene is a proper object, texts always array of non-empty string(s)
@@ -122,7 +145,8 @@ function splitScriptToScenes(script, topic = '') {
         texts: [typeof scene === 'string' ? scene : String(scene)],
         isMegaScene: false,
         type: 'auto-wrap',
-        origIndices: [idx]
+        origIndices: [idx],
+        visualSubject: mainTopic
       };
     }
     let safeTexts = Array.isArray(scene.texts) ? scene.texts.map(t => String(t || '')) : [String(scene.texts || '')];
@@ -134,12 +158,13 @@ function splitScriptToScenes(script, topic = '') {
     if (idx > 0 && seenIds.has(scene.id)) {
       console.warn(`[5C][DEFENSE][BUG] Duplicate scene ID detected for idx ${idx}: ${scene.id}`);
     }
-    return { ...scene, texts: safeTexts };
+    // Ensure visualSubject present
+    return { ...scene, texts: safeTexts, visualSubject: scene.visualSubject || mainTopic };
   });
 
   console.log(`[5C][SPLIT] Total scenes generated: ${finalScenes.length}`);
   finalScenes.forEach((scene, idx) => {
-    console.log(`[5C][SCENES][${idx}] ID: ${scene.id}, Mega: ${!!scene.isMegaScene}, Type: ${scene.type}, Lines: ${scene.texts.length}, OrigIndices: ${scene.origIndices.join(',')}, Text: "${scene.texts.join(' / ')}"`);
+    console.log(`[5C][SCENES][${idx}] ID: ${scene.id}, Mega: ${!!scene.isMegaScene}, Type: ${scene.type}, Lines: ${scene.texts.length}, OrigIndices: ${scene.origIndices.join(',')}, visualSubject: "${scene.visualSubject}", Text: "${scene.texts.join(' / ')}"`);
   });
 
   return finalScenes;
@@ -155,7 +180,8 @@ function bulletproofScenes(scenes) {
       texts: [typeof scenes === 'string' ? scenes : JSON.stringify(scenes)],
       isMegaScene: false,
       type: 'auto-wrap',
-      origIndices: [0]
+      origIndices: [0],
+      visualSubject: ''
     }];
   }
   // Filter out any null/undefined and make sure each is a proper scene object
@@ -167,7 +193,8 @@ function bulletproofScenes(scenes) {
         texts: [typeof scene === 'string' ? scene : String(scene)],
         isMegaScene: false,
         type: 'auto-wrap',
-        origIndices: [idx]
+        origIndices: [idx],
+        visualSubject: ''
       };
     }
     let safeTexts = Array.isArray(scene.texts) ? scene.texts.map(t => String(t || '')) : [String(scene.texts || '')];
@@ -175,7 +202,7 @@ function bulletproofScenes(scenes) {
       safeTexts = [''];
       console.warn(`[5C][BULLETPROOF][BUG] Scene ${scene.id || idx} had empty texts array. Setting to [''].`);
     }
-    return { ...scene, texts: safeTexts };
+    return { ...scene, texts: safeTexts, visualSubject: scene.visualSubject || '' };
   });
   if (!safe.length) {
     console.warn('[5C][BULLETPROOF][WARN] No valid scenes found. Returning generic fallback.');
@@ -184,7 +211,8 @@ function bulletproofScenes(scenes) {
       texts: ['No scenes available.'],
       isMegaScene: false,
       type: 'auto-wrap',
-      origIndices: [0]
+      origIndices: [0],
+      visualSubject: ''
     }];
   }
   console.log(`[5C][BULLETPROOF] ${safe.length} valid scenes returned.`);
@@ -192,13 +220,13 @@ function bulletproofScenes(scenes) {
 }
 
 // === Utility: Guess main subject from all scenes (stub for future AI upgrades) ===
-function guessMainSubjectFromScenes(scenes) {
+function guessMainSubjectFromScenes(lines) {
   console.log('[5C][SUBJECT] guessMainSubjectFromScenes called.');
-  if (!Array.isArray(scenes) || !scenes.length) {
-    console.warn('[5C][SUBJECT] No scenes to analyze.');
+  if (!Array.isArray(lines) || !lines.length) {
+    console.warn('[5C][SUBJECT] No scenes/lines to analyze.');
     return '';
   }
-  const allTexts = scenes.flatMap(s => s.texts || []);
+  const allTexts = lines.flatMap(l => typeof l === 'string' ? l : '');
   const freq = {};
   for (const text of allTexts) {
     const words = (text || '').toLowerCase().split(/\W+/).filter(w => w.length > 3);
@@ -234,4 +262,5 @@ module.exports = {
   bulletproofScenes,
   guessMainSubjectFromScenes,
   cleanSceneText,
+  extractVisualSubject // export for external GPT subject helpers
 };
