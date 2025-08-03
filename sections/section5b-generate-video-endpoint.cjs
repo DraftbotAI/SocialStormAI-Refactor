@@ -90,13 +90,15 @@ function assertFileExists(file, label) {
   }
 }
 
-// --- CATEGORY/TOPIC MAPPING (simple example) ---
+// --- CATEGORY/TOPIC MAPPING ---
+// This ONLY returns "animals" (or similar) if mainTopic really matches
 function getCategoryFolder(mainTopic) {
   const lower = (mainTopic || '').toLowerCase();
   if (/haunt|castle|ghost|lore|myth|mystery|history|horror/.test(lower)) return 'lore_history_mystery_horror';
   if (/basketball|soccer|sports|lebron|fitness|exercise|workout|football/.test(lower)) return 'sports_fitness';
   if (/car|truck|tesla|vehicle|drive|race/.test(lower)) return 'cars_vehicles';
-  // ... add more rules as you wish
+  if (/chimp|chimpanzee|ape|gorilla|orangutan|primate/.test(lower)) return 'animals_primates';
+  // ...add more rules as you wish...
   return 'misc';
 }
 

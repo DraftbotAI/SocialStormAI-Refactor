@@ -1,6 +1,6 @@
 // ===========================================================
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR (Parallel Best-Pick)
-// Launches R2, Pexels, Pixabay, Ken Burns in parallel
+// Launches R2, Pexels, Pixabay, Unsplash, Ken Burns in parallel
 // Picks the best valid (existing, non-empty, not dupe) result
 // MAX LOGGING EVERY STEP – No single-point failure!
 // Upgraded: Main subject/mega-scene anchoring for visual continuity
@@ -11,6 +11,7 @@
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
 const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
+const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 const fs = require('fs');
@@ -90,7 +91,7 @@ async function findClipForScene({
   }
 
   // Validate all required helpers
-  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !fallbackKenBurnsVideo) {
+  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !findUnsplashImageForScene || !fallbackKenBurnsVideo) {
     console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
     return null;
   }
@@ -150,7 +151,7 @@ async function findClipForScene({
       console.log(`[5D][PICK][${jobId}] R2 deduped match: ${r2Result}`);
       return r2Result;
     }
-    console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay.`);
+    console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
   } else {
     try {
       r2Result = await findR2ClipForScene(searchSubject, workDir, sceneIdx, jobId, usedClips);
@@ -161,7 +162,7 @@ async function findClipForScene({
     } catch (e) {
       console.error(`[5D][R2][ERR][${jobId}]`, e);
     }
-    console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay.`);
+    console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
   }
 
   // --- Try Pexels ---
@@ -177,7 +178,7 @@ async function findClipForScene({
           subject: searchSubject,
           sceneIdx,
           source: 'pexels',
-          categoryFolder // pass it through!
+          categoryFolder
         });
         console.log(`[5D][QUEUE][${jobId}] Queued Pexels clip for R2 upload:`, pexelsResult, '→', categoryFolder);
       }
@@ -200,7 +201,7 @@ async function findClipForScene({
           subject: searchSubject,
           sceneIdx,
           source: 'pixabay',
-          categoryFolder // pass it through!
+          categoryFolder
         });
         console.log(`[5D][QUEUE][${jobId}] Queued Pixabay clip for R2 upload:`, pixabayResult, '→', categoryFolder);
       }
@@ -210,13 +211,25 @@ async function findClipForScene({
     console.error(`[5D][PIXABAY][ERR][${jobId}]`, e);
   }
 
+  // --- Try Unsplash (image fallback, not video) ---
+  let unsplashResult = null;
+  try {
+    unsplashResult = await findUnsplashImageForScene(searchSubject, workDir, sceneIdx, jobId, usedClips, jobContext);
+    if (unsplashResult && !usedClips.includes(unsplashResult)) {
+      console.log(`[5D][PICK][${jobId}] Unsplash image fallback match: ${unsplashResult}`);
+      // (Already queued in helper if jobContext given)
+      return unsplashResult;
+    }
+  } catch (e) {
+    console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
+  }
+
   // --- Final fallback: Ken Burns still ---
   let kenBurnsResult = null;
   try {
     kenBurnsResult = await fallbackKenBurnsVideo(searchSubject, workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsResult && !usedClips.includes(kenBurnsResult)) {
       console.log(`[5D][PICK][${jobId}] KenBurns fallback match: ${kenBurnsResult}`);
-      // (Optional) Could queue KenBurns stills for upload as well
       return kenBurnsResult;
     }
   } catch (e) {

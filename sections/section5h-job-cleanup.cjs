@@ -39,7 +39,18 @@ function fireAndForgetPostJobUploads(jobContext, jobId = '') {
   ) {
     console.log(`[5H][UPLOAD][${jobId}] Starting post-job R2 ingestion for ${jobContext.clipsToIngest.length} clips...`);
     jobContext.clipsToIngest.forEach(clip => {
-      uploadToR2(clip.localPath, clip.subject, clip.sceneIdx, clip.source)
+      if (!clip.localPath || !clip.subject || clip.sceneIdx === undefined || !clip.source) {
+        console.error(`[5H][UPLOAD][${jobId}] Missing info for queued clip:`, clip);
+        return;
+      }
+      // Pass categoryFolder if present (for smart foldering)
+      uploadToR2(
+        clip.localPath,
+        clip.subject,
+        clip.sceneIdx,
+        clip.source,
+        clip.categoryFolder || null
+      )
         .then(r2Dest => {
           if (r2Dest) {
             console.log(`[5H][UPLOAD][${jobId}] Uploaded to R2: ${r2Dest}`);
