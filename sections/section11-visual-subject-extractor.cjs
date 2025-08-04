@@ -6,7 +6,7 @@
 // Super max logging, deterministic, no silent failures.
 // ===========================================================
 
-const { ChatGPTAPI } = require('chatgpt'); // Or your preferred OpenAI SDK client
+const { ChatGPTAPI } = require('chatgpt'); // You can swap this to your preferred OpenAI SDK
 const path = require('path');
 const fs = require('fs');
 
@@ -18,15 +18,17 @@ const gpt = new ChatGPTAPI({ apiKey });
 console.log('[11][INIT] Visual Subject Extractor module loaded');
 
 async function extractVisualSubjects(line, mainTopic) {
-  console.log(`[11][INPUT] Script line: "${line}"`);
-  console.log(`[11][INPUT] Main topic: "${mainTopic}"`);
+  try {
+    console.log(`[11][INPUT] Script line: "${line}"`);
+    console.log(`[11][INPUT] Main topic: "${mainTopic}"`);
 
-  if (!line || typeof line !== 'string' || !line.trim()) {
-    console.warn('[11][WARN] Blank/invalid line. Returning main topic as fallback.');
-    return [mainTopic, mainTopic, mainTopic, mainTopic];
-  }
+    if (!line || typeof line !== 'string' || !line.trim()) {
+      console.warn('[11][WARN] Blank/invalid line. Returning main topic as fallback.');
+      return [mainTopic, mainTopic, mainTopic, mainTopic];
+    }
 
-  const prompt = `
+    // === The prompt ===
+    const prompt = `
 You are a world-class viral video editor for TikTok, Reels, and Shorts. For each line of a script, your ONLY job is to pick the 4 best possible VISUAL subjects to show in that scene.
 
 RULES:
@@ -193,8 +195,10 @@ Line: "${line}"
 Main topic: "${mainTopic}"
 `;
 
-  try {
+    // ========== MAIN GPT CALL ==========
     const res = await gpt.sendMessage(prompt);
+
+    // ========== Parse GPT response (numbered list) ==========
     let list = [];
     if (res && typeof res.text === 'string') {
       list = res.text
@@ -204,7 +208,8 @@ Main topic: "${mainTopic}"
         .map(l => l.replace(/[^A-Za-z0-9,\-\'\"\.\!\(\)\:\&\s\/]/g, '')) // strip any emoji or GPT weirdness
         .filter(Boolean);
     }
-    // Remove duplicates & blanks, fallback to mainTopic
+
+    // ========== Deduplicate, validate, enforce exactly 4 ==========
     const seen = new Set();
     let finalList = [];
     for (let item of list) {
@@ -224,6 +229,22 @@ Main topic: "${mainTopic}"
     console.error('[11][ERROR] GPT visual extraction failed:', err);
     return [mainTopic, mainTopic, mainTopic, mainTopic]; // Ultimate fallback
   }
+}
+
+// === UTILITY: Test single line from CLI ===
+if (require.main === module) {
+  // Allow quick CLI testing for debugging
+  const testLine = process.argv[2] || 'The pyramids were built over 20 years.';
+  const mainTopic = process.argv[3] || 'Egypt';
+  extractVisualSubjects(testLine, mainTopic)
+    .then(subjects => {
+      console.log('Extracted subjects:', subjects);
+      process.exit(0);
+    })
+    .catch(err => {
+      console.error('Test error:', err);
+      process.exit(1);
+    });
 }
 
 module.exports = { extractVisualSubjects };

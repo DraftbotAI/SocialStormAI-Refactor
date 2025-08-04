@@ -4,7 +4,7 @@
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // PRO+: Audio and muxed video caching, parallelized scene jobs
 // 2024-08: Works with GPT-powered subject extraction (Section 11)
-// Mega-clip logic: Scenes 1 & 2 = ONE continuous video, subject from line 2 (w/ 4 fallback subjects)
+// Mega-clip logic: Scenes 1 & 2 = ONE continuous video, subject from line 2 (w/ progressive fallback)
 // Bulletproof R2: Auto-downloads from R2 if file not present locally
 // ===========================================================
 
@@ -79,7 +79,6 @@ async function concatAudioFiles(audioPaths, outPath) {
 // Always call before using any matched clip!
 async function ensureLocalClipExists(r2Path, localPath) {
   if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10240) return localPath;
-  // If the file is already present and non-empty, no download needed.
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
   // Remove possible "./" or leading slashes
   const key = r2Path.replace(/^(\.\/)+/, '').replace(/^\/+/, '');
@@ -115,6 +114,29 @@ function getCategoryFolder(mainTopic) {
   if (/chimp|chimpanzee|ape|gorilla|orangutan|primate/.test(lower)) return 'animals_primates';
   // ...add more rules as you wish...
   return 'misc';
+}
+
+// --- FALLBACK SUBJECT EXPANDER: Gets fallback phrases and sub-phrases ---
+function getFallbackSubjects(fullSubject, mainTopic) {
+  const subs = [];
+  if (fullSubject) {
+    const words = fullSubject.split(' ').filter(Boolean);
+    if (words.length > 2) {
+      // Add 2-word phrases (sliding window)
+      for (let i = 0; i < words.length - 1; i++) {
+        const two = words.slice(i, i + 2).join(' ');
+        if (two.length > 2) subs.push(two);
+      }
+    }
+    // Add each single word, skip ultra-generic ones
+    subs.push(...words.filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as'].includes(w.toLowerCase())));
+  }
+  // Add the main topic if not already present
+  if (mainTopic && !subs.includes(mainTopic)) subs.push(mainTopic);
+  // Add ultra-generic backups (user can tune this list)
+  subs.push('landmark', 'famous building', 'tourist attraction');
+  // De-dup and return
+  return [...new Set(subs.map(s => s.trim()).filter(Boolean))];
 }
 
 // ===========================================================
@@ -242,8 +264,9 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
         if (!candidateSubjects.length) candidateSubjects = [scene2text, mainTopic];
 
-        // -- C. Try all 4 candidates, then fallback subjects, then Ken Burns image
+        // -- C. Try all GPT candidates, then progressively loosen the fallback to partial phrases, then generic
         let megaClipPath = null;
+        // 1. Try all GPT subject candidates (strict)
         for (let subj of candidateSubjects) {
           megaClipPath = await findClipForScene({
             subject: subj,
@@ -263,9 +286,10 @@ function registerGenerateVideoEndpoint(app, deps) {
             break;
           }
         }
+        // 2. Try fallback sub-phrases if nothing matched above
         if (!megaClipPath) {
           console.warn(`[5B][MEGA][WARN] No strict clip found for any GPT subject. Trying broad fallbacks...`);
-          let fallbackSubjects = [mainTopic, "Egypt", "Pyramids of Giza", "Sphinx", "ancient egypt"];
+          let fallbackSubjects = getFallbackSubjects(scene2text, mainTopic);
           for (let subj of fallbackSubjects) {
             megaClipPath = await findClipForScene({
               subject: subj,
@@ -285,15 +309,16 @@ function registerGenerateVideoEndpoint(app, deps) {
               break;
             }
           }
-          if (!megaClipPath) {
-            const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
-            megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
-            if (megaClipPath) {
-              console.log(`[5B][MEGA][KENBURNS] Ken Burns fallback created for "${candidateSubjects[0] || mainTopic}"`);
-            }
-          }
-          if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for any subject or fallback for: "${candidateSubjects[0] || mainTopic}"`);
         }
+        // 3. Ken Burns fallback
+        if (!megaClipPath) {
+          const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
+          megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
+          if (megaClipPath) {
+            console.log(`[5B][MEGA][KENBURNS] Ken Burns fallback created for "${candidateSubjects[0] || mainTopic}"`);
+          }
+        }
+        if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for any subject or fallback for: "${candidateSubjects[0] || mainTopic}"`);
         usedClips.push(megaClipPath);
 
         // === ENSURE MEGA CLIP IS LOCAL (R2 or remote source) ===
