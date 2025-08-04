@@ -3,7 +3,7 @@
 // The /api/generate-video route handler. Full job orchestration.
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // PRO+: Audio and muxed video caching, parallelized scene jobs
-// 2024-08: Works with new 5F and 5G logic for sync and split
+// 2024-08: Works with GPT-powered subject extraction (Section 11)
 // ===========================================================
 
 const { v4: uuidv4 } = require('uuid');
@@ -38,6 +38,9 @@ const {
   muxVideoWithNarration,
   splitVideoForFirstTwoScenes
 } = require('./section5f-video-processing.cjs');
+
+// === 5D: GPT + Visual Clip Matcher ===
+const { findClipForScene } = require('./section5d-clip-matcher.cjs');
 
 // === 5H: Job Cleanup (with post-job R2 ingestion) ===
 const { cleanupJob } = require('./section5h-job-cleanup.cjs');
@@ -111,14 +114,13 @@ function registerGenerateVideoEndpoint(app, deps) {
 
   const {
     splitScriptToScenes: depSplitScriptToScenes,
-    findClipForScene,
+    findClipForScene: depFindClipForScene, // will be ignored (now always use 5D matcher)
     createSceneAudio,
     createMegaSceneAudio,
     getAudioDuration, getVideoInfo, standardizeVideo,
     progress, voices, POLLY_VOICE_IDS,
   } = deps;
 
-  if (typeof findClipForScene !== "function") throw new Error('[5B][FATAL] findClipForScene missing from deps!');
   if (typeof createSceneAudio !== "function" || typeof createMegaSceneAudio !== "function")
     throw new Error('[5B][FATAL] Audio generation helpers missing!');
   if (typeof depSplitScriptToScenes !== "function")
@@ -264,7 +266,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           assertFileExists(clipPath, `CLIP_SCENE_${i+1}`);
 
           // === SCENE CLIP ARCHIVING METADATA ===
-          // Add metadata for this scene to jobContext.sceneClipMetaList
           jobContext.sceneClipMetaList.push({
             localFilePath: clipPath,
             subject: sceneSubject,
@@ -455,7 +456,7 @@ function registerGenerateVideoEndpoint(app, deps) {
       } finally {
         if (cleanupJob) {
           try {
-            cleanupJob(jobId, jobContext); // <--- Pass jobContext for async R2 archiving!
+            cleanupJob(jobId, jobContext);
           } catch (e) {
             console.warn(`[5B][CLEANUP][WARN][${jobId}] Cleanup failed:`, e);
           }
