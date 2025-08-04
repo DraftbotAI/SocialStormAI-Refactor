@@ -4,6 +4,7 @@
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // PRO+: Audio and muxed video caching, parallelized scene jobs
 // 2024-08: Works with GPT-powered subject extraction (Section 11)
+// Mega-clip logic: Scenes 1 & 2 = ONE continuous video, subject from line 2
 // ===========================================================
 
 const { v4: uuidv4 } = require('uuid');
@@ -21,6 +22,9 @@ const {
   extractVisualSubject
 } = require('./section5c-script-scene-utils.cjs');
 
+// === 11: GPT Visual Subject Extractor ===
+const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
+
 // === 5G Video/Music/Outro/Helpers ===
 const {
   concatScenes,
@@ -36,7 +40,6 @@ const {
   getDuration,
   trimForNarration,
   muxVideoWithNarration,
-  splitVideoForFirstTwoScenes
 } = require('./section5f-video-processing.cjs');
 
 // === 5D: GPT + Visual Clip Matcher ===
@@ -55,6 +58,21 @@ if (!fs.existsSync(videoCacheDir)) fs.mkdirSync(videoCacheDir);
 
 function hashForCache(str) {
   return crypto.createHash('sha1').update(str).digest('hex');
+}
+
+async function concatAudioFiles(audioPaths, outPath) {
+  // Naive ffmpeg concat for mp3s
+  const { exec } = require('child_process');
+  return new Promise((resolve, reject) => {
+    const filelistPath = `${outPath}.txt`;
+    fs.writeFileSync(filelistPath, audioPaths.map(p => `file '${p}'`).join('\n'));
+    const cmd = `ffmpeg -y -f concat -safe 0 -i "${filelistPath}" -c copy "${outPath}"`;
+    exec(cmd, (err) => {
+      fs.unlinkSync(filelistPath);
+      if (err) return reject(err);
+      resolve(outPath);
+    });
+  });
 }
 
 // ================= R2 UPLOAD HELPER =======================
@@ -160,8 +178,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         console.log(`[5B][SCRIPT][${jobId}] Full script input:\n${script}`);
 
         let scenes = depSplitScriptToScenes(script);
-
-        // Defensive scene handling & subject extraction (as before)
         scenes = Array.isArray(scenes) ? scenes : [];
         scenes = scenes.map((scene, idx) => {
           if (!scene || typeof scene !== 'object' || !Array.isArray(scene.texts)) {
@@ -186,93 +202,126 @@ function registerGenerateVideoEndpoint(app, deps) {
           return { ...scene, visualSubject: subject || scene.visualSubject || '' };
         });
 
-        // Defensive filtering (as before)
         scenes = scenes.filter(s =>
           s && Array.isArray(s.texts) && typeof s.texts[0] === 'string' && s.texts[0].length > 0
         );
         if (!scenes.length) throw new Error('[5B][FATAL] No valid scenes found after filter!');
 
-        // === Category folder detection ===
         const allSceneTexts = scenes.flatMap(s => Array.isArray(s.texts) ? s.texts : []);
         const mainTopic = allSceneTexts[0] || 'misc';
         const categoryFolder = getCategoryFolder(mainTopic);
         jobContext.categoryFolder = categoryFolder;
 
-        // === 2. SCENE/CLIP ASSIGNMENT ===
+        // === 2. MEGA-SCENE LOGIC: Scenes 1+2 rendered as one video ===
         const usedClips = [];
         const sceneFiles = [];
-        let megaClipPath = null;
-        let megaSceneTrimmedVideos = null;
 
-        // === 2a. Mega subject/clip logic (as before) ===
-        let megaSubject = scenes.length > 1 && scenes[1].isMegaScene ? scenes[1].visualSubject : allSceneTexts[1] || allSceneTexts[0];
-        if (!megaSubject || typeof megaSubject !== 'string' || megaSubject.length < 2) {
-          megaSubject = allSceneTexts[1] || allSceneTexts[0];
-        }
-        const GENERIC_SUBJECTS = ['face','person','man','woman','it','thing','someone','something','body','eyes'];
-        if (GENERIC_SUBJECTS.includes((megaSubject || '').toLowerCase())) {
-          megaSubject = allSceneTexts[0];
-        }
-        if (scenes.length > 1) {
-          megaClipPath = await findClipForScene({
-            subject: megaSubject,
-            sceneIdx: 1,
-            allSceneTexts,
-            mainTopic: megaSubject,
-            isMegaScene: true,
-            usedClips,
-            workDir,
-            jobId,
-            megaSubject: megaSubject,
-            jobContext,
-            categoryFolder
-          });
-          if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for mega-subject: "${megaSubject}"`);
-          usedClips.push(megaClipPath);
-        }
+        // -- A. Build MEGA audio (concat lines 1+2)
+        const scene1text = scenes[0].texts[0];
+        const scene2text = (scenes[1] && scenes[1].texts[0]) ? scenes[1].texts[0] : '';
+        const audioHash1 = hashForCache(JSON.stringify({ text: scene1text, voice, provider }));
+        const audioHash2 = hashForCache(JSON.stringify({ text: scene2text, voice, provider }));
+        const audioPath1 = path.join(audioCacheDir, `${audioHash1}.mp3`);
+        const audioPath2 = path.join(audioCacheDir, `${audioHash2}.mp3`);
 
-        // === 2c. Process all scenes (assign unique clips, audio, mux, etc.) ===
-        const sceneJobs = scenes.map((scene, i) => (async () => {
-          let isMegaScene = !!scene.isMegaScene;
-          let clipPath = null;
-          let sceneSubject = scene.visualSubject || (Array.isArray(scene.texts) && scene.texts[0]) || allSceneTexts[i];
+        if (!fs.existsSync(audioPath1) || fs.statSync(audioPath1).size < 10000)
+          await deps.createSceneAudio(scene1text, voice, audioPath1, provider);
+        if (!fs.existsSync(audioPath2) || fs.statSync(audioPath2).size < 10000)
+          await deps.createSceneAudio(scene2text, voice, audioPath2, provider);
+
+        assertFileExists(audioPath1, `AUDIO_SCENE_1`);
+        assertFileExists(audioPath2, `AUDIO_SCENE_2`);
+
+        const megaAudioPath = path.join(audioCacheDir, hashForCache(audioPath1 + audioPath2) + '-mega.mp3');
+        await concatAudioFiles([audioPath1, audioPath2], megaAudioPath);
+
+        // -- B. Extract subject for line 2
+        let megaSubject = scene2text;
+        if (extractVisualSubjects) {
+          try {
+            const subjList = await extractVisualSubjects(scene2text, mainTopic);
+            if (subjList && subjList[0]) megaSubject = subjList[0];
+          } catch (e) {
+            console.warn(`[5B][MEGA][WARN] GPT subject extract failed, falling back:`, e);
+          }
+        }
+        console.log(`[5B][MEGA][INFO] Using mega-clip subject: "${megaSubject}"`);
+
+        // -- C. Find the best megaClip
+        let megaClipPath = await findClipForScene({
+          subject: megaSubject,
+          sceneIdx: 1,
+          allSceneTexts,
+          mainTopic,
+          isMegaScene: true,
+          usedClips,
+          workDir,
+          jobId,
+          megaSubject,
+          jobContext,
+          categoryFolder
+        });
+        if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for mega-subject: "${megaSubject}"`);
+        usedClips.push(megaClipPath);
+        console.log(`[5B][MEGA][INFO] Mega-clip path: ${megaClipPath}`);
+
+        // -- D. Trim/loop mega-clip to match combined audio duration
+        const megaDuration = await getDuration(megaAudioPath);
+        const trimmedMegaClip = path.join(videoCacheDir, `${hashForCache(megaClipPath + megaAudioPath)}-megatrim.mp4`);
+        await trimForNarration(megaClipPath, trimmedMegaClip, megaDuration, { loop: true });
+        assertFileExists(trimmedMegaClip, `MEGA_TRIMMED_VIDEO`);
+
+        // -- E. Mux single mega video with combined audio
+        const megaMuxed = path.join(videoCacheDir, `${hashForCache(trimmedMegaClip + megaAudioPath)}-megamux.mp4`);
+        await muxVideoWithNarration(trimmedMegaClip, megaAudioPath, megaMuxed);
+        assertFileExists(megaMuxed, `MEGA_MUXED`);
+
+        // -- F. Save mega-scene result for scenes 1+2
+        sceneFiles[0] = megaMuxed;
+        sceneFiles[1] = megaMuxed;
+        jobContext.sceneClipMetaList.push({
+          localFilePath: megaMuxed,
+          subject: megaSubject,
+          sceneIdx: 0,
+          source: megaClipPath.includes('pexels') ? 'pexels' : megaClipPath.includes('pixabay') ? 'pixabay' : 'r2',
+          category: categoryFolder
+        });
+        jobContext.sceneClipMetaList.push({
+          localFilePath: megaMuxed,
+          subject: megaSubject,
+          sceneIdx: 1,
+          source: megaClipPath.includes('pexels') ? 'pexels' : megaClipPath.includes('pixabay') ? 'pixabay' : 'r2',
+          category: categoryFolder
+        });
+
+        // === 3. Process remaining scenes as normal ===
+        const sceneJobs = scenes.slice(2).map((scene, i) => (async () => {
+          let sceneIdx = i + 2;
+          let sceneSubject = scene.visualSubject || (Array.isArray(scene.texts) && scene.texts[0]) || allSceneTexts[sceneIdx];
+          const GENERIC_SUBJECTS = ['face','person','man','woman','it','thing','someone','something','body','eyes'];
           if (GENERIC_SUBJECTS.includes((sceneSubject || '').toLowerCase())) {
-            sceneSubject = allSceneTexts[0];
+            sceneSubject = mainTopic;
           }
-
-          // CLIP MATCHING
-          if (i === 0 || isMegaScene) {
-            clipPath = megaClipPath;
-          } else {
-            try {
-              clipPath = await findClipForScene({
-                subject: sceneSubject,
-                sceneIdx: i,
-                allSceneTexts,
-                mainTopic: allSceneTexts[0],
-                isMegaScene: false,
-                usedClips,
-                workDir,
-                jobId,
-                jobContext,
-                categoryFolder
-              });
-            } catch (e) {
-              console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for scene ${i + 1}:`, e);
-            }
-            if (!clipPath) throw new Error(`[5B][ERR] No clip found for scene ${i + 1}`);
-            usedClips.push(clipPath);
+          let clipPath;
+          try {
+            clipPath = await findClipForScene({
+              subject: sceneSubject,
+              sceneIdx,
+              allSceneTexts,
+              mainTopic,
+              isMegaScene: false,
+              usedClips,
+              workDir,
+              jobId,
+              jobContext,
+              categoryFolder
+            });
+          } catch (e) {
+            console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for scene ${sceneIdx + 1}:`, e);
           }
-          assertFileExists(clipPath, `CLIP_SCENE_${i+1}`);
-
-          // === SCENE CLIP ARCHIVING METADATA ===
-          jobContext.sceneClipMetaList.push({
-            localFilePath: clipPath,
-            subject: sceneSubject,
-            sceneIdx: i,
-            source: (clipPath || '').includes('pexels') ? 'pexels' : (clipPath || '').includes('pixabay') ? 'pixabay' : 'r2',
-            category: categoryFolder
-          });
+          if (!clipPath) throw new Error(`[5B][ERR] No clip found for scene ${sceneIdx + 1}`);
+          usedClips.push(clipPath);
+          assertFileExists(clipPath, `CLIP_SCENE_${sceneIdx+1}`);
 
           // AUDIO GENERATION WITH CACHE
           const audioHash = hashForCache(JSON.stringify({
@@ -281,87 +330,46 @@ function registerGenerateVideoEndpoint(app, deps) {
             provider
           }));
           const audioCachePath = path.join(audioCacheDir, `${audioHash}.mp3`);
-          let audioPath = audioCachePath;
+          if (!fs.existsSync(audioCachePath) || fs.statSync(audioCachePath).size < 10000)
+            await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
+          assertFileExists(audioCachePath, `AUDIO_SCENE_${sceneIdx+1}`);
 
-          let audioPreExists = fs.existsSync(audioCachePath) && fs.statSync(audioCachePath).size > 10000;
-          if (!audioPreExists) {
-            if (isMegaScene) {
-              await deps.createMegaSceneAudio(scene.texts, voice, audioCachePath, provider, workDir);
-            } else {
-              await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
-            }
-            assertFileExists(audioCachePath, isMegaScene ? `AUDIO_MEGA_${i+1}` : `AUDIO_SCENE_${i+1}`);
-          }
-
-          let audioDuration = -1;
-          try {
-            audioDuration = fs.existsSync(audioPath) ? (await getDuration(audioPath)) : -1;
-          } catch (err) {}
-          if (audioDuration <= 0.01) {
-            throw new Error(`[5B][AUDIO][FATAL] Audio file for scene ${i+1} is empty or corrupted: ${audioPath}`);
-          }
-
-          // PRECISE TRIM/MUX PIPELINE
-          const muxHash = hashForCache(JSON.stringify({
+          // TRIM/MUX
+          const narrationDuration = await getDuration(audioCachePath);
+          const trimmedVideoPath = path.join(workDir, `scene${sceneIdx+1}-trimmed.mp4`);
+          await trimForNarration(clipPath, trimmedVideoPath, narrationDuration);
+          const videoCachePath = path.join(videoCacheDir, `${hashForCache(JSON.stringify({
             text: scene.texts,
             voice,
             provider,
             clip: clipPath
-          }));
-          const videoCachePath = path.join(videoCacheDir, `${muxHash}.mp4`);
-          let muxedScenePath = videoCachePath;
+          }))}.mp4`);
+          await muxVideoWithNarration(trimmedVideoPath, audioCachePath, videoCachePath);
+          assertFileExists(videoCachePath, `MUXED_SCENE_${sceneIdx+1}`);
 
-          if (fs.existsSync(videoCachePath) && fs.statSync(videoCachePath).size > 100000) {
-            // Cache hit
-          } else {
-            if (isMegaScene) {
-              if (!megaSceneTrimmedVideos) {
-                const megaAudio1 = audioPath;
-                const nextAudioHash = hashForCache(JSON.stringify({
-                  text: scenes[1].texts,
-                  voice,
-                  provider
-                }));
-                const megaAudio2 = path.join(audioCacheDir, `${nextAudioHash}.mp3`);
-                if (!fs.existsSync(megaAudio2) || fs.statSync(megaAudio2).size < 10000) {
-                  await deps.createSceneAudio(scenes[1].texts[0], voice, megaAudio2, provider);
-                }
-                let dur1 = fs.existsSync(megaAudio1) ? (await getDuration(megaAudio1)) : 0;
-                let dur2 = fs.existsSync(megaAudio2) ? (await getDuration(megaAudio2)) : 0;
-                if (dur1 < 0.01 || dur2 < 0.01) {
-                  throw new Error(`[5B][AUDIO][FATAL] Mega scene audio is empty: [${megaAudio1}] ${dur1}s, [${megaAudio2}] ${dur2}s`);
-                }
-                megaSceneTrimmedVideos = await splitVideoForFirstTwoScenes(
-                  clipPath, megaAudio1, megaAudio2, workDir
-                );
-              }
-              const [scene1Video, scene2Video] = megaSceneTrimmedVideos;
-              const trimmedVideoPath = (i === 0) ? scene1Video : scene2Video;
-              await muxVideoWithNarration(trimmedVideoPath, audioPath, videoCachePath);
-              assertFileExists(videoCachePath, `MUXED_MEGA_${i+1}`);
-            } else {
-              const narrationDuration = audioDuration;
-              const trimmedVideoPath = path.join(workDir, `scene${i+1}-trimmed.mp4`);
-              await trimForNarration(clipPath, trimmedVideoPath, narrationDuration);
-              await muxVideoWithNarration(trimmedVideoPath, audioPath, videoCachePath);
-              assertFileExists(videoCachePath, `MUXED_SCENE_${i+1}`);
-            }
-          }
-          return { idx: i, muxedScenePath };
+          jobContext.sceneClipMetaList.push({
+            localFilePath: videoCachePath,
+            subject: sceneSubject,
+            sceneIdx,
+            source: (clipPath || '').includes('pexels') ? 'pexels' : (clipPath || '').includes('pixabay') ? 'pixabay' : 'r2',
+            category: categoryFolder
+          });
+
+          return { idx: sceneIdx, muxedScenePath: videoCachePath };
         })());
 
         progress[jobId] = { percent: 10, status: `Processing all scenes in parallel (with caching)...` };
         let allScenes;
         try {
           allScenes = await Promise.all(sceneJobs);
-          allScenes.sort((a, b) => a.idx - b.idx).forEach(obj => sceneFiles.push(obj.muxedScenePath));
+          allScenes.forEach(obj => sceneFiles[obj.idx] = obj.muxedScenePath);
         } catch (err) {
           throw new Error(`[5B][FATAL] One or more scenes failed to process: ${err}`);
         }
 
         progress[jobId] = { percent: 40, status: 'Stitching your video together...' };
 
-        // === 3. Bulletproof video scenes (codec/size) ===
+        // === 4. Bulletproof video scenes (codec/size) ===
         let refInfo = null;
         try {
           progress[jobId] = { percent: 44, status: 'Checking video quality...' };
@@ -376,7 +384,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           throw new Error(`[5B][BULLETPROOF][ERR][${jobId}] bulletproofScenes failed: ${e}`);
         }
 
-        // === 4. Concatenate all scene files ===
+        // === 5. Concatenate all scene files ===
         let concatPath;
         try {
           progress[jobId] = { percent: 60, status: 'Combining everything into one amazing video...' };
@@ -386,7 +394,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           throw new Error(`[5B][CONCAT][ERR][${jobId}] concatScenes failed: ${e}`);
         }
 
-        // === 5. Ensure audio (add silence if needed) ===
+        // === 6. Ensure audio (add silence if needed) ===
         let withAudioPath;
         try {
           progress[jobId] = { percent: 70, status: 'Finalizing your audio...' };
@@ -396,7 +404,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           throw new Error(`[5B][AUDIO][ERR][${jobId}] ensureAudioStream failed: ${e}`);
         }
 
-        // === 6. Overlay background music (if enabled) ===
+        // === 7. Overlay background music (if enabled) ===
         let musicPath = withAudioPath;
         if (music) {
           try {
@@ -418,7 +426,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 80, status: 'Music skipped (user setting).' };
         }
 
-        // === 7. Append outro (if enabled) ===
+        // === 8. Append outro (if enabled) ===
         let finalPath = musicPath;
         let r2FinalName = getUniqueFinalName('final-with-outro');
         if (outro) {
@@ -441,7 +449,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 90, status: 'Outro skipped (user setting).' };
         }
 
-        // === 8. Upload final video to R2 and finish ===
+        // === 9. Upload final video to R2 and finish ===
         try {
           progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2...' };
           const r2VideoUrl = await uploadToR2(finalPath, r2FinalName, jobId);
