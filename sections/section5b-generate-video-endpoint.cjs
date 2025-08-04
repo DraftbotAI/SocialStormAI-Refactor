@@ -1,4 +1,4 @@
-// ===========================================================
+// ============================================================
 // SECTION 5B: GENERATE VIDEO ENDPOINT (Job Controller)
 // The /api/generate-video route handler. Full job orchestration.
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
@@ -76,11 +76,9 @@ async function concatAudioFiles(audioPaths, outPath) {
 }
 
 // ========== ENSURE LOCAL CLIP FROM R2 ==========
-// Always call before using any matched clip!
 async function ensureLocalClipExists(r2Path, localPath) {
   if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10240) return localPath;
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  // Remove possible "./" or leading slashes
   const key = r2Path.replace(/^(\.\/)+/, '').replace(/^\/+/, '');
   console.log(`[5B][R2][DOWNLOAD] Fetching from R2: bucket=${bucket} key=${key} → ${localPath}`);
   try {
@@ -112,30 +110,24 @@ function getCategoryFolder(mainTopic) {
   if (/basketball|soccer|sports|lebron|fitness|exercise|workout|football/.test(lower)) return 'sports_fitness';
   if (/car|truck|tesla|vehicle|drive|race/.test(lower)) return 'cars_vehicles';
   if (/chimp|chimpanzee|ape|gorilla|orangutan|primate/.test(lower)) return 'animals_primates';
-  // ...add more rules as you wish...
   return 'misc';
 }
 
-// --- FALLBACK SUBJECT EXPANDER: Gets fallback phrases and sub-phrases ---
+// --- FALLBACK SUBJECT EXPANDER ---
 function getFallbackSubjects(fullSubject, mainTopic) {
   const subs = [];
   if (fullSubject) {
     const words = fullSubject.split(' ').filter(Boolean);
     if (words.length > 2) {
-      // Add 2-word phrases (sliding window)
       for (let i = 0; i < words.length - 1; i++) {
         const two = words.slice(i, i + 2).join(' ');
         if (two.length > 2) subs.push(two);
       }
     }
-    // Add each single word, skip ultra-generic ones
     subs.push(...words.filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as'].includes(w.toLowerCase())));
   }
-  // Add the main topic if not already present
   if (mainTopic && !subs.includes(mainTopic)) subs.push(mainTopic);
-  // Add ultra-generic backups (user can tune this list)
   subs.push('landmark', 'famous building', 'tourist attraction');
-  // De-dup and return
   return [...new Set(subs.map(s => s.trim()).filter(Boolean))];
 }
 
@@ -149,7 +141,7 @@ function registerGenerateVideoEndpoint(app, deps) {
 
   const {
     splitScriptToScenes: depSplitScriptToScenes,
-    findClipForScene: depFindClipForScene, // will be ignored (now always use 5D matcher)
+    findClipForScene: depFindClipForScene,
     createSceneAudio,
     createMegaSceneAudio,
     getAudioDuration, getVideoInfo, standardizeVideo,
@@ -354,16 +346,18 @@ function registerGenerateVideoEndpoint(app, deps) {
           category: categoryFolder
         });
 
-        // === 3. Process remaining scenes as normal ===
-        const sceneJobs = scenes.slice(2).map((scene, i) => (async () => {
-          let sceneIdx = i + 2;
+        // === 3. Process remaining scenes with bulletproof async for...of loop ===
+        for (let i = 2; i < scenes.length; i++) {
+          const scene = scenes[i];
+          let sceneIdx = i;
           let sceneSubject = scene.visualSubject || (Array.isArray(scene.texts) && scene.texts[0]) || allSceneTexts[sceneIdx];
           const GENERIC_SUBJECTS = ['face','person','man','woman','it','thing','someone','something','body','eyes'];
           if (GENERIC_SUBJECTS.includes((sceneSubject || '').toLowerCase())) {
             sceneSubject = mainTopic;
           }
-          let clipPath;
+          let clipPath = null;
           try {
+            console.log(`[5B][SCENE][${sceneIdx + 1}] Finding clip for subject: "${sceneSubject}"`);
             clipPath = await findClipForScene({
               subject: sceneSubject,
               sceneIdx,
@@ -420,16 +414,8 @@ function registerGenerateVideoEndpoint(app, deps) {
             category: categoryFolder
           });
 
-          return { idx: sceneIdx, muxedScenePath: videoCachePath };
-        })());
-
-        progress[jobId] = { percent: 10, status: `Processing all scenes in parallel (with caching)...` };
-        let allScenes;
-        try {
-          allScenes = await Promise.all(sceneJobs);
-          allScenes.forEach(obj => sceneFiles[obj.idx] = obj.muxedScenePath);
-        } catch (err) {
-          throw new Error(`[5B][FATAL] One or more scenes failed to process: ${err}`);
+          sceneFiles[sceneIdx] = videoCachePath;
+          console.log(`[5B][SCENE][${sceneIdx + 1}] Done: ${videoCachePath}`);
         }
 
         progress[jobId] = { percent: 40, status: 'Stitching your video together...' };
@@ -543,3 +529,21 @@ function registerGenerateVideoEndpoint(app, deps) {
 
 console.log('[5B][EXPORT] registerGenerateVideoEndpoint exported');
 module.exports = registerGenerateVideoEndpoint;
+
+// === UPLOAD TO R2 (Helper) ===
+async function uploadToR2(finalPath, r2FinalName, jobId) {
+  const bucket = process.env.R2_FINALS_BUCKET || 'socialstorm-finals';
+  const fileData = fs.readFileSync(finalPath);
+  const key = r2FinalName.startsWith('jobs/') ? r2FinalName : `jobs/${jobId}/${r2FinalName}`;
+  console.log(`[5B][R2][UPLOAD] Uploading final to bucket=${bucket} key=${key}`);
+  await s3Client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: fileData,
+    ContentType: 'video/mp4'
+  }));
+  const urlBase = process.env.R2_FINALS_BASEURL || '';
+  const url = urlBase ? `${urlBase.replace(/\/$/, '')}/${key}` : key;
+  console.log(`[5B][R2][UPLOAD][OK] Final uploaded: ${url}`);
+  return url;
+}
