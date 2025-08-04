@@ -171,7 +171,6 @@ async function findClipForScene({
         if (!found) {
           console.log(`[5D][R2][${jobId}] No valid R2 strict subject match for: "${searchPhrase}"`);
         }
-        // R2 helper always downloads/copies to job workDir and returns absolute path
         if (found && assertFileExists(found, 'R2_RESULT')) return found;
         return null;
       } catch (err) {
@@ -307,3 +306,4 @@ async function findClipForScene({
 }
 
 module.exports = { findClipForScene };
+

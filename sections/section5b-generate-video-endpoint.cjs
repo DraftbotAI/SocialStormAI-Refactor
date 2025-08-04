@@ -176,6 +176,7 @@ function registerGenerateVideoEndpoint(app, deps) {
       };
 
       try {
+        console.log(`[5B][DEBUG][${jobId}] Making workDir: ${workDir}`);
         fs.mkdirSync(workDir, { recursive: true });
         progress[jobId] = { percent: 2, status: 'Setting up your project...' };
         console.log(`[5B][WORKDIR][${jobId}] Created: ${workDir}`);
@@ -186,13 +187,16 @@ function registerGenerateVideoEndpoint(app, deps) {
         console.log(`[5B][INPUTS][${jobId}] Script length: ${script.length} | Voice: ${voice}`);
         console.log(`[5B][SCRIPT][${jobId}] Full script input:\n${script}`);
 
+        console.log(`[5B][DEBUG][${jobId}] Splitting script into scenes...`);
         let scenes = depSplitScriptToScenes(script);
         scenes = Array.isArray(scenes) ? scenes : [];
+        console.log(`[5B][DEBUG][${jobId}] Scenes split: count = ${scenes.length}`);
+
         scenes = scenes.map((scene, idx) => {
           if (!scene || typeof scene !== 'object' || !Array.isArray(scene.texts)) {
             console.error(`[5B][BUG][${jobId}] Invalid scene at idx ${idx}, auto-wrapping:`, scene);
             return {
-              id: `scene${idx + 1}-fixwrap-${uuidv4()}`,
+              id: `scene${idx + 1}-fixwrap-${v4()}`,
               texts: [typeof scene === 'string' ? scene : ''],
               isMegaScene: false,
               type: 'auto-wrap',
@@ -233,8 +237,10 @@ function registerGenerateVideoEndpoint(app, deps) {
         const audioPath1 = path.join(audioCacheDir, `${audioHash1}.mp3`);
         const audioPath2 = path.join(audioCacheDir, `${audioHash2}.mp3`);
 
+        console.log(`[5B][DEBUG][${jobId}] Ensuring audio for scene 1...`);
         if (!fs.existsSync(audioPath1) || fs.statSync(audioPath1).size < 10000)
           await deps.createSceneAudio(scene1text, voice, audioPath1, provider);
+        console.log(`[5B][DEBUG][${jobId}] Ensuring audio for scene 2...`);
         if (!fs.existsSync(audioPath2) || fs.statSync(audioPath2).size < 10000)
           await deps.createSceneAudio(scene2text, voice, audioPath2, provider);
 
@@ -242,12 +248,14 @@ function registerGenerateVideoEndpoint(app, deps) {
         assertFileExists(audioPath2, `AUDIO_SCENE_2`);
 
         const megaAudioPath = path.join(audioCacheDir, hashForCache(audioPath1 + audioPath2) + '-mega.mp3');
+        console.log(`[5B][DEBUG][${jobId}] Concatenating mega audio...`);
         await concatAudioFiles([audioPath1, audioPath2], megaAudioPath);
 
         // -- B. Extract subject candidates for line 2 (Scene 2)
         let candidateSubjects = [];
         if (extractVisualSubjects) {
           try {
+            console.log(`[5B][DEBUG][${jobId}] Extracting visual subjects for scene 2...`);
             candidateSubjects = await extractVisualSubjects(scene2text, mainTopic);
             if (!Array.isArray(candidateSubjects) || !candidateSubjects.length) candidateSubjects = [];
           } catch (e) {
@@ -260,6 +268,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         let megaClipPath = null;
         // 1. Try all GPT subject candidates (strict)
         for (let subj of candidateSubjects) {
+          console.log(`[5B][MEGA][${jobId}] Trying mega-clip subject: "${subj}"`);
           megaClipPath = await findClipForScene({
             subject: subj,
             sceneIdx: 1,
@@ -283,6 +292,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           console.warn(`[5B][MEGA][WARN] No strict clip found for any GPT subject. Trying broad fallbacks...`);
           let fallbackSubjects = getFallbackSubjects(scene2text, mainTopic);
           for (let subj of fallbackSubjects) {
+            console.log(`[5B][MEGA][${jobId}] Trying fallback mega-clip subject: "${subj}"`);
             megaClipPath = await findClipForScene({
               subject: subj,
               sceneIdx: 1,
@@ -304,6 +314,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
         // 3. Ken Burns fallback
         if (!megaClipPath) {
+          console.warn(`[5B][MEGA][${jobId}] No video found. Trying Ken Burns fallback for: "${candidateSubjects[0] || mainTopic}"`);
           const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
           megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
           if (megaClipPath) {
@@ -318,12 +329,14 @@ function registerGenerateVideoEndpoint(app, deps) {
         await ensureLocalClipExists(megaClipPath, localMegaClipPath);
 
         // -- D. Trim/loop mega-clip to match combined audio duration
+        console.log(`[5B][DEBUG][${jobId}] Trimming mega-clip to match audio duration...`);
         const megaDuration = await getDuration(megaAudioPath);
         const trimmedMegaClip = path.join(videoCacheDir, `${hashForCache(localMegaClipPath + megaAudioPath)}-megatrim.mp4`);
         await trimForNarration(localMegaClipPath, trimmedMegaClip, megaDuration, { loop: true });
         assertFileExists(trimmedMegaClip, `MEGA_TRIMMED_VIDEO`);
 
         // -- E. Mux single mega video with combined audio
+        console.log(`[5B][DEBUG][${jobId}] Muxing mega video with audio...`);
         const megaMuxed = path.join(videoCacheDir, `${hashForCache(trimmedMegaClip + megaAudioPath)}-megamux.mp4`);
         await muxVideoWithNarration(trimmedMegaClip, megaAudioPath, megaMuxed);
         assertFileExists(megaMuxed, `MEGA_MUXED`);
@@ -510,7 +523,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
 
       } catch (err) {
-        console.error(`[5B][FATAL][JOB][${jobId}] Video job failed:`, err);
+        console.error(`[5B][FATAL][JOB][${jobId}] Video job failed:`, err, err && err.stack ? err.stack : '');
         progress[jobId] = { percent: 100, status: 'Something went wrong. Please try again or contact support.', error: err.message || err.toString() };
       } finally {
         if (cleanupJob) {
