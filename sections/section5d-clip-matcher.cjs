@@ -26,12 +26,12 @@ const GENERIC_SUBJECTS = [
   'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children'
 ];
 
-// --- Fuzzy normalize: lower, remove space, hyphen, underscore, dot ---
+// --- Normalize string for matching
 function normalizeStr(str) {
   return (str || '').toLowerCase().replace(/[\s_\-\.]/g, '');
 }
 
-// Utility: Validate that file exists and is above minimum size
+// --- File existence & min size check
 function assertFileExists(file, label = 'FILE', minSize = 10240) {
   try {
     if (!file || !fs.existsSync(file)) {
@@ -50,8 +50,7 @@ function assertFileExists(file, label = 'FILE', minSize = 10240) {
   }
 }
 
-// === STRICT SUBJECT CHECK ===
-// Only accepts results (filename/metadata) that contain *exact* subject as a word
+// --- Only accept filenames that contain the subject as a word
 function subjectInFilename(filename, subject) {
   if (!filename || !subject) return false;
   const safeSubject = cleanForFilename(subject);
@@ -83,10 +82,9 @@ async function findClipForScene({
   jobContext = {},
   categoryFolder
 }) {
-  // === Main subject selection logic ===
   let searchSubject = subject;
 
-  // For mega-scene (scene 2) and scene 1, always use megaSubject or mainTopic, never a generic
+  // --- Mega-scene & scene 1 anchoring ---
   if (isMegaScene || sceneIdx === 0) {
     if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())) {
       searchSubject = megaSubject;
@@ -100,7 +98,7 @@ async function findClipForScene({
     }
   }
 
-  // For other scenes, fall back if subject is generic
+  // Fallback if subject is generic
   if (!searchSubject || GENERIC_SUBJECTS.includes((searchSubject || '').toLowerCase())) {
     if (mainTopic && !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())) {
       searchSubject = mainTopic;
@@ -127,7 +125,7 @@ async function findClipForScene({
     console.log(`[5D][MATCH][${jobId}] Used clips so far: ${JSON.stringify(usedClips)}`);
   }
 
-  // Validate all required helpers
+  // --- Validate all required helpers ---
   if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !findUnsplashImageForScene || !fallbackKenBurnsVideo) {
     console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
     return null;
