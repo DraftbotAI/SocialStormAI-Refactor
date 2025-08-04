@@ -46,7 +46,14 @@ function getKeywords(str) {
   return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
 }
 
-// --- SCORING: Works for all image APIs ---
+// --- STRICT SUBJECT: ALL subject keywords must be present in fields ---
+function strictSubjectPresent(fields, subject) {
+  const subjectWords = getKeywords(subject);
+  if (!subjectWords.length) return false;
+  return subjectWords.every(w => fields.includes(w));
+}
+
+// --- SCORING: Works for all image APIs, ONLY score if strict subject present ---
 function scoreImage(candidate, subject, usedClips = [], extra = {}) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
@@ -76,6 +83,12 @@ function scoreImage(candidate, subject, usedClips = [], extra = {}) {
       candidate.pageURL || '',
       candidate.largeImageURL || ''
     ].join(' ').toLowerCase();
+  }
+
+  // STRICT: only score if ALL subject words present
+  if (!strictSubjectPresent(fields, subject)) {
+    score -= 9999; // Hard reject, will not be used
+    return score;
   }
 
   // Phrase match
@@ -122,7 +135,10 @@ async function findImageInUnsplash(subject, usedClips = []) {
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][UNSPLASH][CANDIDATE][${i + 1}] ${c.urls.full} | score=${c.score} | desc="${c.description || c.alt_description || ''}"`);
       });
-      return candidates[0]?.urls.full || null;
+      // Only return if strict subject present
+      if (candidates[0]?.score >= 0) return candidates[0].urls.full;
+      else console.warn(`[10D][UNSPLASH][STRICT] No strict subject match found for "${subject}"`);
+      return null;
     }
     console.log(`[10D][UNSPLASH] No images found for: "${subject}"`);
     return null;
@@ -160,7 +176,9 @@ async function findImageInPexels(subject, usedClips = []) {
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][PEXELS-IMG][CANDIDATE][${i + 1}] ${c.src.original} | score=${c.score} | photographer="${c.photographer || ''}"`);
       });
-      return candidates[0]?.src.original || null;
+      if (candidates[0]?.score >= 0) return candidates[0].src.original;
+      else console.warn(`[10D][PEXELS-IMG][STRICT] No strict subject match found for "${subject}"`);
+      return null;
     }
     console.log(`[10D][PEXELS-IMG] No images found for: "${subject}"`);
     return null;
@@ -198,7 +216,9 @@ async function findImageInPixabay(subject, usedClips = []) {
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][PIXABAY-IMG][CANDIDATE][${i + 1}] ${c.largeImageURL} | score=${c.score} | tags="${c.tags}"`);
       });
-      return candidates[0]?.largeImageURL || null;
+      if (candidates[0]?.score >= 0) return candidates[0].largeImageURL;
+      else console.warn(`[10D][PIXABAY-IMG][STRICT] No strict subject match found for "${subject}"`);
+      return null;
     }
     console.log(`[10D][PIXABAY-IMG] No images found for: "${subject}"`);
     return null;
@@ -342,7 +362,6 @@ async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
 }
 
 // --- Main entry: fallback to Ken Burns if no video found ---
-// Returns: local .mp4 path (or null if fail)
 async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClips = []) {
   try {
     console.log(`[10D][FALLBACK][${jobId}] Attempting Ken Burns fallback video for "${subject}" | workDir="${workDir}" | sceneIdx=${sceneIdx}`);
@@ -371,10 +390,11 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     for (let c of candidates) {
       c.score = scoreImage({ ...c, url: c.url }, subject, usedClips);
     }
+    candidates = candidates.filter(c => c.score >= 0); // Only accept strict subject matches
     candidates.sort((a, b) => b.score - a.score);
 
     if (!candidates.length) {
-      console.warn(`[10D][FALLBACK][${jobId}] No fallback image found for "${subject}"`);
+      console.warn(`[10D][FALLBACK][${jobId}] No strict subject fallback image found for "${subject}"`);
       return null;
     }
 

@@ -24,16 +24,33 @@ function generateViralHookAndSummary(script, topic = '') {
   return summaryLine;
 }
 
-// === Visual Subject Extraction (AI/GPT-ready) ===
+// === Visual Subject Extraction (strict matchable phrase, never full sentence) ===
 function extractVisualSubject(line, mainTopic = '') {
-  if (mainTopic && line.toLowerCase().includes(mainTopic.toLowerCase())) {
+  if (!line && mainTopic) return mainTopic;
+  // Prefer mainTopic if present and not generic/long
+  if (mainTopic && line && line.toLowerCase().includes(mainTopic.toLowerCase()) && mainTopic.length < 25) {
     return mainTopic;
   }
-  const candidates = (line.match(/\b([A-Za-z]{4,})\b/g) || [])
-    .filter(word =>
-      !['this', 'that', 'they', 'will', 'have', 'with', 'from', 'your', 'about', 'there', 'their', 'which', 'when', 'just'].includes(word.toLowerCase())
-    );
-  return candidates.length ? candidates[0] : line.trim().split(' ').slice(0, 3).join(' ');
+  // Clean up, split line, remove stopwords and generic filler
+  const stopwords = [
+    'the', 'a', 'an', 'and', 'or', 'but', 'if', 'of', 'at', 'by', 'for', 'with', 'about', 'into', 'on', 'after',
+    'in', 'to', 'from', 'up', 'down', 'over', 'under', 'again', 'further', 'then', 'once', 'there', 'their', 'they',
+    'his', 'her', 'she', 'he', 'him', 'hers', 'its', 'it', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'as', 'such', 'just', 'which', 'when', 'that', 'this', 'your'
+  ];
+  // Remove punctuation, split into words
+  const tokens = (line || '')
+    .replace(/[^a-zA-Z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter(tok => tok && !stopwords.includes(tok.toLowerCase()) && tok.length > 2);
+  // If any all-caps acronym (NASA, etc) use that
+  const caps = tokens.find(w => /^[A-Z]{2,}$/.test(w));
+  if (caps) return caps;
+  // Return up to 3 tokens as a phrase (never the full sentence)
+  if (tokens.length >= 3) return tokens.slice(0, 3).join(' ');
+  if (tokens.length === 2) return tokens.join(' ');
+  if (tokens.length === 1) return tokens[0];
+  return mainTopic || '';
 }
 
 /**
@@ -70,10 +87,10 @@ function splitScriptToScenes(script, topic = '') {
     isMegaScene: false,
     type: 'hook-summary',
     origIndices: [0],
-    visualSubject: mainTopic
+    visualSubject: extractVisualSubject(summaryLine, mainTopic)
   });
   seenIds.add(hookId);
-  console.log(`[5C][HOOK] Created HOOK SCENE: "${summaryLine}" [ID: ${hookId}] visualSubject="${mainTopic}"`);
+  console.log(`[5C][HOOK] Created HOOK SCENE: "${summaryLine}" [ID: ${hookId}] visualSubject="${scenes[0].visualSubject}"`);
 
   // === Scene 2: MEGA-SCENE (combine next 2 lines)
   if (restLines.length > 1) {
@@ -145,7 +162,12 @@ function splitScriptToScenes(script, topic = '') {
     if (idx > 0 && seenIds.has(scene.id)) {
       console.warn(`[5C][DEFENSE][BUG] Duplicate scene ID detected for idx ${idx}: ${scene.id}`);
     }
-    return { ...scene, texts: safeTexts, visualSubject: scene.visualSubject || mainTopic };
+    // Re-extract for safety if visualSubject is missing or too long
+    let subject = scene.visualSubject;
+    if (!subject || typeof subject !== 'string' || subject.length > 40) {
+      subject = extractVisualSubject(safeTexts[0], mainTopic);
+    }
+    return { ...scene, texts: safeTexts, visualSubject: subject || mainTopic };
   });
 
   console.log(`[5C][SPLIT] Total scenes generated: ${finalScenes.length}`);
@@ -187,7 +209,11 @@ function bulletproofScenes(scenes) {
       safeTexts = [''];
       console.warn(`[5C][BULLETPROOF][BUG] Scene ${scene.id || idx} had empty texts array. Setting to [''].`);
     }
-    return { ...scene, texts: safeTexts, visualSubject: scene.visualSubject || '' };
+    let subject = scene.visualSubject;
+    if (!subject || typeof subject !== 'string' || subject.length > 40) {
+      subject = extractVisualSubject(safeTexts[0], '');
+    }
+    return { ...scene, texts: safeTexts, visualSubject: subject || '' };
   });
   if (!safe.length) {
     console.warn('[5C][BULLETPROOF][WARN] No valid scenes found. Returning generic fallback.');

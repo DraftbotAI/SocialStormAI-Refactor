@@ -3,7 +3,7 @@
 // Finds and downloads best-matching video from Pexels API
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Parallel-safe: unique file output per job/scene
-// 2024-08: Upgraded scoring, logging, and multi-word matching
+// 2024-08: Strict subject query, bulletproof subject filter, zero skips
 // ===========================================================
 
 const axios = require('axios');
@@ -30,6 +30,14 @@ function getKeywords(str) {
     .replace(/[^a-z0-9\s-]/g, '')
     .split(/[\s\-]+/)
     .filter(w => w.length > 2);
+}
+
+// --- Strict subject present: all keywords in fields ---
+function strictSubjectPresent(fields, subject) {
+  const subjectWords = getKeywords(subject);
+  if (!subjectWords.length) return false;
+  // Only match if ALL subject keywords are present in fields string
+  return subjectWords.every(w => fields.includes(w));
 }
 
 // --- File validation ---
@@ -78,20 +86,28 @@ async function downloadPexelsVideoToLocal(url, outPath, jobId) {
   }
 }
 
-// --- Scoring function: Smartest possible match (phrase, keywords, aspect, etc) ---
+// --- Scoring function: Only match if subject is STRICTLY present ---
 function scorePexelsMatch(video, file, subject, usedClips = []) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
 
-  // Main filename/description for scoring (title, tags, user, etc)
+  // Main fields for scoring
   const fields = [
     (video?.user?.name || ''),
     (video?.url || ''),
     (file?.link || ''),
     (file?.file_type || ''),
-    ...(video?.tags ? video.tags.map(t => t.title || t) : [])
+    ...(video?.tags ? video.tags.map(t => t.title || t) : []),
+    (video?.description || ''),
+    (video?.title || '')
   ].join(' ').toLowerCase();
+
+  // Only score if strict subject present (all subject words must appear)
+  if (!strictSubjectPresent(fields, subject)) {
+    score -= 9999; // Hard reject non-matches
+    return score;
+  }
 
   // Phrase match
   if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 60;
@@ -106,9 +122,9 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
   });
 
   // Aspect ratio: prefer portrait (9:16), then 16:9
-  if (file.width > file.height) score += 10; // Landscape slightly preferred for shorts (background blur)
+  if (file.height > file.width) score += 12; // Portrait perfect for shorts
   if (file.width / file.height > 1.4 && file.width / file.height < 2.0) score += 6; // 16:9-ish
-  if (file.height / file.width > 1.7 && file.height / file.width < 2.1) score += 12; // 9:16 portrait perfect
+  if (file.height / file.width > 1.7 && file.height / file.width < 2.1) score += 8; // 9:16 portrait
 
   // Video quality/length
   score += file.height >= 720 ? 5 : 0;
@@ -131,7 +147,7 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
 
 /**
  * Finds and downloads the best Pexels video for a given subject/scene,
- * using context, deduping, and max logging.
+ * using strict keyword match (ALL subject words must be present in metadata).
  * @param {string} subject - Main scene subject (clean, descriptive)
  * @param {string} workDir - Local job folder for saving video
  * @param {number} sceneIdx
@@ -168,11 +184,12 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
       );
 
       const best = scored[0];
+      // Only accept match if score is not a reject and >=20 (all words present, etc)
       if (best && best.score >= 20) {
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
         return await downloadPexelsVideoToLocal(best.file.link, outPath, jobId);
       }
-      console.warn(`[10B][PEXELS][${jobId}] No strong Pexels match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
+      console.warn(`[10B][PEXELS][${jobId}] No strict Pexels match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
     } else {
       console.log(`[10B][PEXELS][${jobId}] No Pexels video results found for "${subject}"`);
     }

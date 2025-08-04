@@ -18,6 +18,7 @@ if (!UNSPLASH_ACCESS_KEY) {
 
 console.log('[10F][INIT] Unsplash image helper loaded.');
 
+// --- Clean string for safe filenames ---
 function cleanForFilename(str) {
   return (str || '')
     .toLowerCase()
@@ -31,32 +32,50 @@ function getKeywords(str) {
   return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
 }
 
+// --- Strict subject presence: all subject words must be present in fields ---
+function strictSubjectPresent(fields, subject) {
+  const subjectWords = getKeywords(subject);
+  if (!subjectWords.length) return false;
+  return subjectWords.every(w => fields.includes(w));
+}
+
 /**
  * Scoring function for Unsplash results.
+ * Enforces strict subject: scores only if all keywords are present!
  */
 function scoreUnsplashImage(result, subject, usedClips = []) {
   let score = 0;
   const cleanedSubject = subject.toLowerCase();
   const subjectWords = getKeywords(subject);
-  const desc = ((result.alt_description || '') + ' ' + (result.description || '') + ' ' + (result.user?.name || '')).toLowerCase();
+
+  const desc = (
+    (result.alt_description || '') + ' ' +
+    (result.description || '') + ' ' +
+    (result.user?.name || '') + ' ' +
+    ((result.tags || []).map(t => t.title || t).join(' '))
+  ).toLowerCase();
+
+  // STRICT: Only score if all subject words are present
+  if (!strictSubjectPresent(desc, subject)) {
+    score -= 9999; // Hard reject
+    return score;
+  }
 
   // Phrase match
-  if (desc.includes(cleanedSubject)) score += 60;
+  if (desc.includes(cleanedSubject) && cleanedSubject.length > 2) score += 60;
 
-  // All words present
+  // All words present (redundant, already checked, but for strong signal)
   if (subjectWords.every(w => desc.includes(w)) && subjectWords.length > 1) score += 30;
 
-  // Each word present
-  subjectWords.forEach(word => {
-    if (desc.includes(word)) score += 5;
-  });
+  // Each word present (small boost)
+  subjectWords.forEach(word => { if (desc.includes(word)) score += 5; });
 
   // Prefer portrait/HD
   if (result.width >= 1000) score += 8;
   if (result.height >= 1500) score += 8;
   if (result.height > result.width) score += 10;
 
-  // Bonus for popularity (if present)
+  // Bonus for popularity
   if (result.likes && result.likes > 100) score += 3;
 
   // Penalize used
@@ -106,7 +125,7 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
     return null;
   }
 
-  // Score all results, skip used
+  // Score all results, skip used, STRICT: only candidates with strict subject match
   let scored = json.results.map(result => ({
     result,
     score: scoreUnsplashImage(result, subject, usedClips),
@@ -115,14 +134,14 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
 
   scored.sort((a, b) => b.score - a.score);
 
-  // Log top candidates
+  // Log top candidates (always show if any)
   scored.slice(0, 5).forEach((s, i) => {
     console.log(`[10F][CANDIDATE][${jobId}] [${i + 1}] url=${s.url} | score=${s.score} | desc="${s.result.alt_description || ''}"`);
   });
 
   const best = scored[0];
-  if (!best || !best.url || best.score < 20) {
-    console.warn(`[10F][NO_GOOD][${jobId}] No strong Unsplash match for "${subject}" (best score: ${best ? best.score : 'none'})`);
+  if (!best || !best.url || best.score < 25) {
+    console.warn(`[10F][NO_GOOD][${jobId}] No strict Unsplash match for "${subject}" (best score: ${best ? best.score : 'none'})`);
     return null;
   }
 

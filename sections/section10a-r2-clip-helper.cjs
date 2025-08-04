@@ -3,7 +3,7 @@
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for parallel dedupe/scan)
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Parallel safe: no temp file collisions
-// Upgraded 2024-08: Smarter scoring, phrase/keyword matching, verbose logs
+// 2024-08: Strict subject enforcement, only returns if filename contains subject as a word
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
@@ -32,20 +32,14 @@ const s3Client = new S3Client({
   }
 });
 
-// === UTILS ===
-function normalize(str) {
-  return String(str || '')
+// === Filename normalizer (for strict subject check) ===
+function cleanForFilename(str) {
+  return (str || '')
     .toLowerCase()
-    .replace(/[\s_\-\.]+/g, '')
-    .replace(/[^a-z0-9]/g, '');
-}
-
-function getKeywords(str) {
-  return String(str || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s\-]/g, '')
-    .split(/[\s\-]+/)
-    .filter(w => w.length > 2);
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 70);
 }
 
 // === BULLETPROOF: List all files in R2 ===
@@ -76,37 +70,13 @@ async function listAllFilesInR2(prefix = '', jobId = '') {
   }
 }
 
-// === ADVANCED SCORING: Score for each file based on subject/keywords ===
-function scoreR2Match(file, subject, extraPhrases = []) {
-  const normFile = normalize(file);
-  const normSubject = normalize(subject);
-  let score = 0;
-
-  // Exact full match (e.g. "gorilla")
-  if (normFile === normSubject && normSubject.length > 2) return 100;
-
-  // Strong phrase match
-  if (normFile.includes(normSubject) && normSubject.length > 2) score += 80;
-
-  // All keywords present (phrase split)
-  const subjectWords = getKeywords(subject);
-  let wordsMatched = 0;
-  for (let word of subjectWords) {
-    if (normFile.includes(word)) wordsMatched++;
-  }
-  if (wordsMatched === subjectWords.length && subjectWords.length > 1) score += 60;
-
-  // Partial/keyword fallback
-  if (wordsMatched > 0) score += 10 * wordsMatched;
-
-  // Extra phrases boost (e.g. "chimpanzee", "primate", "gorilla")
-  for (let p of extraPhrases) {
-    if (normFile.includes(normalize(p))) score += 15;
-  }
-  // Add a small bump for long keyword matches
-  if (normFile.includes(normSubject) && normSubject.length > 6) score += 15;
-
-  return score;
+// === STRICT SUBJECT MATCH: Only accept files that include the subject as a word ===
+function subjectInFilename(filename, subject) {
+  if (!filename || !subject) return false;
+  const safeSubject = cleanForFilename(subject);
+  // Look for _subject_ or -subject- or exact at start/end
+  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|$)`, 'i');
+  return re.test(cleanForFilename(filename));
 }
 
 function isValidClip(filePath, jobId) {
@@ -128,17 +98,16 @@ function isValidClip(filePath, jobId) {
 }
 
 /**
- * Finds the best-matching video in R2 and downloads it to local workDir.
+ * Finds the best-matching video in R2 that STRICTLY contains the subject in the filename.
  * Used by 5D as findR2ClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
  * @param {string} subject
  * @param {string} workDir
  * @param {number} sceneIdx
  * @param {string} jobId
  * @param {string[]} usedClips
- * @param {string[]} [extraPhrases] - additional keywords to match
  * @returns {Promise<string|null>} Local video path (or null if not found)
  */
-async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', usedClips = [], extraPhrases = []) {
+async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
   console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${subject}" | sceneIdx=${sceneIdx} | workDir="${workDir}" | usedClips=${JSON.stringify(usedClips)}`);
 
   if (!subject || typeof subject !== 'string') {
@@ -158,26 +127,17 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
       f.endsWith('.mp4') && !usedClips.some(u => f.endsWith(u) || f === u)
     );
 
-    // Score all files (and log details)
-    let allScores = mp4Files.map(file => ({
-      file,
-      score: scoreR2Match(file, subject, extraPhrases),
-    }));
-    allScores.sort((a, b) => b.score - a.score);
-
-    // Log top 10 matches
-    console.log(`[10A][R2][${jobId}][SCORES] Top R2 file scores for "${subject}":`);
-    allScores.slice(0, 10).forEach((s, i) =>
-      console.log(`  [${i + 1}] ${s.file} -> ${s.score}`)
-    );
-
-    // Best file logic: must be a "good" match (score >= 50)
-    const best = allScores[0];
-    if (!best || best.score < 50) {
-      console.log(`[10A][R2][${jobId}] No strong R2 match for "${subject}" (best score: ${best ? best.score : -1})`);
+    // Only keep files with subject in the filename (STRICT)
+    const subjectMatches = mp4Files.filter(f => subjectInFilename(f, subject));
+    if (!subjectMatches.length) {
+      console.log(`[10A][R2][${jobId}] No strict subject match in R2 for "${subject}"`);
       return null;
     }
-    const bestFile = best.file;
+
+    // Prefer shortest filename (most specific match), then alphabetical
+    subjectMatches.sort((a, b) => a.length - b.length || a.localeCompare(b));
+
+    const bestFile = subjectMatches[0];
 
     // Unique filename for every download attempt (parallel safe)
     const unique = uuidv4();
