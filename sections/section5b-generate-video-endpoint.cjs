@@ -196,7 +196,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           if (!scene || typeof scene !== 'object' || !Array.isArray(scene.texts)) {
             console.error(`[5B][BUG][${jobId}] Invalid scene at idx ${idx}, auto-wrapping:`, scene);
             return {
-              id: `scene${idx + 1}-fixwrap-${v4()}`,
+              id: `scene${idx + 1}-fixwrap-${uuidv4()}`,
               texts: [typeof scene === 'string' ? scene : ''],
               isMegaScene: false,
               type: 'auto-wrap',
