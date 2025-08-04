@@ -27,15 +27,16 @@ async function extractVisualSubjects(line, mainTopic) {
   }
 
   const prompt = `
-You are a world-class viral video editor for TikTok, Reels, and Shorts. For each line of a script, your ONLY job is to pick the 4 best possible VISUAL subjects to show in that scene. 
+You are a world-class viral video editor for TikTok, Reels, and Shorts. For each line of a script, your ONLY job is to pick the 4 best possible VISUAL subjects to show in that scene.
 
 RULES:
 - Only return objects, places, people, or actions that can be LITERALLY SHOWN ON SCREEN.
 - Ignore all metaphors, jokes, emotions, abstract concepts, or invisible things.
 - If a line is not visually showable, use the main topic as fallback.
 - Each answer should be concrete, visual, and unambiguous.
+- No duplicate items, no vague generalities.
 
-Return EXACTLY 4, in order: primary, context, fallback, general.  
+Return **EXACTLY** 4, in order: primary, context, fallback, general.
 Output ONLY a numbered list. No intro, no explanation, no extra info.
 
 EXAMPLES:
@@ -166,6 +167,27 @@ Main topic: "Cute animals"
 3. Owner petting puppy
 4. Dog park scene
 
+Line: "Pour the cement and smooth it out."
+Main topic: "Home improvement"
+1. Wet cement being poured
+2. Worker smoothing cement with trowel
+3. Construction site foundation
+4. Finished smooth cement floor
+
+Line: "Scan the QR code to join."
+Main topic: "Event sign-up"
+1. QR code on screen
+2. Person scanning with phone
+3. Event invitation flyer
+4. Group of people at event
+
+Line: "Add chili flakes for a spicy kick."
+Main topic: "Cooking"
+1. Chili flakes being sprinkled
+2. Spicy dish in bowl
+3. Red chili peppers
+4. Close-up of food with spices
+
 NOW RETURN:
 Line: "${line}"
 Main topic: "${mainTopic}"
@@ -179,14 +201,25 @@ Main topic: "${mainTopic}"
         .trim()
         .split('\n')
         .map(l => l.replace(/^\d+[\.\)]\s*/, '').replace(/^- /, '').trim())
+        .map(l => l.replace(/[^A-Za-z0-9,\-\'\"\.\!\(\)\:\&\s\/]/g, '')) // strip any emoji or GPT weirdness
         .filter(Boolean);
     }
-    // Always return 4 items, falling back to mainTopic if needed
-    while (list.length < 4) list.push(mainTopic);
-    if (list.length > 4) list = list.slice(0, 4);
+    // Remove duplicates & blanks, fallback to mainTopic
+    const seen = new Set();
+    let finalList = [];
+    for (let item of list) {
+      if (item && !seen.has(item.toLowerCase()) && item.length > 2) {
+        seen.add(item.toLowerCase());
+        finalList.push(item);
+      }
+      if (finalList.length === 4) break;
+    }
+    // Always return 4 items, padding with mainTopic if needed
+    while (finalList.length < 4) finalList.push(mainTopic);
+    if (finalList.length > 4) finalList = finalList.slice(0, 4);
 
-    console.log('[11][RESULT] Visual subjects:', list);
-    return list;
+    console.log('[11][RESULT] Visual subjects:', finalList);
+    return finalList;
   } catch (err) {
     console.error('[11][ERROR] GPT visual extraction failed:', err);
     return [mainTopic, mainTopic, mainTopic, mainTopic]; // Ultimate fallback

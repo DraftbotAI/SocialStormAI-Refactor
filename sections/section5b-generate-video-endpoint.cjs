@@ -4,7 +4,7 @@
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // PRO+: Audio and muxed video caching, parallelized scene jobs
 // 2024-08: Works with GPT-powered subject extraction (Section 11)
-// Mega-clip logic: Scenes 1 & 2 = ONE continuous video, subject from line 2
+// Mega-clip logic: Scenes 1 & 2 = ONE continuous video, subject from line 2 (w/ 4 fallback subjects)
 // ===========================================================
 
 const { v4: uuidv4 } = require('uuid');
@@ -61,7 +61,6 @@ function hashForCache(str) {
 }
 
 async function concatAudioFiles(audioPaths, outPath) {
-  // Naive ffmpeg concat for mp3s
   const { exec } = require('child_process');
   return new Promise((resolve, reject) => {
     const filelistPath = `${outPath}.txt`;
@@ -235,35 +234,71 @@ function registerGenerateVideoEndpoint(app, deps) {
         const megaAudioPath = path.join(audioCacheDir, hashForCache(audioPath1 + audioPath2) + '-mega.mp3');
         await concatAudioFiles([audioPath1, audioPath2], megaAudioPath);
 
-        // -- B. Extract subject for line 2
-        let megaSubject = scene2text;
+        // -- B. Extract subject candidates for line 2 (Scene 2)
+        let candidateSubjects = [];
         if (extractVisualSubjects) {
           try {
-            const subjList = await extractVisualSubjects(scene2text, mainTopic);
-            if (subjList && subjList[0]) megaSubject = subjList[0];
+            candidateSubjects = await extractVisualSubjects(scene2text, mainTopic);
+            if (!Array.isArray(candidateSubjects) || !candidateSubjects.length) candidateSubjects = [];
           } catch (e) {
             console.warn(`[5B][MEGA][WARN] GPT subject extract failed, falling back:`, e);
           }
         }
-        console.log(`[5B][MEGA][INFO] Using mega-clip subject: "${megaSubject}"`);
+        if (!candidateSubjects.length) candidateSubjects = [scene2text, mainTopic];
 
-        // -- C. Find the best megaClip
-        let megaClipPath = await findClipForScene({
-          subject: megaSubject,
-          sceneIdx: 1,
-          allSceneTexts,
-          mainTopic,
-          isMegaScene: true,
-          usedClips,
-          workDir,
-          jobId,
-          megaSubject,
-          jobContext,
-          categoryFolder
-        });
-        if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for mega-subject: "${megaSubject}"`);
+        // -- C. Try all 4 candidates, then fallback subjects, then Ken Burns image
+        let megaClipPath = null;
+        for (let subj of candidateSubjects) {
+          megaClipPath = await findClipForScene({
+            subject: subj,
+            sceneIdx: 1,
+            allSceneTexts,
+            mainTopic,
+            isMegaScene: true,
+            usedClips,
+            workDir,
+            jobId,
+            megaSubject: subj,
+            jobContext,
+            categoryFolder
+          });
+          if (megaClipPath) {
+            console.log(`[5B][MEGA][INFO] Found mega-clip for subject: "${subj}" -> ${megaClipPath}`);
+            break;
+          }
+        }
+        if (!megaClipPath) {
+          console.warn(`[5B][MEGA][WARN] No strict clip found for any GPT subject. Trying broad fallbacks...`);
+          let fallbackSubjects = [mainTopic, "Egypt", "Pyramids of Giza", "Sphinx", "ancient egypt"];
+          for (let subj of fallbackSubjects) {
+            megaClipPath = await findClipForScene({
+              subject: subj,
+              sceneIdx: 1,
+              allSceneTexts,
+              mainTopic,
+              isMegaScene: true,
+              usedClips,
+              workDir,
+              jobId,
+              megaSubject: subj,
+              jobContext,
+              categoryFolder
+            });
+            if (megaClipPath) {
+              console.log(`[5B][MEGA][FALLBACK] Found fallback mega-clip: "${subj}" => ${megaClipPath}`);
+              break;
+            }
+          }
+          if (!megaClipPath) {
+            const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
+            megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
+            if (megaClipPath) {
+              console.log(`[5B][MEGA][KENBURNS] Ken Burns fallback created for "${candidateSubjects[0] || mainTopic}"`);
+            }
+          }
+          if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for any subject or fallback for: "${candidateSubjects[0] || mainTopic}"`);
+        }
         usedClips.push(megaClipPath);
-        console.log(`[5B][MEGA][INFO] Mega-clip path: ${megaClipPath}`);
 
         // -- D. Trim/loop mega-clip to match combined audio duration
         const megaDuration = await getDuration(megaAudioPath);
@@ -281,14 +316,14 @@ function registerGenerateVideoEndpoint(app, deps) {
         sceneFiles[1] = megaMuxed;
         jobContext.sceneClipMetaList.push({
           localFilePath: megaMuxed,
-          subject: megaSubject,
+          subject: candidateSubjects[0] || mainTopic,
           sceneIdx: 0,
           source: megaClipPath.includes('pexels') ? 'pexels' : megaClipPath.includes('pixabay') ? 'pixabay' : 'r2',
           category: categoryFolder
         });
         jobContext.sceneClipMetaList.push({
           localFilePath: megaMuxed,
-          subject: megaSubject,
+          subject: candidateSubjects[0] || mainTopic,
           sceneIdx: 1,
           source: megaClipPath.includes('pexels') ? 'pexels' : megaClipPath.includes('pixabay') ? 'pixabay' : 'r2',
           category: categoryFolder
