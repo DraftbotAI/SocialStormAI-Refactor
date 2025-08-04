@@ -2,7 +2,7 @@
 // SECTION 10A: R2 CLIP HELPER (Cloudflare R2)
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for parallel dedupe/scan)
 // MAX LOGGING EVERY STEP, Modular System Compatible
-// Parallel safe: no temp file collisions
+// Parallel safe: no temp file collisions, NO silent fails
 // 2024-08: Strict subject enforcement, only returns if filename contains subject as a word
 // ===========================================================
 
@@ -79,6 +79,7 @@ function subjectInFilename(filename, subject) {
   return re.test(cleanForFilename(filename));
 }
 
+// === FILE VALIDATOR: Ensures file exists and is >2kb (not broken)
 function isValidClip(filePath, jobId) {
   try {
     if (!fs.existsSync(filePath)) {

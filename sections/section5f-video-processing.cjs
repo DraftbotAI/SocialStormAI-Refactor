@@ -5,6 +5,7 @@
 // Scene logic: 0.5s pre-voice, +1s post-voice. Scene 1+2 share video, different lines.
 // Aspect always forced to 1080x1920 (portrait)
 // Bulletproof: Ensures every scene is perfectly trimmed to narration duration
+// 2024-08: Fully bulletproofed for always-local file requirement
 // ===========================================================
 
 const fs = require('fs');
@@ -18,6 +19,10 @@ console.log('[5F][INIT] Video processing & AV combiner loaded.');
 // UTILITY: ASSERT FILE
 // =====================
 function assertFile(file, minSize = 10240, label = 'FILE') {
+  // --- ENSURE: Absolute path, never a bucket key, must exist on disk ---
+  if (!file || typeof file !== 'string' || file.includes('s3://') || file.startsWith('http')) {
+    throw new Error(`[5F][${label}][ERR] File is not a local file: ${file}`);
+  }
   if (!fs.existsSync(file)) {
     throw new Error(`[5F][${label}][ERR] File does not exist: ${file}`);
   }
@@ -85,6 +90,7 @@ async function convertMp3ToWav(mp3Path, wavPath) {
 // ============================================================
 // SCENE BUILDER: Slices video for scene 1 & 2 (shared clip, two lines)
 // Returns [scene1Path, scene2Path] (both trimmed to perfect durations)
+// (LEGACY: Only used if you ever want to split the mega clip—usually NOT needed.)
 // ============================================================
 async function splitVideoForFirstTwoScenes(
   videoIn,
@@ -97,7 +103,6 @@ async function splitVideoForFirstTwoScenes(
   assertFile(audio1, 10000, 'AUDIO1');
   assertFile(audio2, 10000, 'AUDIO2');
 
-  // Get durations of both voice lines
   const dur1 = await getDuration(audio1);
   const dur2 = await getDuration(audio2);
 
@@ -113,15 +118,13 @@ async function splitVideoForFirstTwoScenes(
     console.error(`[5F][SPLIT][ERR] Could not get video duration: ${err}`);
   }
 
-  // Defensive: If the video is too short for two non-overlapping splits, just use the same start point for both (will look like a jump cut)
   let scene1Start = 0;
   let scene2Start = (videoTotalLen >= scene1Len + scene2Len) ? scene1Len : 0;
 
-  // Outputs
   const scene1Path = path.resolve(outDir, `scene1-${Date.now()}-${Math.floor(Math.random() * 99999)}.mp4`);
   const scene2Path = path.resolve(outDir, `scene2-${Date.now()}-${Math.floor(Math.random() * 99999)}.mp4`);
 
-  // SCENE 1: [scene1Start, scene1Len]
+  // SCENE 1
   await new Promise((resolve, reject) => {
     ffmpeg(videoIn)
       .inputOptions(['-y'])
@@ -158,7 +161,7 @@ async function splitVideoForFirstTwoScenes(
       .save(scene1Path);
   });
 
-  // SCENE 2: Try to use non-overlapping segment if possible, otherwise fallback to [0, scene2Len]
+  // SCENE 2
   await new Promise((resolve, reject) => {
     ffmpeg(videoIn)
       .inputOptions(['-y'])
@@ -202,12 +205,24 @@ async function splitVideoForFirstTwoScenes(
 // TRIM FOR NARRATION (Scene 3+): 0.5s pre-voice, 1.0s post-voice
 // Bulletproof: Always trims video to exactly match narration audio+padding
 // ============================================================
-async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, trailOut = 1.0) {
+async function trimForNarration(inPath, outPath, audioDuration, options = {}) {
+  // Defensive: Accept both legacy signature and new options object
+  let leadIn = 0.5, trailOut = 1.0, loop = false;
+  if (typeof options === 'object' && options !== null) {
+    leadIn = options.leadIn ?? 0.5;
+    trailOut = options.trailOut ?? 1.0;
+    loop = !!options.loop;
+  } else if (typeof arguments[3] === 'number') {
+    leadIn = arguments[3];
+    trailOut = arguments[4];
+  }
+
   assertFile(inPath, 10000, 'TRIM_IN');
   const duration = audioDuration + leadIn + trailOut;
-  console.log(`[5F][TRIM] in="${inPath}" → out="${outPath}" | trim to ${duration}s`);
+  console.log(`[5F][TRIM] in="${inPath}" → out="${outPath}" | trim to ${duration}s | loop=${loop}`);
+
   return new Promise((resolve, reject) => {
-    ffmpeg(inPath)
+    let ff = ffmpeg(inPath)
       .inputOptions(['-y'])
       .setStartTime(0)
       .setDuration(duration)
@@ -238,8 +253,16 @@ async function trimForNarration(inPath, outPath, audioDuration, leadIn = 0.5, tr
         if (stderr) console.error(`[5F][TRIM][FFMPEG][STDERR]\n${stderr}`);
         if (stdout) console.log(`[5F][TRIM][FFMPEG][STDOUT]\n${stdout}`);
         reject(err);
-      })
-      .save(outPath);
+      });
+
+    // --- If looping is requested, add -stream_loop option ---
+    if (loop) {
+      // -stream_loop -1: Loop infinitely until duration
+      ff = ff.inputOptions(['-stream_loop', '-1']);
+      console.log(`[5F][TRIM][LOOP] Loop enabled for video: ${inPath}`);
+    }
+
+    ff.save(outPath);
   });
 }
 

@@ -1,4 +1,4 @@
-// =============================================================
+// ==============================================================
 // SECTION 10F: UNSPLASH IMAGE HELPER (Search & Download & Score)
 // Searches Unsplash for the best-scoring, high-res image matching the subject.
 // Downloads to local job folder, returns file path on success.

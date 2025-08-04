@@ -5,6 +5,7 @@
 // PRO+: Audio and muxed video caching, parallelized scene jobs
 // 2024-08: Works with GPT-powered subject extraction (Section 11)
 // Mega-clip logic: Scenes 1 & 2 = ONE continuous video, subject from line 2 (w/ 4 fallback subjects)
+// Bulletproof R2: Auto-downloads from R2 if file not present locally
 // ===========================================================
 
 const { v4: uuidv4 } = require('uuid');
@@ -13,7 +14,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 // R2 dependencies (S3 SDK)
-const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
+const { s3Client, PutObjectCommand, GetObjectCommand } = require('./section1-setup.cjs');
 
 // === 5C: SCENE UTILS ===
 const {
@@ -74,32 +75,27 @@ async function concatAudioFiles(audioPaths, outPath) {
   });
 }
 
-// ================= R2 UPLOAD HELPER =======================
-async function uploadToR2(localFilePath, r2FinalName, jobId) {
+// ========== ENSURE LOCAL CLIP FROM R2 ==========
+// Always call before using any matched clip!
+async function ensureLocalClipExists(r2Path, localPath) {
+  if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10240) return localPath;
+  // If the file is already present and non-empty, no download needed.
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  const customDomainBase = 'videos.socialstormai.com';
-  const r2Key = `${jobId}-${r2FinalName}`;
-  console.log(`[5B][R2 UPLOAD][START] job=${jobId} localFilePath=${localFilePath} bucket=${bucket} key=${r2Key}`);
+  // Remove possible "./" or leading slashes
+  const key = r2Path.replace(/^(\.\/)+/, '').replace(/^\/+/, '');
+  console.log(`[5B][R2][DOWNLOAD] Fetching from R2: bucket=${bucket} key=${key} → ${localPath}`);
   try {
-    if (!fs.existsSync(localFilePath)) {
-      throw new Error(`[5B][R2 UPLOAD][ERR] File does not exist: ${localFilePath}`);
-    }
-    const fileBuffer = fs.readFileSync(localFilePath);
-
-    const r2Resp = await s3Client.send(new PutObjectCommand({
-      Bucket: bucket,
-      Key: r2Key,
-      Body: fileBuffer,
-      ContentType: 'video/mp4'
-    }));
-
-    console.log(`[5B][R2 UPLOAD][COMPLETE] R2 upload response:`, r2Resp);
-
-    const publicUrl = `https://${customDomainBase}/${r2Key}`;
-    console.log(`[5B][R2 UPLOAD][SUCCESS] File available at: ${publicUrl}`);
-    return publicUrl;
+    const data = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    const fileStream = fs.createWriteStream(localPath);
+    await new Promise((resolve, reject) => {
+      data.Body.pipe(fileStream);
+      data.Body.on('error', reject);
+      fileStream.on('finish', resolve);
+    });
+    console.log(`[5B][R2][DOWNLOAD][OK] Downloaded to: ${localPath}`);
+    return localPath;
   } catch (err) {
-    console.error(`[5B][R2 UPLOAD][FAIL] job=${jobId} localFilePath=${localFilePath}:`, err);
+    console.error(`[5B][R2][DOWNLOAD][FAIL] Could not download R2 file:`, err);
     throw err;
   }
 }
@@ -300,10 +296,14 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
         usedClips.push(megaClipPath);
 
+        // === ENSURE MEGA CLIP IS LOCAL (R2 or remote source) ===
+        const localMegaClipPath = path.join(workDir, path.basename(megaClipPath));
+        await ensureLocalClipExists(megaClipPath, localMegaClipPath);
+
         // -- D. Trim/loop mega-clip to match combined audio duration
         const megaDuration = await getDuration(megaAudioPath);
-        const trimmedMegaClip = path.join(videoCacheDir, `${hashForCache(megaClipPath + megaAudioPath)}-megatrim.mp4`);
-        await trimForNarration(megaClipPath, trimmedMegaClip, megaDuration, { loop: true });
+        const trimmedMegaClip = path.join(videoCacheDir, `${hashForCache(localMegaClipPath + megaAudioPath)}-megatrim.mp4`);
+        await trimForNarration(localMegaClipPath, trimmedMegaClip, megaDuration, { loop: true });
         assertFileExists(trimmedMegaClip, `MEGA_TRIMMED_VIDEO`);
 
         // -- E. Mux single mega video with combined audio
@@ -356,7 +356,12 @@ function registerGenerateVideoEndpoint(app, deps) {
           }
           if (!clipPath) throw new Error(`[5B][ERR] No clip found for scene ${sceneIdx + 1}`);
           usedClips.push(clipPath);
-          assertFileExists(clipPath, `CLIP_SCENE_${sceneIdx+1}`);
+
+          // === ENSURE CLIP IS LOCAL (R2 or remote source) ===
+          const localClipPath = path.join(workDir, path.basename(clipPath));
+          await ensureLocalClipExists(clipPath, localClipPath);
+
+          assertFileExists(localClipPath, `CLIP_SCENE_${sceneIdx+1}`);
 
           // AUDIO GENERATION WITH CACHE
           const audioHash = hashForCache(JSON.stringify({
@@ -372,7 +377,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           // TRIM/MUX
           const narrationDuration = await getDuration(audioCachePath);
           const trimmedVideoPath = path.join(workDir, `scene${sceneIdx+1}-trimmed.mp4`);
-          await trimForNarration(clipPath, trimmedVideoPath, narrationDuration);
+          await trimForNarration(localClipPath, trimmedVideoPath, narrationDuration);
           const videoCachePath = path.join(videoCacheDir, `${hashForCache(JSON.stringify({
             text: scene.texts,
             voice,

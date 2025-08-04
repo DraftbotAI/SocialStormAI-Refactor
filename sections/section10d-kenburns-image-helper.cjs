@@ -372,7 +372,7 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     // Unsplash
     if (UNSPLASH_ACCESS_KEY) {
       const url = await findImageInUnsplash(subject, usedClips);
-      if (url) candidates.push({ url, api: 'unsplash', score: 100 }); // Score will be recalculated below
+      if (url) candidates.push({ url, api: 'unsplash', score: 100 }); // Score recalculated below
     }
     // Pexels
     if (PEXELS_API_KEY) {
