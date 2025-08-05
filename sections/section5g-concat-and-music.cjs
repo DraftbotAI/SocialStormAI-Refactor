@@ -227,13 +227,6 @@ async function bulletproofFile(inputPath, workDir, label) {
 // ============================================
 // MAIN CONCAT: Output is 1080x1920 (portrait, shorts format)
 // ============================================
-/**
- * Concat scenes, returns final concat file path.
- * @param {string[]} sceneFiles - Array of scene .mp4s
- * @param {string} workDir
- * @param {Object[]} sceneClipMetaList - [NEW] Optional: Array of metadata for each scene (for archiving)
- * @returns {Promise<string>}
- */
 async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
   sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i + 1}: ${file}`));
@@ -310,11 +303,6 @@ async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
 }
 
 // === Async Scene Clip Archiver Hook (call this from 5H job cleanup) ===
-/**
- * Called after video is finished. Kick off archiving scene clips to R2.
- * @param {Object[]} sceneClipMetaList - Array of scene meta: { localFilePath, subject, sceneIdx, source, category }
- * @param {Function} asyncArchiveFn - Function to call for each scene ({ localFilePath, subject, sceneIdx, source, category })
- */
 async function postProcessSceneClipArchiving(sceneClipMetaList, asyncArchiveFn) {
   if (!Array.isArray(sceneClipMetaList) || !sceneClipMetaList.length) {
     console.warn('[5G][ARCHIVE][WARN] No sceneClipMetaList provided.');
@@ -354,11 +342,38 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
   const bpMain = await bulletproofFile(mainPath, workDir, 'BP_MAIN');
   const bpOutro = await bulletproofFile(outroPath, workDir, 'BP_OUTRO');
 
+  // Lower outro volume to 80% (0.8) and concatenate
+  const tempOutroVol = path.join(workDir, `${path.basename(bpOutro, '.mp4')}-vol80.mp4`);
+  await new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(bpOutro)
+      .outputOptions([
+        '-c:v copy',
+        '-filter:a volume=0.8',
+        '-c:a aac',
+        '-ar 44100',
+        '-ac 2',
+        '-b:a 128k',
+        '-y'
+      ])
+      .save(tempOutroVol)
+      .on('end', () => {
+        console.log(`[5G][OUTRO][VOLUME] Outro volume set to 80%: ${tempOutroVol}`);
+        resolve();
+      })
+      .on('error', (err, stdout, stderr) => {
+        console.error(`[5G][OUTRO][VOLUME][ERR]`, err);
+        if (stderr) console.error(`[5G][OUTRO][VOLUME][STDERR]\n${stderr}`);
+        if (stdout) console.log(`[5G][OUTRO][VOLUME][STDOUT]\n${stdout}`);
+        reject(err);
+      });
+  });
+
   // Always use a fresh concat list for FFmpeg concat demuxer
   const listFile = path.resolve(workDir, 'list2.txt');
   fs.writeFileSync(listFile, [
     `file '${bpMain.replace(/'/g, "'\\''")}'`,
-    `file '${bpOutro.replace(/'/g, "'\\''")}'`
+    `file '${tempOutroVol.replace(/'/g, "'\\''")}'`
   ].join('\n'), { encoding: 'utf8' });
 
   return new Promise((resolve, reject) => {
@@ -449,12 +464,6 @@ async function overlayMusic(videoPath, musicPath, outPath) {
 
 // === Main Mood Picker (non-repeating/random) ===
 let _lastTrack = null;
-/**
- * pickMusicForMood: Detects mood (via music-moods if present, else fallback), then randomizes and prevents repeats.
- * @param {string} script - Full script text for mood detection
- * @param {string} workDir - Work directory for job (for logging/future)
- * @returns {string} Full path to music file, or null
- */
 async function pickMusicForMood(script, workDir) {
   let detectedMood;
   try {

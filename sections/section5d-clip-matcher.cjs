@@ -70,6 +70,55 @@ function assertFileExists(file, label = 'FILE', minSize = 10240) {
   }
 }
 
+// --- Helper: Tries strict R2 match for landmark context if possible ---
+async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobId) {
+  // If subject includes e.g. "face of the Statue of Liberty", "roof of the White House", "door of the Sphinx", etc.
+  // Try strict R2 match for the landmark name (mainTopic or detected subject in subject string)
+  if (!findR2ClipForScene.getAllFiles) return null;
+
+  const LANDMARK_WORDS = [
+    'statue of liberty', 'white house', 'empire state building', 'eiffel tower',
+    'sphinx', 'great wall', 'mount rushmore', 'big ben', 'colosseum', 'machu picchu',
+    'pyramids', 'chichen itza', 'louvre', 'taj mahal', 'notre dame', 'angkor wat',
+    'leaning tower', 'buckingham palace', 'niagara falls', 'grand canyon', 'hollywood sign',
+    'stonehenge', 'burj khalifa', 'golden gate bridge', 'petra', 'cristo redentor', 'opera house'
+  ];
+
+  const lowerSubj = (subject || '').toLowerCase();
+  let foundLandmark = '';
+  for (let landmark of LANDMARK_WORDS) {
+    if (lowerSubj.includes(landmark)) {
+      foundLandmark = landmark;
+      break;
+    }
+  }
+  // If not found but mainTopic is one of the landmarks, use it
+  if (!foundLandmark && mainTopic) {
+    for (let landmark of LANDMARK_WORDS) {
+      if (mainTopic.toLowerCase().includes(landmark)) {
+        foundLandmark = landmark;
+        break;
+      }
+    }
+  }
+  if (!foundLandmark) return null;
+
+  // Try strict R2 match for the landmark
+  try {
+    const r2Files = await findR2ClipForScene.getAllFiles();
+    for (const fname of r2Files) {
+      if (usedClips.includes(fname)) continue;
+      if (strictSubjectMatch(fname, foundLandmark)) {
+        console.log(`[5D][CONTEXT][${jobId}] Landmark context override: "${foundLandmark}" => "${fname}"`);
+        if (assertFileExists(fname, 'R2_CONTEXT_RESULT')) return fname;
+      }
+    }
+  } catch (err) {
+    console.error(`[5D][CONTEXT][${jobId}] Landmark context override failed:`, err);
+  }
+  return null;
+}
+
 async function findClipForScene({
   subject,
   sceneIdx,
@@ -135,7 +184,11 @@ async function findClipForScene({
     prioritizedSubjects = [searchSubject, mainTopic];
   }
 
-  // === KEY IMPROVEMENT: Try STRICT R2 match FIRST for each subject ===
+  // === 0. Try contextual landmark override FIRST ===
+  const contextOverride = await tryContextualLandmarkOverride(searchSubject, mainTopic, usedClips, jobId);
+  if (contextOverride) return contextOverride;
+
+  // === 1. Try STRICT R2 match for each subject ===
   async function findStrictR2Clip(subjectPhrase, usedClipsArr) {
     try {
       const r2Files = await (findR2ClipForScene.getAllFiles ? findR2ClipForScene.getAllFiles() : []);

@@ -4,7 +4,7 @@
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // PRO+: Audio and muxed video caching, parallelized scene jobs
 // 2024-08: Works with GPT-powered subject extraction (Section 11)
-// Mega-clip logic: Scenes 1 & 2 = ONE continuous video, subject from line 2 (w/ progressive fallback)
+// Mega-clip logic: Scenes 1 = hook, 2 = mega, then fully parallelized
 // Bulletproof R2: Auto-downloads from R2 if file not present locally
 // ============================================================
 
@@ -203,7 +203,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         const usedClips = [];
         const sceneFiles = [];
 
-        // === HOOK SCENE ===
+        // === HOOK SCENE (scene 0, sequential) ===
         const hookText = scenes[0].texts[0];
         const audioHashHook = hashForCache(JSON.stringify({ text: hookText, voice, provider }));
         const audioPathHook = path.join(audioCacheDir, `${audioHashHook}.mp3`);
@@ -211,7 +211,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           await deps.createSceneAudio(hookText, voice, audioPathHook, provider);
         assertFileExists(audioPathHook, `AUDIO_HOOK`);
 
-        // For hook, you could use a branding video, short animation, or a generic visual, but for now use normal clip logic:
         let hookClipPath = null;
         try {
           hookClipPath = await findClipForScene({
@@ -255,7 +254,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           category: categoryFolder
         });
 
-        // === MEGA SCENE (single only, not duplicated!) ===
+        // === MEGA SCENE (scene 1, sequential) ===
         const scene2 = scenes[1];
         if (!scene2) throw new Error('[5B][FATAL] Mega scene missing!');
 
@@ -343,7 +342,8 @@ function registerGenerateVideoEndpoint(app, deps) {
           category: categoryFolder
         });
 
-        // === Remaining Scenes (async for...of, one attempt each, no infinite retry) ===
+        // === ALL REMAINING SCENES (PARALLELIZED: CLIP + AUDIO) ===
+        const remainingSceneTasks = [];
         for (let i = 2; i < scenes.length; i++) {
           const scene = scenes[i];
           let sceneIdx = i;
@@ -352,65 +352,76 @@ function registerGenerateVideoEndpoint(app, deps) {
           if (GENERIC_SUBJECTS.includes((sceneSubject || '').toLowerCase())) {
             sceneSubject = mainTopic;
           }
-          let clipPath = null;
-          try {
-            clipPath = await findClipForScene({
+
+          // Parallelize: 1) Find clip, 2) Ensure local, 3) Generate TTS
+          remainingSceneTasks.push((async () => {
+            let clipPath = null;
+            try {
+              clipPath = await findClipForScene({
+                subject: sceneSubject,
+                sceneIdx,
+                allSceneTexts,
+                mainTopic,
+                isMegaScene: false,
+                usedClips,
+                workDir,
+                jobId,
+                jobContext,
+                categoryFolder
+              });
+            } catch (e) {
+              console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for scene ${sceneIdx + 1}:`, e);
+            }
+            if (!clipPath) {
+              console.error(`[5B][ERR][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1}. Failing this job.`);
+              progress[jobId] = { percent: 100, status: `No clip found for scene ${sceneIdx + 1}. Try a different topic or rephrase your script.`, error: `No clip found for scene ${sceneIdx + 1}` };
+              throw new Error(`[5B][ERR][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1}`);
+            }
+            usedClips.push(clipPath);
+
+            const localClipPath = path.join(workDir, path.basename(clipPath));
+            await ensureLocalClipExists(clipPath, localClipPath);
+            assertFileExists(localClipPath, `CLIP_SCENE_${sceneIdx+1}`);
+
+            const audioHash = hashForCache(JSON.stringify({
+              text: scene.texts,
+              voice,
+              provider
+            }));
+            const audioCachePath = path.join(audioCacheDir, `${audioHash}.mp3`);
+            if (!fs.existsSync(audioCachePath) || fs.statSync(audioCachePath).size < 10000)
+              await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
+            assertFileExists(audioCachePath, `AUDIO_SCENE_${sceneIdx+1}`);
+
+            // After both are ready, mux and track results
+            const narrationDuration = await getDuration(audioCachePath);
+            const trimmedVideoPath = path.join(workDir, `scene${sceneIdx+1}-trimmed.mp4`);
+            await trimForNarration(localClipPath, trimmedVideoPath, narrationDuration);
+            const videoCachePath = path.join(videoCacheDir, `${hashForCache(JSON.stringify({
+              text: scene.texts,
+              voice,
+              provider,
+              clip: clipPath
+            }))}.mp4`);
+            await muxVideoWithNarration(trimmedVideoPath, audioCachePath, videoCachePath);
+            assertFileExists(videoCachePath, `MUXED_SCENE_${sceneIdx+1}`);
+
+            jobContext.sceneClipMetaList.push({
+              localFilePath: videoCachePath,
               subject: sceneSubject,
               sceneIdx,
-              allSceneTexts,
-              mainTopic,
-              isMegaScene: false,
-              usedClips,
-              workDir,
-              jobId,
-              jobContext,
-              categoryFolder
+              source: (clipPath || '').includes('pexels') ? 'pexels' : (clipPath || '').includes('pixabay') ? 'pixabay' : 'r2',
+              category: categoryFolder
             });
-          } catch (e) {
-            console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for scene ${sceneIdx + 1}:`, e);
-          }
-          if (!clipPath) {
-            console.error(`[5B][ERR][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1}. Failing this job.`);
-            progress[jobId] = { percent: 100, status: `No clip found for scene ${sceneIdx + 1}. Try a different topic or rephrase your script.`, error: `No clip found for scene ${sceneIdx + 1}` };
-            throw new Error(`[5B][ERR][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1}`);
-          }
-          usedClips.push(clipPath);
 
-          const localClipPath = path.join(workDir, path.basename(clipPath));
-          await ensureLocalClipExists(clipPath, localClipPath);
-          assertFileExists(localClipPath, `CLIP_SCENE_${sceneIdx+1}`);
+            sceneFiles[sceneIdx] = videoCachePath;
+          })());
+        }
 
-          const audioHash = hashForCache(JSON.stringify({
-            text: scene.texts,
-            voice,
-            provider
-          }));
-          const audioCachePath = path.join(audioCacheDir, `${audioHash}.mp3`);
-          if (!fs.existsSync(audioCachePath) || fs.statSync(audioCachePath).size < 10000)
-            await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
-          assertFileExists(audioCachePath, `AUDIO_SCENE_${sceneIdx+1}`);
-
-          const narrationDuration = await getDuration(audioCachePath);
-          const trimmedVideoPath = path.join(workDir, `scene${sceneIdx+1}-trimmed.mp4`);
-          await trimForNarration(localClipPath, trimmedVideoPath, narrationDuration);
-          const videoCachePath = path.join(videoCacheDir, `${hashForCache(JSON.stringify({
-            text: scene.texts,
-            voice,
-            provider,
-            clip: clipPath
-          }))}.mp4`);
-          await muxVideoWithNarration(trimmedVideoPath, audioCachePath, videoCachePath);
-          assertFileExists(videoCachePath, `MUXED_SCENE_${sceneIdx+1}`);
-
-          jobContext.sceneClipMetaList.push({
-            localFilePath: videoCachePath,
-            subject: sceneSubject,
-            sceneIdx,
-            source: (clipPath || '').includes('pexels') ? 'pexels' : (clipPath || '').includes('pixabay') ? 'pixabay' : 'r2',
-            category: categoryFolder
-          });
-
-          sceneFiles[sceneIdx] = videoCachePath;
+        // Wait for ALL remaining scenes to finish processing in parallel
+        if (remainingSceneTasks.length > 0) {
+          progress[jobId] = { percent: 35, status: `Processing ${remainingSceneTasks.length} scenes in parallel...` };
+          await Promise.all(remainingSceneTasks);
         }
 
         progress[jobId] = { percent: 40, status: 'Stitching your video together...' };
