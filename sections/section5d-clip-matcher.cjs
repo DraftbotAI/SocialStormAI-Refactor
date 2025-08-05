@@ -135,38 +135,55 @@ async function findClipForScene({
     prioritizedSubjects = [searchSubject, mainTopic];
   }
 
-  // Try all prioritized subjects, loose mode
+  // === KEY IMPROVEMENT: Try STRICT R2 match FIRST for each subject ===
+  async function findStrictR2Clip(subjectPhrase, usedClipsArr) {
+    try {
+      const r2Files = await (findR2ClipForScene.getAllFiles ? findR2ClipForScene.getAllFiles() : []);
+      for (const fname of r2Files) {
+        if (usedClipsArr.includes(fname)) continue;
+        if (strictSubjectMatch(fname, subjectPhrase)) {
+          console.log(`[5D][R2][${jobId}] STRICT SUBJECT MATCH: "${fname}" for "${subjectPhrase}"`);
+          if (assertFileExists(fname, 'R2_RESULT')) return fname;
+        }
+      }
+      return null;
+    } catch (err) {
+      console.error(`[5D][R2][ERR][${jobId}] Error in STRICT R2 matching:`, err);
+      return null;
+    }
+  }
+
+  // Try all prioritized subjects
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // === 1. Try R2, loose mode ===
+    // 1. Try strict R2 filename match
+    let r2StrictResult = null;
+    if (findR2ClipForScene.getAllFiles) {
+      r2StrictResult = await findStrictR2Clip(subjectOption, usedClips);
+      if (r2StrictResult) {
+        console.log(`[5D][PICK][${jobId}] STRICT R2 subject match: ${r2StrictResult}`);
+        return r2StrictResult;
+      }
+    }
+
+    // 2. Try R2, loose mode (your original loose logic, next)
     async function findDedupedR2ClipLoose(searchPhrase, usedClipsArr) {
       try {
         const r2Files = await findR2ClipForScene.getAllFiles
           ? await findR2ClipForScene.getAllFiles()
           : [];
         let found = null;
-        // a) Strict match first
+        // a) Loose match: any major word or substring
         for (const fname of r2Files) {
           if (usedClipsArr.includes(fname)) continue;
-          if (strictSubjectMatch(fname, searchPhrase)) {
+          if (looseSubjectMatch(fname, searchPhrase)) {
             found = fname;
-            console.log(`[5D][R2][${jobId}] STRICT MATCH: "${fname}"`);
+            console.log(`[5D][R2][${jobId}] LOOSE MATCH: "${fname}"`);
             break;
           }
         }
-        // b) Loose match: any major word or substring
-        if (!found) {
-          for (const fname of r2Files) {
-            if (usedClipsArr.includes(fname)) continue;
-            if (looseSubjectMatch(fname, searchPhrase)) {
-              found = fname;
-              console.log(`[5D][R2][${jobId}] LOOSE MATCH: "${fname}"`);
-              break;
-            }
-          }
-        }
-        // c) Any unused file as last resort
+        // b) Any unused file as last resort
         if (!found && r2Files.length) {
           for (const fname of r2Files) {
             if (usedClipsArr.includes(fname)) continue;
