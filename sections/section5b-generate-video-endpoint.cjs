@@ -167,7 +167,29 @@ function registerGenerateVideoEndpoint(app, deps) {
         const { script = '', voice = '', music = true, outro = true, provider = 'polly' } = req.body || {};
         if (!script || !voice) throw new Error('Missing script or voice');
         let scenes = depSplitScriptToScenes(script);
+
+        // === BULLETPROOF SCENE NORMALIZATION ===
+        console.log(`[5B][SCENES][RAW][${jobId}]`, JSON.stringify(scenes, null, 2));
         scenes = Array.isArray(scenes) ? scenes : [];
+        scenes = scenes.map((scene, idx) => {
+          if (typeof scene === 'string') {
+            console.log(`[5B][SCENES][NORMALIZE][${jobId}] Scene ${idx + 1} was string, wrapping.`);
+            return { texts: [scene], isMegaScene: idx < 2, type: idx === 0 ? 'hook-summary' : 'normal' };
+          }
+          if (scene && Array.isArray(scene.texts)) {
+            return scene;
+          }
+          if (scene && typeof scene.text === 'string') {
+            console.log(`[5B][SCENES][NORMALIZE][${jobId}] Scene ${idx + 1} had 'text' field, converting to texts array.`);
+            return { texts: [scene.text], ...scene };
+          }
+          return null;
+        });
+        // === END BULLETPROOF NORMALIZATION ===
+
+        // LOG AFTER NORMALIZATION
+        console.log(`[5B][SCENES][NORM][${jobId}]`, JSON.stringify(scenes, null, 2));
+
         scenes = scenes.filter(s =>
           s && Array.isArray(s.texts) && typeof s.texts[0] === 'string' && s.texts[0].length > 0
         );

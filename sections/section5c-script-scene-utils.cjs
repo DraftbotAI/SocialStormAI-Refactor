@@ -1,11 +1,3 @@
-// ===========================================================
-// SECTION 5C: SCRIPT & SCENE UTILITIES (PRO FIXED)
-// Splits script into scenes, handles scene structure, utilities.
-// HOOK, MEGA-SCENE, and VISUAL SUBJECT (GPT/AI-ready)
-// Max logging every step, bulletproof output
-// 2024-08: Aligned with Section 4 for topic-first viral hook
-// ===========================================================
-
 const uuid = require('uuid');
 
 console.log('[5C][INIT] Script & scene utilities loaded.');
@@ -27,26 +19,21 @@ function generateViralHookAndSummary(script, topic = '') {
 // === Visual Subject Extraction (strict matchable phrase, never full sentence) ===
 function extractVisualSubject(line, mainTopic = '') {
   if (!line && mainTopic) return mainTopic;
-  // Prefer mainTopic if present and not generic/long
   if (mainTopic && line && line.toLowerCase().includes(mainTopic.toLowerCase()) && mainTopic.length < 25) {
     return mainTopic;
   }
-  // Clean up, split line, remove stopwords and generic filler
   const stopwords = [
     'the', 'a', 'an', 'and', 'or', 'but', 'if', 'of', 'at', 'by', 'for', 'with', 'about', 'into', 'on', 'after',
     'in', 'to', 'from', 'up', 'down', 'over', 'under', 'again', 'further', 'then', 'once', 'there', 'their', 'they',
     'his', 'her', 'she', 'he', 'him', 'hers', 'its', 'it', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
     'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'as', 'such', 'just', 'which', 'when', 'that', 'this', 'your'
   ];
-  // Remove punctuation, split into words
   const tokens = (line || '')
     .replace(/[^a-zA-Z0-9\s]/g, '')
     .split(/\s+/)
     .filter(tok => tok && !stopwords.includes(tok.toLowerCase()) && tok.length > 2);
-  // If any all-caps acronym (NASA, etc) use that
   const caps = tokens.find(w => /^[A-Z]{2,}$/.test(w));
   if (caps) return caps;
-  // Return up to 3 tokens as a phrase (never the full sentence)
   if (tokens.length >= 3) return tokens.slice(0, 3).join(' ');
   if (tokens.length === 2) return tokens.join(' ');
   if (tokens.length === 1) return tokens[0];
@@ -56,7 +43,7 @@ function extractVisualSubject(line, mainTopic = '') {
 /**
  * Enhanced split:
  * - Scene 1: Strong hook/summary (always line 1, from Section 4 logic)
- * - Scene 2: Mega-scene (combines next 2 lines)
+ * - Scene 2: Mega-scene (combines next 2 lines, subject = line 2)
  * - Scenes 3+: Each line becomes a normal scene.
  * Each scene: { id, texts: [str], isMegaScene: bool, type, origIndices, visualSubject }
  */
@@ -162,7 +149,6 @@ function splitScriptToScenes(script, topic = '') {
     if (idx > 0 && seenIds.has(scene.id)) {
       console.warn(`[5C][DEFENSE][BUG] Duplicate scene ID detected for idx ${idx}: ${scene.id}`);
     }
-    // Re-extract for safety if visualSubject is missing or too long
     let subject = scene.visualSubject;
     if (!subject || typeof subject !== 'string' || subject.length > 40) {
       subject = extractVisualSubject(safeTexts[0], mainTopic);
