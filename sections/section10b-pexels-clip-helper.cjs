@@ -3,7 +3,7 @@
 // Finds and downloads best-matching video from Pexels API
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Parallel-safe: unique file output per job/scene
-// 2024-08: Strict subject query, bulletproof subject filter, zero skips
+// 2024-08: Fuzzy/partial/strict subject match, always returns the best match
 // ===========================================================
 
 const axios = require('axios');
@@ -18,12 +18,11 @@ if (!PEXELS_API_KEY) {
   console.error('[10B][FATAL] Missing PEXELS_API_KEY in environment!');
 }
 
-// --- Utility: Defensive keyword cleaning for Pexels queries ---
+// --- Normalization helpers ---
 function cleanQuery(str) {
   if (!str) return '';
   return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
 }
-
 function getKeywords(str) {
   return String(str || '')
     .toLowerCase()
@@ -31,13 +30,35 @@ function getKeywords(str) {
     .split(/[\s\-]+/)
     .filter(w => w.length > 2);
 }
-
-// --- Strict subject present: all keywords in fields ---
-function strictSubjectPresent(fields, subject) {
+function normalize(str) {
+  return (str || '')
+    .toLowerCase()
+    .replace(/[\s_\-\.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+// --- Fuzzy/partial/strict match logic ---
+function majorWords(subject) {
+  return (subject || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
+}
+function fuzzyMatch(text, subject) {
+  const txt = normalize(text);
+  const words = majorWords(subject);
+  return words.length && words.every(word => txt.includes(word));
+}
+function partialMatch(text, subject) {
+  const txt = normalize(text);
+  const words = majorWords(subject);
+  return words.some(word => txt.includes(word));
+}
+function strictSubjectPresent(text, subject) {
   const subjectWords = getKeywords(subject);
   if (!subjectWords.length) return false;
-  // Only match if ALL subject keywords are present in fields string
-  return subjectWords.every(w => fields.includes(w));
+  return subjectWords.every(w => text.includes(w));
 }
 
 // --- File validation ---
@@ -86,13 +107,13 @@ async function downloadPexelsVideoToLocal(url, outPath, jobId) {
   }
 }
 
-// --- Scoring function: Only match if subject is STRICTLY present ---
+// --- Scoring function: now accepts fuzzy, partial, and strict matches ---
 function scorePexelsMatch(video, file, subject, usedClips = []) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
 
-  // Main fields for scoring
+  // Main fields for matching/scoring
   const fields = [
     (video?.user?.name || ''),
     (video?.url || ''),
@@ -103,31 +124,27 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
     (video?.title || '')
   ].join(' ').toLowerCase();
 
-  // Only score if strict subject present (all subject words must appear)
-  if (!strictSubjectPresent(fields, subject)) {
-    score -= 9999; // Hard reject non-matches
-    return score;
-  }
-
-  // Phrase match
-  if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 60;
-
-  // All words present
-  const allWordsPresent = subjectWords.every(w => fields.includes(w));
-  if (allWordsPresent && subjectWords.length > 1) score += 30;
+  // STRONG: All words present
+  if (strictSubjectPresent(fields, subject)) score += 40;
+  // FUZZY: All major words in any order
+  if (fuzzyMatch(fields, subject)) score += 25;
+  // PARTIAL: Any major word present
+  if (partialMatch(fields, subject)) score += 10;
+  // PHRASE match bonus
+  if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 12;
 
   // Each individual keyword present
   subjectWords.forEach(word => {
-    if (fields.includes(word)) score += 5;
+    if (fields.includes(word)) score += 3;
   });
 
   // Aspect ratio: prefer portrait (9:16), then 16:9
-  if (file.height > file.width) score += 12; // Portrait perfect for shorts
-  if (file.width / file.height > 1.4 && file.width / file.height < 2.0) score += 6; // 16:9-ish
-  if (file.height / file.width > 1.7 && file.height / file.width < 2.1) score += 8; // 9:16 portrait
+  if (file.height > file.width) score += 11;
+  if (file.width / file.height > 1.4 && file.width / file.height < 2.0) score += 5;
+  if (file.height / file.width > 1.7 && file.height / file.width < 2.1) score += 6;
 
   // Video quality/length
-  score += file.height >= 720 ? 5 : 0;
+  score += file.height >= 720 ? 2 : 0;
   score += file.file_type === 'video/mp4' ? 2 : 0;
   score += Math.floor(file.width / 120);
 
@@ -137,7 +154,7 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
   }
 
   // Penalize very short clips
-  if (video.duration && video.duration < 4) score -= 8;
+  if (video.duration && video.duration < 4) score -= 6;
 
   // Slight bonus for popular Pexels video IDs (higher ID = newer/higher quality)
   if (video.id && Number(video.id) > 1000000) score += 2;
@@ -147,7 +164,7 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
 
 /**
  * Finds and downloads the best Pexels video for a given subject/scene,
- * using strict keyword match (ALL subject words must be present in metadata).
+ * using strict/fuzzy/partial keyword matching. Will always pick the best result.
  * @param {string} subject - Main scene subject (clean, descriptive)
  * @param {string} workDir - Local job folder for saving video
  * @param {number} sceneIdx
@@ -183,13 +200,14 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
         console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`)
       );
 
-      const best = scored[0];
-      // Only accept match if score is not a reject and >=20 (all words present, etc)
-      if (best && best.score >= 20) {
+      // Always pick the highest scoring candidate above 5, else just pick first
+      const best = scored.find(s => s.score > 5) || scored[0];
+      if (best) {
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
-        return await downloadPexelsVideoToLocal(best.file.link, outPath, jobId);
+        const resultPath = await downloadPexelsVideoToLocal(best.file.link, outPath, jobId);
+        if (resultPath) return resultPath;
       }
-      console.warn(`[10B][PEXELS][${jobId}] No strict Pexels match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
+      console.warn(`[10B][PEXELS][${jobId}] No solid Pexels match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
     } else {
       console.log(`[10B][PEXELS][${jobId}] No Pexels video results found for "${subject}"`);
     }

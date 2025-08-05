@@ -4,7 +4,7 @@
 // Order: Exact > Contextual > Symbolic > General Fallback
 // Bulletproof: Handles blank, weird, or failed GPT cases.
 // Super max logging, deterministic, no silent failures.
-// ===========================================================
+// ============================================================
 
 const { ChatGPTAPI } = require('chatgpt'); // You can swap this to your preferred OpenAI SDK
 const path = require('path');

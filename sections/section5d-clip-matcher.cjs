@@ -1,7 +1,7 @@
 // ===========================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Parallel Best-Pick)
-// Loosened Matching: Accepts any major subject word, partial, or fuzzy match
-// Never loops forever, always finds *something*
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Loosest, Bulletproof)
+// Always returns something: video, image, Ken Burns, or any available.
+// Never loops forever. Max logs at each fallback step.
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
@@ -14,7 +14,7 @@ const { extractVisualSubjects } = require('./section11-visual-subject-extractor.
 const fs = require('fs');
 const path = require('path');
 
-console.log('[5D][INIT] Clip matcher orchestrator (parallel, loose mode) loaded.');
+console.log('[5D][INIT] Clip matcher orchestrator (bulletproof, loose) loaded.');
 
 const GENERIC_SUBJECTS = [
   'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children'
@@ -86,7 +86,7 @@ async function findClipForScene({
 }) {
   let searchSubject = subject;
 
-  // Anchor logic (same as before)
+  // Anchor logic
   if (isMegaScene || sceneIdx === 0) {
     if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())) {
       searchSubject = megaSubject;
@@ -135,19 +135,18 @@ async function findClipForScene({
     prioritizedSubjects = [searchSubject, mainTopic];
   }
 
-  // Try all prioritized subjects
+  // Try all prioritized subjects, loose mode
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // === 1. Try strict match first ===
+    // === 1. Try R2, loose mode ===
     async function findDedupedR2ClipLoose(searchPhrase, usedClipsArr) {
       try {
         const r2Files = await findR2ClipForScene.getAllFiles
           ? await findR2ClipForScene.getAllFiles()
           : [];
         let found = null;
-        console.log(`[5D][R2][${jobId}] Searching for subject: "${searchPhrase}" (loose mode enabled)`);
-        // a) Try strict match first
+        // a) Strict match first
         for (const fname of r2Files) {
           if (usedClipsArr.includes(fname)) continue;
           if (strictSubjectMatch(fname, searchPhrase)) {
@@ -156,7 +155,7 @@ async function findClipForScene({
             break;
           }
         }
-        // b) If nothing, try any major word
+        // b) Loose match: any major word or substring
         if (!found) {
           for (const fname of r2Files) {
             if (usedClipsArr.includes(fname)) continue;
@@ -167,7 +166,7 @@ async function findClipForScene({
             }
           }
         }
-        // c) If nothing, take any unused file as absolute last resort
+        // c) Any unused file as last resort
         if (!found && r2Files.length) {
           for (const fname of r2Files) {
             if (usedClipsArr.includes(fname)) continue;
@@ -184,7 +183,6 @@ async function findClipForScene({
       }
     }
 
-    // R2 (loose match)
     let r2Result = null;
     if (findR2ClipForScene.getAllFiles) {
       r2Result = await findDedupedR2ClipLoose(subjectOption, usedClips);
@@ -245,7 +243,7 @@ async function findClipForScene({
       console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
     }
 
-    // --- Ken Burns (final fallback) ---
+    // --- Ken Burns (final fallback, always returns an image)
     try {
       let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (kenBurnsResult && !usedClips.includes(kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
@@ -274,6 +272,18 @@ async function findClipForScene({
 
   // Still nothing!
   console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
+  // Instead of returning null, let's try one last Ken Burns with a generic prompt:
+  try {
+    let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
+    if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+      console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic fallback: ${kenBurnsResult}`);
+      return kenBurnsResult;
+    }
+  } catch (e) {
+    console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}] Error during generic KenBurns fallback:`, e);
+  }
+
+  // If literally nothing, return null
   return null;
 }
 

@@ -3,7 +3,7 @@
 // Finds and downloads best-matching video from Pixabay API
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Bulletproof: unique files, dedupe, valid output, crash-proof
-// 2024-08: Strict subject keyword filter, zero skips
+// 2024-08: Scoring with strict/fuzzy/partial keyword filter, no skips
 // ===========================================================
 
 const axios = require('axios');
@@ -18,12 +18,11 @@ if (!PIXABAY_API_KEY) {
   console.error('[10C][FATAL] Missing PIXABAY_API_KEY in environment!');
 }
 
-// --- Utility: Clean query for Pixabay ---
+// --- Utility: Query normalization & keyword helpers ---
 function cleanQuery(str) {
   if (!str) return '';
   return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
 }
-
 function getKeywords(str) {
   return String(str || '')
     .toLowerCase()
@@ -31,12 +30,39 @@ function getKeywords(str) {
     .split(/[\s\-]+/)
     .filter(w => w.length > 2);
 }
+function majorWords(subject) {
+  return (subject || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
+}
+function normalizeForMatch(str) {
+  return (str || '')
+    .toLowerCase()
+    .replace(/[\s_\-\.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
-// --- Strict subject present: ALL keywords in metadata ---
-function strictSubjectPresentPixabay(fields, subject) {
-  const subjectWords = getKeywords(subject);
-  if (!subjectWords.length) return false;
-  return subjectWords.every(w => fields.includes(w));
+// --- Match helpers (handles underscores, loose matches, etc) ---
+function strictSubjectMatchPixabay(filename, subject) {
+  if (!filename || !subject) return false;
+  const safeSubject = cleanQuery(subject).replace(/\s+/g, '_');
+  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|\\.|$)`, 'i');
+  return re.test(filename.replace(/ /g, '_'));
+}
+function fuzzyMatchPixabay(filename, subject) {
+  if (!filename || !subject) return false;
+  const fn = normalizeForMatch(filename);
+  const words = majorWords(subject);
+  return words.length && words.every(word => fn.includes(word));
+}
+function partialMatchPixabay(filename, subject) {
+  if (!filename || !subject) return false;
+  const fn = normalizeForMatch(filename);
+  const words = majorWords(subject);
+  return words.some(word => fn.includes(word));
 }
 
 // --- File validation ---
@@ -85,13 +111,19 @@ async function downloadPixabayVideoToLocal(url, outPath, jobId) {
   }
 }
 
-// --- Scoring: Only score if strict subject present in fields ---
+// --- Scoring (strict > fuzzy > partial > fallback) ---
 function scorePixabayMatch(hit, vid, subject, usedClips = []) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
+  const filename = (vid.url || '').split('/').pop();
 
-  // Phrase/keyword fields for scoring
+  // Score subject in filename (strict > fuzzy > partial)
+  if (strictSubjectMatchPixabay(filename, subject)) score += 90;
+  else if (fuzzyMatchPixabay(filename, subject)) score += 28;
+  else if (partialMatchPixabay(filename, subject)) score += 14;
+
+  // Metadata keyword/phrase
   const fields = [
     ...(hit.tags ? hit.tags.split(',').map(t => t.trim()) : []),
     hit.user || '',
@@ -99,47 +131,31 @@ function scorePixabayMatch(hit, vid, subject, usedClips = []) {
     vid.url || ''
   ].join(' ').toLowerCase();
 
-  // Only score if ALL subject words present
-  if (!strictSubjectPresentPixabay(fields, subject)) {
-    score -= 9999; // Hard reject
-    return score;
-  }
+  if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 45;
+  if (subjectWords.every(w => fields.includes(w)) && subjectWords.length > 1) score += 25;
+  subjectWords.forEach(word => { if (fields.includes(word)) score += 5; });
 
-  // Strong full phrase match
-  if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 50;
-
-  // All words present
-  const allWordsPresent = subjectWords.every(w => fields.includes(w));
-  if (allWordsPresent && subjectWords.length > 1) score += 25;
-
-  // Each keyword match
-  subjectWords.forEach(word => {
-    if (fields.includes(word)) score += 5;
-  });
-
-  // Aspect/size: prefer portrait/landscape, HD+
-  if (vid.width > vid.height) score += 10; // Landscape
-  if (vid.height / vid.width > 1.7 && vid.height > 1000) score += 12; // Portrait, tall
-  if (vid.height >= 720) score += 5;
+  // Aspect/size
+  if (vid.height > vid.width) score += 8; // Portrait
+  if (vid.width > vid.height) score += 6; // Landscape
+  if (vid.height >= 720) score += 7;
   score += Math.floor(vid.width / 120);
 
-  // Penalize used/duplicate clips
-  if (usedClips && usedClips.some(u => vid.url && (u.includes(vid.url) || vid.url.includes(u)))) {
-    score -= 100;
-  }
+  // Penalize used/duplicate
+  if (usedClips && usedClips.some(u => vid.url && (u.includes(vid.url) || vid.url.includes(u)))) score -= 100;
 
-  // Penalize very short videos
-  if (hit.duration && hit.duration < 4) score -= 6;
-
-  // Slight bonus for more recent/popular videos (higher id)
+  // Penalize very short
+  if (hit.duration && hit.duration < 4) score -= 8;
   if (hit.id && Number(hit.id) > 1000000) score += 2;
 
+  // Bonus: shorter filename, newer id, better match
+  score -= filename.length;
   return score;
 }
 
 /**
- * Finds and downloads best Pixabay video for a given subject/scene,
- * scoring by resolution, aspect, deduping, and strict subject filtering.
+ * Finds and downloads best-scoring Pixabay video for a subject/scene.
+ * All normalization, strict/fuzzy/partial, deduping, logging, crash-proof.
  * @param {string} subject         Main scene subject (clean, descriptive)
  * @param {string} workDir         Local job folder for saving video
  * @param {number} sceneIdx
@@ -155,10 +171,8 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
     return null;
   }
   try {
-    const query = encodeURIComponent(cleanQuery(subject));
-    // Enforce 100 char limit for Pixabay
-    const cappedQuery = query.length > 100 ? query.slice(0, 100) : query;
-    const url = `https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${cappedQuery}&per_page=10`;
+    const query = encodeURIComponent(cleanQuery(subject)).slice(0, 100);
+    const url = `https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${query}&per_page=10`;
     console.log(`[10C][PIXABAY][${jobId}] Searching: ${url}`);
     const resp = await axios.get(url);
 
@@ -177,12 +191,11 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
       );
 
       const best = scored[0];
-      // Only accept if not a reject and score high enough
-      if (best && best.score >= 18) {
+      if (best && best.score >= 15) {
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
         return await downloadPixabayVideoToLocal(best.vid.url, outPath, jobId);
       }
-      console.warn(`[10C][PIXABAY][${jobId}] No strict Pixabay match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
+      console.warn(`[10C][PIXABAY][${jobId}] No strong Pixabay match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
     } else {
       console.log(`[10C][PIXABAY][${jobId}] No Pixabay video results found for "${subject}"`);
     }

@@ -3,7 +3,7 @@
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for parallel dedupe/scan)
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Parallel safe: no temp file collisions, NO silent fails
-// 2024-08: Strict subject enforcement, only returns if filename contains subject as a word
+// 2024-08: Fuzzy/partial/strict scoring, normalized folders/files, pro matching
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
@@ -32,17 +32,25 @@ const s3Client = new S3Client({
   }
 });
 
-// === Filename normalizer (for strict subject check) ===
+// --- Normalization helpers ---
 function cleanForFilename(str) {
   return (str || '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
-    .slice(0, 70);
+    .slice(0, 80);
 }
 
-// === BULLETPROOF: List all files in R2 ===
+function normalizeForMatch(str) {
+  return (str || '')
+    .toLowerCase()
+    .replace(/[\s_\-\.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// --- Main: List all files in R2 (with full path relative to bucket root) ---
 async function listAllFilesInR2(prefix = '', jobId = '') {
   let files = [];
   let continuationToken;
@@ -70,16 +78,66 @@ async function listAllFilesInR2(prefix = '', jobId = '') {
   }
 }
 
-// === STRICT SUBJECT MATCH: Only accept files that include the subject as a word ===
-function subjectInFilename(filename, subject) {
+// --- Major words extraction ---
+function majorWords(subject) {
+  return (subject || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
+}
+
+// --- Scoring function for filename match ---
+// Returns a higher score for strict matches, then fuzzy, then partial
+function scoreR2Match(filename, subject) {
+  if (!filename || !subject) return -99999;
+  let score = 0;
+  const fn = normalizeForMatch(filename);
+  const subj = normalizeForMatch(subject);
+
+  // 1. Strict match: subject as full word in filename (bonus)
+  if (strictSubjectMatch(filename, subject)) score += 100;
+  // 2. Fuzzy match: all major words somewhere in filename
+  if (fuzzyMatch(filename, subject)) score += 35;
+  // 3. Partial match: any major word in filename
+  if (partialMatch(filename, subject)) score += 15;
+  // 4. Exact phrase somewhere in filename (bonus)
+  if (fn.includes(subj) && subj.length > 2) score += 12;
+  // 5. Each major word that appears, +5
+  majorWords(subject).forEach(word => {
+    if (fn.includes(word)) score += 5;
+  });
+  // 6. Prefer portrait (ends in _portrait.mp4 or has 9_16, tiktok, shorts)
+  if (/_portrait\.mp4$/.test(filename) || fn.includes('9 16') || fn.includes('shorts') || fn.includes('tiktok')) score += 8;
+  // 7. Prefer recent (higher-numbered files)
+  const nums = filename.match(/\d+/g) || [];
+  nums.forEach(n => { if (Number(n) > 2020) score += 2; });
+  // 8. Prefer shorter filenames (tighter match)
+  score -= fn.length;
+  return score;
+}
+
+// --- Fuzzy/partial/strict match helpers ---
+function fuzzyMatch(filename, subject) {
+  if (!filename || !subject) return false;
+  const fn = normalizeForMatch(filename);
+  const words = majorWords(subject);
+  return words.length && words.every(word => fn.includes(word));
+}
+function partialMatch(filename, subject) {
+  if (!filename || !subject) return false;
+  const fn = normalizeForMatch(filename);
+  const words = majorWords(subject);
+  return words.some(word => fn.includes(word));
+}
+function strictSubjectMatch(filename, subject) {
   if (!filename || !subject) return false;
   const safeSubject = cleanForFilename(subject);
-  // Look for _subject_ or -subject- or exact at start/end
-  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|$)`, 'i');
+  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|\\.|$)`, 'i');
   return re.test(cleanForFilename(filename));
 }
 
-// === FILE VALIDATOR: Ensures file exists and is >2kb (not broken)
+// --- FILE VALIDATOR: Ensures file exists and is >2kb (not broken)
 function isValidClip(filePath, jobId) {
   try {
     if (!fs.existsSync(filePath)) {
@@ -99,8 +157,7 @@ function isValidClip(filePath, jobId) {
 }
 
 /**
- * Finds the best-matching video in R2 that STRICTLY contains the subject in the filename.
- * Used by 5D as findR2ClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
+ * Finds the *best-scoring* video in R2 for the subject, using strict, fuzzy, or partial match (in that order).
  * @param {string} subject
  * @param {string} workDir
  * @param {number} sceneIdx
@@ -127,18 +184,31 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
     const mp4Files = files.filter(f =>
       f.endsWith('.mp4') && !usedClips.some(u => f.endsWith(u) || f === u)
     );
-
-    // Only keep files with subject in the filename (STRICT)
-    const subjectMatches = mp4Files.filter(f => subjectInFilename(f, subject));
-    if (!subjectMatches.length) {
-      console.log(`[10A][R2][${jobId}] No strict subject match in R2 for "${subject}"`);
+    if (!mp4Files.length) {
+      console.warn(`[10A][R2][${jobId}] No .mp4 files found in R2 bucket!`);
       return null;
     }
 
-    // Prefer shortest filename (most specific match), then alphabetical
-    subjectMatches.sort((a, b) => a.length - b.length || a.localeCompare(b));
+    // Score all files for this subject
+    const scored = mp4Files.map(f => ({
+      file: f,
+      score: scoreR2Match(f, subject)
+    }));
 
-    const bestFile = subjectMatches[0];
+    // Log all candidate scores for debug
+    scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10)
+      .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.file} | score=${s.score}`));
+
+    // Take the highest-scoring file above threshold, else just best
+    const best = scored[0];
+    if (!best || best.score < -9000) {
+      console.warn(`[10A][R2][${jobId}] No usable R2 match found for "${subject}".`);
+      return null;
+    }
+
+    const bestFile = best.file;
 
     // Unique filename for every download attempt (parallel safe)
     const unique = uuidv4();
