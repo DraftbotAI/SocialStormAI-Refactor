@@ -496,8 +496,9 @@ async function uploadToR2(finalPath, r2FinalName, jobId) {
     Body: fileData,
     ContentType: 'video/mp4'
   }));
-  const urlBase = process.env.R2_FINALS_BASEURL || '';
-  const url = urlBase ? `${urlBase.replace(/\/$/, '')}/${key}` : key;
+  // Always return the custom public domain if available!
+  const urlBase = process.env.R2_PUBLIC_CUSTOM_DOMAIN || 'https://videos.socialstormai.com';
+  const url = `${urlBase.replace(/\/$/, '')}/${key}`;
   console.log(`[5B][R2][UPLOAD][OK] Final uploaded: ${url}`);
   return url;
 }
