@@ -190,12 +190,18 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
         console.log(`[10C][PIXABAY][${jobId}][CANDIDATE][${i + 1}] ${s.vid.url} | score=${s.score} | size=${s.vid.width}x${s.vid.height}`)
       );
 
-      const best = scored[0];
-      if (best && best.score >= 15) {
+      // === KEY FIX: Always pick the best available candidate, even if not a strong match ===
+      let best = scored.find(s => s.score > 15) || scored[0];
+      if (!best && scored.length > 0) best = scored[0];
+      if (best) {
+        console.log(`[10C][PIXABAY][${jobId}][PICKED] Selected: ${best.vid.url} | score=${best.score}`);
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
-        return await downloadPixabayVideoToLocal(best.vid.url, outPath, jobId);
+        const resultPath = await downloadPixabayVideoToLocal(best.vid.url, outPath, jobId);
+        if (resultPath) return resultPath;
+        // If download fails, try next best (not implemented here, fallback handled by 5D)
+      } else {
+        console.warn(`[10C][PIXABAY][${jobId}] No Pixabay videos matched subject, but candidates were returned.`);
       }
-      console.warn(`[10C][PIXABAY][${jobId}] No strong Pixabay match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
     } else {
       console.log(`[10C][PIXABAY][${jobId}] No Pixabay video results found for "${subject}"`);
     }

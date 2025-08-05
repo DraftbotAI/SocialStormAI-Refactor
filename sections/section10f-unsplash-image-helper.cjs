@@ -139,7 +139,12 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
     const response = await axios.get(apiUrl, { timeout: 15000 });
     json = response.data;
   } catch (err) {
-    console.error(`[10F][API_ERR][${jobId}] Unsplash API error:`, err?.response?.data || err.message || err);
+    // Log 401, key missing, and other errors but NEVER block or loop
+    if (err?.response?.status === 401) {
+      console.error(`[10F][API_ERR][${jobId}] Unsplash 401 Unauthorized: Invalid API key or quota exceeded.`);
+    } else {
+      console.error(`[10F][API_ERR][${jobId}] Unsplash API error:`, err?.response?.data || err.message || err);
+    }
     return null;
   }
 
@@ -148,12 +153,12 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
     return null;
   }
 
-  // Score all results, skip used, STRICT: only candidates with positive score
+  // Score all results, skip used
   let scored = json.results.map(result => ({
     result,
     score: scoreUnsplashImage(result, subject, usedClips),
     url: result.urls.full
-  })).filter(item => item.score >= 0 && item.url && !usedClips.some(u => u.includes(item.url)));
+  })).filter(item => item.url && !usedClips.some(u => u.includes(item.url)));
 
   scored.sort((a, b) => b.score - a.score);
 
@@ -162,9 +167,11 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
     console.log(`[10F][CANDIDATE][${jobId}] [${i + 1}] url=${s.url} | score=${s.score} | desc="${s.result.alt_description || ''}"`);
   });
 
-  const best = scored[0];
-  if (!best || !best.url || best.score < 15) {
-    console.warn(`[10F][NO_GOOD][${jobId}] No strong Unsplash match for "${subject}" (best score: ${best ? best.score : 'none'})`);
+  // === KEY IMPROVEMENT: Always pick the best available, even if weak match ===
+  let best = scored.find(s => s.score > 15) || scored[0];
+  if (!best && scored.length > 0) best = scored[0];
+  if (!best || !best.url) {
+    console.warn(`[10F][NO_GOOD][${jobId}] No Unsplash match for "${subject}"`);
     return null;
   }
 

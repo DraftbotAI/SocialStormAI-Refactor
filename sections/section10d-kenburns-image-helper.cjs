@@ -53,13 +53,12 @@ function strictSubjectPresent(fields, subject) {
   return subjectWords.every(w => fields.includes(w));
 }
 
-// --- SCORING: Works for all image APIs, ONLY score if strict subject present ---
+// --- SCORING: Scores images for fallback Ken Burns ---
 function scoreImage(candidate, subject, usedClips = [], extra = {}) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
 
-  // Fields: description, alt, tags, etc (all lowercased)
   let fields = '';
   if (candidate.api === 'unsplash') {
     fields = [
@@ -85,23 +84,19 @@ function scoreImage(candidate, subject, usedClips = [], extra = {}) {
     ].join(' ').toLowerCase();
   }
 
-  // STRICT: only score if ALL subject words present
-  if (!strictSubjectPresent(fields, subject)) {
-    score -= 9999; // Hard reject, will not be used
-    return score;
-  }
-
-  // Phrase match
-  if (fields.includes(cleanedSubject)) score += 60;
-  // All words present
-  if (subjectWords.every(w => fields.includes(w)) && subjectWords.length > 1) score += 30;
-  // Each word present
-  subjectWords.forEach(word => { if (fields.includes(word)) score += 5; });
+  // Strong: strict
+  if (strictSubjectPresent(fields, subject)) score += 100;
+  // Fuzzy: all words
+  if (subjectWords.every(w => fields.includes(w))) score += 35;
+  // Each word
+  subjectWords.forEach(word => { if (fields.includes(word)) score += 6; });
+  // Phrase
+  if (fields.includes(cleanedSubject)) score += 18;
 
   // HD preference
   if (candidate.width && candidate.width >= 1000) score += 7;
   if (candidate.height && candidate.height >= 1000) score += 7;
-  if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8; // portrait
+  if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8;
 
   // Penalize used/dup
   if (usedClips && candidate.url && usedClips.some(u => u.includes(candidate.url) || candidate.url.includes(u))) score -= 60;
@@ -112,7 +107,7 @@ function scoreImage(candidate, subject, usedClips = [], extra = {}) {
   return score;
 }
 
-// --- Find an image on Unsplash ---
+// --- Unsplash image search ---
 async function findImageInUnsplash(subject, usedClips = []) {
   if (!UNSPLASH_ACCESS_KEY) {
     console.warn('[10D][UNSPLASH] No access key set.');
@@ -124,21 +119,20 @@ async function findImageInUnsplash(subject, usedClips = []) {
     console.log(`[10D][UNSPLASH] Request: ${url}`);
     const resp = await axios.get(url);
     if (resp.data && resp.data.results && resp.data.results.length > 0) {
-      // Score all candidates
       let candidates = resp.data.results.map(item => ({
         ...item,
         api: 'unsplash',
-        url: item.urls.full
+        url: item.urls.full,
+        width: item.width,
+        height: item.height,
       }));
       candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
+      candidates = candidates.filter(c => !usedClips.some(u => u.includes(c.url)));
       candidates.sort((a, b) => b.score - a.score);
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][UNSPLASH][CANDIDATE][${i + 1}] ${c.urls.full} | score=${c.score} | desc="${c.description || c.alt_description || ''}"`);
       });
-      // Only return if strict subject present
-      if (candidates[0]?.score >= 0) return candidates[0].urls.full;
-      else console.warn(`[10D][UNSPLASH][STRICT] No strict subject match found for "${subject}"`);
-      return null;
+      if (candidates.length) return candidates[0].urls.full;
     }
     console.log(`[10D][UNSPLASH] No images found for: "${subject}"`);
     return null;
@@ -152,7 +146,7 @@ async function findImageInUnsplash(subject, usedClips = []) {
   }
 }
 
-// --- Find an image on Pexels (with scoring) ---
+// --- Pexels image search ---
 async function findImageInPexels(subject, usedClips = []) {
   if (!PEXELS_API_KEY) {
     console.warn('[10D][PEXELS-IMG] No API key set.');
@@ -172,13 +166,12 @@ async function findImageInPexels(subject, usedClips = []) {
         height: item.height
       }));
       candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
+      candidates = candidates.filter(c => !usedClips.some(u => u.includes(c.url)));
       candidates.sort((a, b) => b.score - a.score);
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][PEXELS-IMG][CANDIDATE][${i + 1}] ${c.src.original} | score=${c.score} | photographer="${c.photographer || ''}"`);
       });
-      if (candidates[0]?.score >= 0) return candidates[0].src.original;
-      else console.warn(`[10D][PEXELS-IMG][STRICT] No strict subject match found for "${subject}"`);
-      return null;
+      if (candidates.length) return candidates[0].src.original;
     }
     console.log(`[10D][PEXELS-IMG] No images found for: "${subject}"`);
     return null;
@@ -192,7 +185,7 @@ async function findImageInPexels(subject, usedClips = []) {
   }
 }
 
-// --- Find an image on Pixabay (with scoring) ---
+// --- Pixabay image search ---
 async function findImageInPixabay(subject, usedClips = []) {
   if (!PIXABAY_API_KEY) {
     console.warn('[10D][PIXABAY-IMG] No API key set.');
@@ -212,13 +205,12 @@ async function findImageInPixabay(subject, usedClips = []) {
         height: item.imageHeight
       }));
       candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
+      candidates = candidates.filter(c => !usedClips.some(u => u.includes(c.url)));
       candidates.sort((a, b) => b.score - a.score);
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][PIXABAY-IMG][CANDIDATE][${i + 1}] ${c.largeImageURL} | score=${c.score} | tags="${c.tags}"`);
       });
-      if (candidates[0]?.score >= 0) return candidates[0].largeImageURL;
-      else console.warn(`[10D][PIXABAY-IMG][STRICT] No strict subject match found for "${subject}"`);
-      return null;
+      if (candidates.length) return candidates[0].largeImageURL;
     }
     console.log(`[10D][PIXABAY-IMG] No images found for: "${subject}"`);
     return null;
@@ -372,7 +364,7 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     // Unsplash
     if (UNSPLASH_ACCESS_KEY) {
       const url = await findImageInUnsplash(subject, usedClips);
-      if (url) candidates.push({ url, api: 'unsplash', score: 100 }); // Score recalculated below
+      if (url) candidates.push({ url, api: 'unsplash', score: 100 });
     }
     // Pexels
     if (PEXELS_API_KEY) {
@@ -390,11 +382,10 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     for (let c of candidates) {
       c.score = scoreImage({ ...c, url: c.url }, subject, usedClips);
     }
-    candidates = candidates.filter(c => c.score >= 0); // Only accept strict subject matches
     candidates.sort((a, b) => b.score - a.score);
 
     if (!candidates.length) {
-      console.warn(`[10D][FALLBACK][${jobId}] No strict subject fallback image found for "${subject}"`);
+      console.warn(`[10D][FALLBACK][${jobId}] No fallback image found for "${subject}"`);
       return null;
     }
 

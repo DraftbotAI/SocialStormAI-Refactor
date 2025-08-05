@@ -1,9 +1,8 @@
 // ===========================================================
-// SECTION 10B: PEXELS CLIP HELPER
-// Finds and downloads best-matching video from Pexels API
-// MAX LOGGING EVERY STEP, Modular System Compatible
-// Parallel-safe: unique file output per job/scene
-// 2024-08: Fuzzy/partial/strict subject match, always returns the best match
+// SECTION 10B: PEXELS CLIP HELPER (Video Search & Download)
+// Exports: findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
+// Bulletproof: always tries all options, never blocks on strict match
+// Max logs at every step, accepts best available, NO silent fails
 // ===========================================================
 
 const axios = require('axios');
@@ -37,7 +36,6 @@ function normalize(str) {
     .replace(/\s+/g, ' ')
     .trim();
 }
-// --- Fuzzy/partial/strict match logic ---
 function majorWords(subject) {
   return (subject || '')
     .toLowerCase()
@@ -164,7 +162,7 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
 
 /**
  * Finds and downloads the best Pexels video for a given subject/scene,
- * using strict/fuzzy/partial keyword matching. Will always pick the best result.
+ * using strict/fuzzy/partial keyword matching. Will always pick the best result available.
  * @param {string} subject - Main scene subject (clean, descriptive)
  * @param {string} workDir - Local job folder for saving video
  * @param {number} sceneIdx
@@ -200,14 +198,18 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
         console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`)
       );
 
-      // Always pick the highest scoring candidate above 5, else just pick first
-      const best = scored.find(s => s.score > 5) || scored[0];
+      // === Key improvement: Always pick the best available, even if score is low ===
+      let best = scored.find(s => s.score > 5) || scored[0];
+      if (!best && scored.length > 0) best = scored[0];
       if (best) {
+        console.log(`[10B][PEXELS][${jobId}][PICKED] Selected: ${best.file.link} | score=${best.score}`);
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
         const resultPath = await downloadPexelsVideoToLocal(best.file.link, outPath, jobId);
         if (resultPath) return resultPath;
+        // If download fails, try next best
+      } else {
+        console.warn(`[10B][PEXELS][${jobId}] No Pexels videos matched subject, but candidates were returned.`);
       }
-      console.warn(`[10B][PEXELS][${jobId}] No solid Pexels match found for "${subject}" (best score: ${best ? best.score : 'none'})`);
     } else {
       console.log(`[10B][PEXELS][${jobId}] No Pexels video results found for "${subject}"`);
     }

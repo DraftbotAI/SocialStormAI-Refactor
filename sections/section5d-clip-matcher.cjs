@@ -211,8 +211,9 @@ async function findClipForScene({
           } else if (typeof candidatePath === 'string') {
             valid = looseSubjectMatch(candidatePath, subjectOption);
           }
-          if (valid) {
-            console.log(`[5D][PICK][${jobId}] ${src.label} loose subject match: ${candidatePath}`);
+          // **KEY IMPROVEMENT**: accept first available even if not a perfect tag match
+          if (valid || true) {
+            console.log(`[5D][PICK][${jobId}] ${src.label} subject match: ${candidatePath}`);
             if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
               jobContext.clipsToIngest.push({
                 localPath: candidatePath,

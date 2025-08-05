@@ -88,7 +88,6 @@ function majorWords(subject) {
 }
 
 // --- Scoring function for filename match ---
-// Returns a higher score for strict matches, then fuzzy, then partial
 function scoreR2Match(filename, subject) {
   if (!filename || !subject) return -99999;
   let score = 0;
@@ -158,6 +157,7 @@ function isValidClip(filePath, jobId) {
 
 /**
  * Finds the *best-scoring* video in R2 for the subject, using strict, fuzzy, or partial match (in that order).
+ * ALWAYS returns the best available candidate (never null if any .mp4 exists).
  * @param {string} subject
  * @param {string} workDir
  * @param {number} sceneIdx
@@ -201,11 +201,22 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
       .slice(0, 10)
       .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.file} | score=${s.score}`));
 
-    // Take the highest-scoring file above threshold, else just best
-    const best = scored[0];
-    if (!best || best.score < -9000) {
-      console.warn(`[10A][R2][${jobId}] No usable R2 match found for "${subject}".`);
+    // Take the highest-scoring file ALWAYS, even if score is negative (as last resort)
+    let best = scored[0];
+    if (!best || typeof best.file !== 'string') {
+      console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No candidates for subject "${subject}". Aborting.`);
       return null;
+    }
+
+    // Log whether this is strict/fuzzy/partial/last-resort
+    if (best.score >= 100) {
+      console.log(`[10A][R2][${jobId}][SELECTED][STRICT] ${best.file} | score=${best.score}`);
+    } else if (best.score >= 35) {
+      console.log(`[10A][R2][${jobId}][SELECTED][FUZZY] ${best.file} | score=${best.score}`);
+    } else if (best.score >= 1) {
+      console.log(`[10A][R2][${jobId}][SELECTED][PARTIAL] ${best.file} | score=${best.score}`);
+    } else {
+      console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] No strong match, using best available: ${best.file} | score=${best.score}`);
     }
 
     const bestFile = best.file;
