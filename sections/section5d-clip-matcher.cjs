@@ -33,6 +33,7 @@ function getMajorWords(subject) {
     .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
 }
 
+// Checks if ANY major word from subject appears in filename
 function looseSubjectMatch(filename, subject) {
   if (!filename || !subject) return false;
   const safeFile = cleanForFilename(filename).toLowerCase();
@@ -43,6 +44,7 @@ function looseSubjectMatch(filename, subject) {
   return safeFile.includes(normalize(subject));
 }
 
+// Strict match (for priority order)
 function strictSubjectMatch(filename, subject) {
   if (!filename || !subject) return false;
   const safeSubject = cleanForFilename(subject);
@@ -176,10 +178,7 @@ async function findClipForScene({
 
   // === 0. Contextual strict R2 match (landmark override) ===
   const contextOverride = await tryContextualLandmarkOverride(searchSubject, mainTopic, usedClips, jobId);
-  if (contextOverride && !usedClips.includes(contextOverride)) {
-    usedClips.push(contextOverride);
-    return contextOverride;
-  }
+  if (contextOverride) return contextOverride;
 
   // === 1. Try STRICT R2 for each prioritized subject ===
   async function findStrictR2Clip(subjectPhrase, usedClipsArr) {
@@ -189,7 +188,10 @@ async function findClipForScene({
         if (usedClipsArr.includes(fname)) continue;
         if (strictSubjectMatch(fname, subjectPhrase)) {
           console.log(`[5D][R2][${jobId}] STRICT SUBJECT MATCH: "${fname}" for "${subjectPhrase}"`);
-          if (assertFileExists(fname, 'R2_RESULT')) return fname;
+          if (assertFileExists(fname, 'R2_RESULT')) {
+            usedClips.push(fname);
+            return fname;
+          }
         }
       }
       return null;
@@ -207,10 +209,7 @@ async function findClipForScene({
     let r2StrictResult = null;
     if (findR2ClipForScene.getAllFiles) {
       r2StrictResult = await findStrictR2Clip(subjectOption, usedClips);
-      if (r2StrictResult && !usedClips.includes(r2StrictResult)) {
-        usedClips.push(r2StrictResult);
-        return r2StrictResult;
-      }
+      if (r2StrictResult) return r2StrictResult;
     }
 
     // R2 loose match (no dupes)
@@ -234,7 +233,10 @@ async function findClipForScene({
             break;
           }
         }
-        if (found && assertFileExists(found, 'R2_RESULT')) return found;
+        if (found && assertFileExists(found, 'R2_RESULT')) {
+          usedClips.push(found);
+          return found;
+        }
         return null;
       } catch (err) {
         console.error(`[5D][R2][ERR][${jobId}] Error during R2 matching:`, err);
@@ -244,10 +246,7 @@ async function findClipForScene({
     let r2Result = null;
     if (findR2ClipForScene.getAllFiles) {
       r2Result = await findDedupedR2ClipLoose(subjectOption, usedClips);
-      if (r2Result && !usedClips.includes(r2Result)) {
-        usedClips.push(r2Result);
-        return r2Result;
-      }
+      if (r2Result) return r2Result;
       console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
     }
 

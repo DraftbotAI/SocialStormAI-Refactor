@@ -208,8 +208,8 @@ function registerGenerateVideoEndpoint(app, deps) {
           hookClipPath = await fallbackKenBurnsVideo(scenes[0].visualSubject || hookText || mainTopic, workDir, 0, jobId, usedClips);
           if (!hookClipPath) throw new Error(`[5B][HOOK][ERR][${jobId}] No fallback Ken Burns visual for HOOK!`);
         }
-        if (usedClips.includes(hookClipPath)) throw new Error(`[5B][DEDUP][HOOK][${jobId}] Clip/image already used: ${hookClipPath}`);
-        usedClips.push(hookClipPath);
+
+        // === NO DEDUPE CHECK HERE — ANTI-DUPE HANDLED IN 5D ===
 
         const localHookClipPath = path.join(workDir, path.basename(hookClipPath));
         await ensureLocalClipExists(hookClipPath, localHookClipPath);
@@ -296,8 +296,8 @@ function registerGenerateVideoEndpoint(app, deps) {
           megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
           if (!megaClipPath) throw new Error(`[5B][MEGA][ERR][${jobId}] No fallback Ken Burns visual for MEGA!`);
         }
-        if (usedClips.includes(megaClipPath)) throw new Error(`[5B][DEDUP][MEGA][${jobId}] Clip/image already used: ${megaClipPath}`);
-        usedClips.push(megaClipPath);
+
+        // === NO DEDUPE CHECK HERE — ANTI-DUPE HANDLED IN 5D ===
 
         const localMegaClipPath = path.join(workDir, path.basename(megaClipPath));
         await ensureLocalClipExists(megaClipPath, localMegaClipPath);
@@ -354,8 +354,8 @@ function registerGenerateVideoEndpoint(app, deps) {
               clipPath = await fallbackKenBurnsVideo(sceneSubject || mainTopic, workDir, sceneIdx, jobId, usedClips);
               if (!clipPath) throw new Error(`[5B][ERR][NO_MATCH][${jobId}] No fallback Ken Burns visual for scene ${sceneIdx + 1}!`);
             }
-            if (usedClips.includes(clipPath)) throw new Error(`[5B][DEDUP][SCENE][${jobId}] Clip/image already used: ${clipPath}`);
-            usedClips.push(clipPath);
+
+            // === NO DEDUPE CHECK HERE — ANTI-DUPE HANDLED IN 5D ===
 
             const localClipPath = path.join(workDir, path.basename(clipPath));
             await ensureLocalClipExists(clipPath, localClipPath);
