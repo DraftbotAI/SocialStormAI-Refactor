@@ -1,7 +1,8 @@
 // ===========================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Ultimate Best-Visual, No Generic Dupe Fallback)
-// Always returns the BEST: R2, Pexels, Pixabay, Unsplash (photo or KB video).
-// No repeats or generics if a real subject match exists. Max logs, no endless fallback.
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Bulletproof, Anti-Dupe)
+// Always returns something: R2, Pexels, Pixabay, Unsplash image, or Ken Burns.
+// Never repeats a clip/image in the same video unless absolutely unavoidable.
+// MAX LOGS at every step. No endless loops. No generic dupe fallback.
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
@@ -17,10 +18,10 @@ const path = require('path');
 console.log('[5D][INIT] Clip matcher orchestrator (BEST-VISUAL, NO-GENERIC-DUPES) loaded.');
 
 const GENERIC_SUBJECTS = [
-  'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text'
+  'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text', 'skyline', 'dubai'
 ];
 
-// Normalize for loose matching
+// --- Helper functions ---
 function normalize(str) {
   return (str || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
@@ -29,7 +30,7 @@ function getMajorWords(subject) {
   return (subject || '')
     .split(/\s+/)
     .map(w => w.toLowerCase())
-    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
+    .filter(w => w.length > 2 && !['the', 'of', 'and', 'in', 'on', 'with', 'to', 'is', 'for', 'at', 'by', 'as', 'a', 'an'].includes(w));
 }
 
 function looseSubjectMatch(filename, subject) {
@@ -67,7 +68,7 @@ function assertFileExists(file, label = 'FILE', minSize = 10240) {
   }
 }
 
-// --- Scoring: Block generic, dupe, and sign/irrelevant clips if real match exists ---
+// --- Scoring (massive penalty for generic/irrelevant if real match exists) ---
 function scoreCandidate(candidate, subject, isVideo = false, realMatchExists = false) {
   let score = 0;
   const cleanedSubject = normalize(subject);
@@ -76,37 +77,27 @@ function scoreCandidate(candidate, subject, isVideo = false, realMatchExists = f
   if (!candidate || !candidate.path) return -9999;
   const basename = path.basename(candidate.path).toLowerCase();
 
-  // Strict subject in filename: big win
   if (strictSubjectMatch(basename, subject)) score += 120;
-
-  // All words present (loose match): good
   if (words.every(w => basename.includes(w))) score += 40;
-
-  // Any word present
   words.forEach(word => { if (basename.includes(word)) score += 8; });
-
-  // Raw subject string present
   if (basename.includes(cleanedSubject)) score += 15;
 
-  // Prefer HD (only for video)
-  if (isVideo) score += 10;
+  // Prefer HD and video
+  if (isVideo) score += 20;
 
-  // Prefer video, but only if tie or close
-  if (isVideo) score += 10;
-
-  // Massive penalty if generic/irrelevant, *unless* there is nothing better
+  // Massive penalty if generic/irrelevant (unless nothing better)
   if (GENERIC_SUBJECTS.some(g => basename.includes(g))) score -= (realMatchExists ? 2000 : 200);
 
-  // Penalty for 'sign', 'logo', 'text'
+  // Penalty for "sign", "logo", "text"
   if (/\b(sign|logo|text)\b/.test(basename)) score -= (realMatchExists ? 2000 : 200);
 
-  // Lower score if file was used
+  // Lower if file was used
   if (candidate.used) score -= 5000;
 
   return score;
 }
 
-// --- Helper: Try contextual landmark override (strict R2) ---
+// --- Landmark context override (strict R2) ---
 async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobId) {
   if (!findR2ClipForScene.getAllFiles) return null;
   const LANDMARK_WORDS = [
@@ -151,7 +142,7 @@ async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobI
   return null;
 }
 
-// === Main Matcher ===
+// === MAIN MATCHER ===
 async function findClipForScene({
   subject,
   sceneIdx,
@@ -170,10 +161,20 @@ async function findClipForScene({
 
   // --- Anchor subject logic (first scene, mega-scene, etc.) ---
   if (isMegaScene || sceneIdx === 0) {
-    if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())) {
+    if (
+      megaSubject &&
+      typeof megaSubject === 'string' &&
+      megaSubject.length > 2 &&
+      !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())
+    ) {
       searchSubject = megaSubject;
       console.log(`[5D][ANCHOR][${jobId}] Using megaSubject for first/mega-scene: "${searchSubject}"`);
-    } else if (mainTopic && typeof mainTopic === 'string' && mainTopic.length > 2 && !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())) {
+    } else if (
+      mainTopic &&
+      typeof mainTopic === 'string' &&
+      mainTopic.length > 2 &&
+      !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())
+    ) {
       searchSubject = mainTopic;
       console.log(`[5D][ANCHOR][${jobId}] Fallback to mainTopic for mega-scene: "${searchSubject}"`);
     } else {
@@ -199,10 +200,17 @@ async function findClipForScene({
     if (assertFileExists(forceClipPath, 'FORCE_CLIP')) return forceClipPath;
     return null;
   }
-  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !findUnsplashImageForScene || !fallbackKenBurnsVideo) {
+  if (
+    !findR2ClipForScene ||
+    !findPexelsClipForScene ||
+    !findPixabayClipForScene ||
+    !findUnsplashImageForScene ||
+    !fallbackKenBurnsVideo
+  ) {
     console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
     return null;
   }
+
   let prioritizedSubjects = [];
   try {
     prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
@@ -216,7 +224,7 @@ async function findClipForScene({
   const contextOverride = await tryContextualLandmarkOverride(searchSubject, mainTopic, usedClips, jobId);
   if (contextOverride) return contextOverride;
 
-  // === 1. Aggregate all candidates (videos and Unsplash photo), score hard ===
+  // === 1. Aggregate all candidates ===
   let bestCandidate = null;
   let allCandidates = [];
   let realMatchExists = false;
@@ -228,7 +236,11 @@ async function findClipForScene({
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
       for (const fname of r2Files) {
-        if (!usedClips.includes(fname) && strictSubjectMatch(fname, subjectOption) && assertFileExists(fname, 'R2_RESULT')) {
+        if (
+          !usedClips.includes(fname) &&
+          strictSubjectMatch(fname, subjectOption) &&
+          assertFileExists(fname, 'R2_RESULT')
+        ) {
           allCandidates.push({ path: fname, source: 'R2', isVideo: true, subject: subjectOption, used: false });
         }
       }
@@ -238,7 +250,11 @@ async function findClipForScene({
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
       for (const fname of r2Files) {
-        if (!usedClips.includes(fname) && looseSubjectMatch(fname, subjectOption) && assertFileExists(fname, 'R2_RESULT')) {
+        if (
+          !usedClips.includes(fname) &&
+          looseSubjectMatch(fname, subjectOption) &&
+          assertFileExists(fname, 'R2_RESULT')
+        ) {
           allCandidates.push({ path: fname, source: 'R2', isVideo: true, subject: subjectOption, used: false });
         }
       }
@@ -277,10 +293,10 @@ async function findClipForScene({
     }
   }
 
-  // --- Remove any used clips ---
+  // --- Remove used clips (dedupe) ---
   allCandidates = allCandidates.filter(c => !usedClips.includes(c.path));
 
-  // --- Determine if any real (non-generic, non-sign, non-dupe) match exists ---
+  // --- Detect real (non-generic) matches ---
   for (const c of allCandidates) {
     const basename = path.basename(c.path).toLowerCase();
     if (
@@ -292,31 +308,29 @@ async function findClipForScene({
     }
   }
 
-  // --- Score all candidates (block/penalize generic/dupe if real exists) ---
+  // --- Score all candidates ---
   for (let candidate of allCandidates) {
     candidate.score = scoreCandidate(candidate, candidate.subject, candidate.isVideo, realMatchExists);
   }
 
-  // --- Sort descending by score, prefer video on tie ---
   allCandidates.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
-    if (b.isVideo !== a.isVideo) return b.isVideo ? 1 : -1; // prefer video on tie
+    if (b.isVideo !== a.isVideo) return b.isVideo ? 1 : -1;
     return 0;
   });
 
-  // --- Log all candidates for debug ---
+  // --- Log candidates for debug ---
   allCandidates.forEach((c, i) => {
     console.log(`[5D][CANDIDATE][${jobId}][#${i+1}] ${c.source} | ${c.path} | Score: ${c.score} | Video: ${c.isVideo ? 'Y' : 'N'}`);
   });
 
-  // --- Pick winner ---
+  // --- Pick best candidate ---
   bestCandidate = allCandidates.length ? allCandidates[0] : null;
 
   if (bestCandidate && bestCandidate.score > -1000) {
     const isGeneric = GENERIC_SUBJECTS.some(g => path.basename(bestCandidate.path).toLowerCase().includes(g));
     if (realMatchExists && isGeneric) {
       console.warn(`[5D][BLOCK][${jobId}] BLOCKED generic/irrelevant fallback: ${bestCandidate.path}`);
-      // Try next best candidate that is NOT generic/irrelevant
       const nextReal = allCandidates.find(c => {
         const b = path.basename(c.path).toLowerCase();
         return !GENERIC_SUBJECTS.some(g => b.includes(g)) && !/\b(sign|logo|text)\b/.test(b);
@@ -325,14 +339,12 @@ async function findClipForScene({
         bestCandidate = nextReal;
         console.log(`[5D][PICK][${jobId}] Promoted to real match: ${bestCandidate.path}`);
       } else {
-        // Only option left is generic, allow as absolute last resort
         console.warn(`[5D][GENERIC][${jobId}] Only generic fallback left: ${bestCandidate.path}`);
       }
     }
-
     usedClips.push(bestCandidate.path);
 
-    // If photo, run Ken Burns fallback (guaranteed video output)
+    // If photo, Ken Burns fallback to guarantee video output
     if (!bestCandidate.isVideo) {
       try {
         let kenBurnsResult = await fallbackKenBurnsVideo(bestCandidate.path, workDir, sceneIdx, jobId, usedClips);
@@ -350,7 +362,7 @@ async function findClipForScene({
     }
   }
 
-  // --- Absolute last resort: fallback logic as before ---
+  // --- Absolute last resort fallback: anything from R2 ---
   try {
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
@@ -382,4 +394,3 @@ async function findClipForScene({
 }
 
 module.exports = { findClipForScene };
- 
