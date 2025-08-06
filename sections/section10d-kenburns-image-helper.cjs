@@ -1,4 +1,4 @@
-// ===========================================================
+// ============================================================
 // SECTION 10D: KEN BURNS IMAGE VIDEO HELPER (Bulletproofed!)
 // Finds fallback still images from Unsplash, Pexels, Pixabay.
 // Downloads, scores, creates slow-pan video with FFmpeg.
