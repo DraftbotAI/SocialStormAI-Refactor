@@ -33,7 +33,6 @@ function getMajorWords(subject) {
     .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
 }
 
-// Checks if ANY major word from subject appears in filename
 function looseSubjectMatch(filename, subject) {
   if (!filename || !subject) return false;
   const safeFile = cleanForFilename(filename).toLowerCase();
@@ -44,7 +43,6 @@ function looseSubjectMatch(filename, subject) {
   return safeFile.includes(normalize(subject));
 }
 
-// Strict match (for priority order)
 function strictSubjectMatch(filename, subject) {
   if (!filename || !subject) return false;
   const safeSubject = cleanForFilename(subject);
@@ -103,7 +101,10 @@ async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobI
       if (usedClips.includes(fname)) continue;
       if (strictSubjectMatch(fname, foundLandmark)) {
         console.log(`[5D][CONTEXT][${jobId}] Landmark context override: "${foundLandmark}" => "${fname}"`);
-        if (assertFileExists(fname, 'R2_CONTEXT_RESULT')) return fname;
+        if (assertFileExists(fname, 'R2_CONTEXT_RESULT')) {
+          usedClips.push(fname);
+          return fname;
+        }
       }
     }
   } catch (err) {

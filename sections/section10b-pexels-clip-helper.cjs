@@ -105,6 +105,20 @@ async function downloadPexelsVideoToLocal(url, outPath, jobId) {
   }
 }
 
+// --- Anti-dupe check ---
+function isDupe(fileUrl, usedClips = []) {
+  if (!fileUrl) return false;
+  return usedClips.some(u =>
+    (typeof u === 'string') &&
+    (
+      u === fileUrl ||
+      u.endsWith(path.basename(fileUrl)) ||
+      u.includes(fileUrl) ||
+      fileUrl.includes(u)
+    )
+  );
+}
+
 // --- Scoring function: now accepts fuzzy, partial, and strict matches ---
 function scorePexelsMatch(video, file, subject, usedClips = []) {
   let score = 0;
@@ -146,10 +160,8 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
   score += file.file_type === 'video/mp4' ? 2 : 0;
   score += Math.floor(file.width / 120);
 
-  // Penalize used/duplicate clips
-  if (usedClips && usedClips.some(u => file.link && (u.includes(file.link) || file.link.includes(u)))) {
-    score -= 100;
-  }
+  // Penalize used/duplicate clips (url, id, basename)
+  if (isDupe(file.link, usedClips)) score -= 100;
 
   // Penalize very short clips
   if (video.duration && video.duration < 4) score -= 6;
@@ -188,6 +200,11 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
       for (const video of resp.data.videos) {
         const files = (video.video_files || []).filter(f => f.file_type === 'video/mp4');
         for (const file of files) {
+          // Do NOT add to scored if dupe
+          if (isDupe(file.link, usedClips)) {
+            console.log(`[10B][PEXELS][${jobId}][DUPE] Skipping duplicate file: ${file.link}`);
+            continue;
+          }
           const score = scorePexelsMatch(video, file, subject, usedClips);
           scored.push({ video, file, score });
         }
@@ -198,7 +215,7 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
         console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`)
       );
 
-      // === Key improvement: Always pick the best available, even if score is low ===
+      // === Always pick the best available, even if score is low ===
       let best = scored.find(s => s.score > 5) || scored[0];
       if (!best && scored.length > 0) best = scored[0];
       if (best) {

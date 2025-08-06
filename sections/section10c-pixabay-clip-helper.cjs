@@ -65,6 +65,19 @@ function partialMatchPixabay(filename, subject) {
   return words.some(word => fn.includes(word));
 }
 
+// --- Dedupe (anti-repeat) ---
+function isDupePixabay(url, usedClips = []) {
+  if (!url) return false;
+  return usedClips.some(u =>
+    typeof u === 'string' && (
+      u === url ||
+      u.endsWith(path.basename(url)) ||
+      u.includes(url) ||
+      url.includes(u)
+    )
+  );
+}
+
 // --- File validation ---
 function isValidClip(filePath, jobId) {
   try {
@@ -111,12 +124,15 @@ async function downloadPixabayVideoToLocal(url, outPath, jobId) {
   }
 }
 
-// --- Scoring (strict > fuzzy > partial > fallback) ---
+// --- Scoring (strict > fuzzy > partial > fallback, anti-dupe!) ---
 function scorePixabayMatch(hit, vid, subject, usedClips = []) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
   const filename = (vid.url || '').split('/').pop();
+
+  // Deduplication (anti-repeat) – penalize any kind of dupe
+  if (isDupePixabay(vid.url, usedClips)) score -= 100;
 
   // Score subject in filename (strict > fuzzy > partial)
   if (strictSubjectMatchPixabay(filename, subject)) score += 90;
@@ -140,9 +156,6 @@ function scorePixabayMatch(hit, vid, subject, usedClips = []) {
   if (vid.width > vid.height) score += 6; // Landscape
   if (vid.height >= 720) score += 7;
   score += Math.floor(vid.width / 120);
-
-  // Penalize used/duplicate
-  if (usedClips && usedClips.some(u => vid.url && (u.includes(vid.url) || vid.url.includes(u)))) score -= 100;
 
   // Penalize very short
   if (hit.duration && hit.duration < 4) score -= 8;
@@ -181,6 +194,11 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
       for (const hit of resp.data.hits) {
         const videoCandidates = Object.values(hit.videos || {});
         for (const vid of videoCandidates) {
+          // Do NOT add to scored if dupe
+          if (isDupePixabay(vid.url, usedClips)) {
+            console.log(`[10C][PIXABAY][${jobId}][DUPE] Skipping duplicate file: ${vid.url}`);
+            continue;
+          }
           const score = scorePixabayMatch(hit, vid, subject, usedClips);
           scored.push({ hit, vid, score });
         }
@@ -190,7 +208,7 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
         console.log(`[10C][PIXABAY][${jobId}][CANDIDATE][${i + 1}] ${s.vid.url} | score=${s.score} | size=${s.vid.width}x${s.vid.height}`)
       );
 
-      // === KEY FIX: Always pick the best available candidate, even if not a strong match ===
+      // Always pick the best available, even if score is low
       let best = scored.find(s => s.score > 15) || scored[0];
       if (!best && scored.length > 0) best = scored[0];
       if (best) {

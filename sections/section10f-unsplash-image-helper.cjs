@@ -27,9 +27,11 @@ function cleanForFilename(str) {
     .replace(/^-|-$/g, '')
     .slice(0, 70);
 }
+
 function getKeywords(str) {
   return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
 }
+
 function majorWords(subject) {
   return (subject || '')
     .toLowerCase()
@@ -37,6 +39,7 @@ function majorWords(subject) {
     .split(/\s+/)
     .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
 }
+
 function normalizeForMatch(str) {
   return (str || '')
     .toLowerCase()
@@ -98,11 +101,17 @@ function scoreUnsplashImage(result, subject, usedClips = []) {
   // Bonus for popularity
   if (result.likes && result.likes > 100) score += 4;
 
-  // Penalize used (local path or direct Unsplash URL)
-  if (usedClips && (
-      usedClips.some(u => (result.urls?.full && u.includes(result.urls.full))) ||
-      usedClips.some(u => typeof u === 'string' && u.includes(result.id))
-    )) score -= 100;
+  // Penalize used: check url, id, and basename for bulletproof dedupe
+  if (
+    usedClips.some(u =>
+      (typeof u === 'string') &&
+      (
+        (result.urls?.full && u.includes(result.urls.full)) ||
+        (result.id && u.includes(result.id)) ||
+        (u.endsWith('.jpg') && path.basename(u).includes(result.id))
+      )
+    )
+  ) score -= 100;
 
   // Recent images (higher ID, slight bump)
   if (result.id && Number(result.id) > 1000000) score += 1;
@@ -119,7 +128,8 @@ function scoreUnsplashImage(result, subject, usedClips = []) {
  * @param {string} workDir - Directory to save downloaded image
  * @param {number} sceneIdx - Scene index (for filename uniqueness)
  * @param {string} jobId - For logging
- * @param {Array<string>} usedClips - List of used image URLs and filenames to prevent dupes
+ * @param {Array<string>} usedClips - List of used image URLs, IDs, filenames to prevent dupes
+ * @param {Object} jobContext - Job-wide context for image tracking
  * @returns {Promise<string|null>} Local file path if successful, else null
  */
 async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId = 'nojob', usedClips = [], jobContext = {}) {
@@ -133,7 +143,7 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
   }
 
   const query = encodeURIComponent(subject);
-  const apiUrl = `https://api.unsplash.com/search/photos?query=${query}&orientation=portrait&per_page=10&client_id=${UNSPLASH_ACCESS_KEY}`;
+  const apiUrl = `https://api.unsplash.com/search/photos?query=${query}&orientation=portrait&per_page=15&client_id=${UNSPLASH_ACCESS_KEY}`;
 
   console.log(`[10F][REQ][${jobId}] Searching Unsplash: "${subject}"`);
 
@@ -155,7 +165,7 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
     return null;
   }
 
-  // Score all results, skip used
+  // Score all results, skip any in usedClips (by url, id, or basename)
   let scored = json.results.map(result => ({
     result,
     score: scoreUnsplashImage(result, subject, usedClips),
@@ -163,7 +173,14 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
     id: result.id
   })).filter(item =>
     item.url &&
-    !usedClips.some(u => (u && typeof u === 'string' && (u.includes(item.url) || u.includes(item.id))))
+    !usedClips.some(u =>
+      (typeof u === 'string') &&
+      (
+        (item.url && u.includes(item.url)) ||
+        (item.id && u.includes(item.id)) ||
+        (u.endsWith('.jpg') && path.basename(u).includes(item.id))
+      )
+    )
   );
 
   scored.sort((a, b) => b.score - a.score);
@@ -188,7 +205,6 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
   // If file already exists and is >10KB, skip download
   if (fs.existsSync(outPath) && fs.statSync(outPath).size > 10 * 1024) {
     console.log(`[10F][CACHE][${jobId}] HIT: ${outPath}`);
-    // Log into job context for traceability
     if (jobContext && Array.isArray(jobContext.imagesUsed)) {
       jobContext.imagesUsed.push({ localPath: outPath, url: best.url, subject, id: best.id, sceneIdx });
     }
@@ -214,7 +230,6 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
 
     if (fs.existsSync(outPath) && fs.statSync(outPath).size > 10 * 1024) {
       console.log(`[10F][DOWNLOAD][${jobId}] OK: Saved Unsplash image to ${outPath}`);
-      // Log into job context for traceability
       if (jobContext && Array.isArray(jobContext.imagesUsed)) {
         jobContext.imagesUsed.push({ localPath: outPath, url: best.url, subject, id: best.id, sceneIdx });
       }

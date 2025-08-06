@@ -98,8 +98,19 @@ function scoreImage(candidate, subject, usedClips = []) {
   if (candidate.height && candidate.height >= 1000) score += 7;
   if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8;
 
-  // Penalize used/dup
-  if (usedClips && candidate.url && usedClips.some(u => u.includes(candidate.url) || candidate.url.includes(u))) score -= 60;
+  // Penalize used/dup (by url, id, and basename)
+  if (
+    usedClips &&
+    candidate.url &&
+    usedClips.some(u =>
+      typeof u === 'string' && (
+        u.includes(candidate.url) ||
+        (candidate.id && u.includes(candidate.id)) ||
+        (u.endsWith('.jpg') && path.basename(u).includes(candidate.id || ''))
+      )
+    )
+  ) score -= 60;
+
   // Bonus for Unsplash editorial/high download count (if present)
   if (candidate.downloads && candidate.downloads > 10000) score += 4;
   // Bonus for newer image
@@ -115,7 +126,7 @@ async function findImageInUnsplash(subject, usedClips = []) {
   }
   try {
     const query = encodeURIComponent(subject);
-    const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=10&orientation=portrait&client_id=${UNSPLASH_ACCESS_KEY}`;
+    const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=15&orientation=portrait&client_id=${UNSPLASH_ACCESS_KEY}`;
     console.log(`[10D][UNSPLASH] Request: ${url}`);
     const resp = await axios.get(url, { timeout: 12000 });
     if (resp.data && resp.data.results && resp.data.results.length > 0) {
@@ -125,9 +136,19 @@ async function findImageInUnsplash(subject, usedClips = []) {
         url: item.urls.full,
         width: item.width,
         height: item.height,
+        id: item.id
       }));
+      // Filter out any used images by url, id, or basename
+      candidates = candidates.filter(c =>
+        !usedClips.some(u =>
+          typeof u === 'string' && (
+            u.includes(c.url) ||
+            (c.id && u.includes(c.id)) ||
+            (u.endsWith('.jpg') && path.basename(u).includes(c.id || ''))
+          )
+        )
+      );
       candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
-      candidates = candidates.filter(c => !usedClips.some(u => u.includes(c.url)));
       candidates.sort((a, b) => b.score - a.score);
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][UNSPLASH][CANDIDATE][${i + 1}] ${c.urls.full} | score=${c.score} | desc="${c.description || c.alt_description || ''}"`);
@@ -154,7 +175,7 @@ async function findImageInPexels(subject, usedClips = []) {
   }
   try {
     const query = encodeURIComponent(subject);
-    const url = `https://api.pexels.com/v1/search?query=${query}&per_page=8&orientation=portrait`;
+    const url = `https://api.pexels.com/v1/search?query=${query}&per_page=12&orientation=portrait`;
     console.log(`[10D][PEXELS-IMG] Request: ${url}`);
     const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY }, timeout: 12000 });
     if (resp.data && resp.data.photos && resp.data.photos.length > 0) {
@@ -163,10 +184,19 @@ async function findImageInPexels(subject, usedClips = []) {
         api: 'pexels',
         url: item.src.original,
         width: item.width,
-        height: item.height
+        height: item.height,
+        id: item.id
       }));
+      candidates = candidates.filter(c =>
+        !usedClips.some(u =>
+          typeof u === 'string' && (
+            u.includes(c.url) ||
+            (c.id && u.includes(c.id)) ||
+            (u.endsWith('.jpg') && path.basename(u).includes(c.id || ''))
+          )
+        )
+      );
       candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
-      candidates = candidates.filter(c => !usedClips.some(u => u.includes(c.url)));
       candidates.sort((a, b) => b.score - a.score);
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][PEXELS-IMG][CANDIDATE][${i + 1}] ${c.src.original} | score=${c.score} | photographer="${c.photographer || ''}"`);
@@ -193,7 +223,7 @@ async function findImageInPixabay(subject, usedClips = []) {
   }
   try {
     const query = encodeURIComponent(subject);
-    const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=8&orientation=vertical`;
+    const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=12&orientation=vertical`;
     console.log(`[10D][PIXABAY-IMG] Request: ${url}`);
     const resp = await axios.get(url, { timeout: 12000 });
     if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
@@ -202,10 +232,19 @@ async function findImageInPixabay(subject, usedClips = []) {
         api: 'pixabay',
         url: item.largeImageURL,
         width: item.imageWidth,
-        height: item.imageHeight
+        height: item.imageHeight,
+        id: item.id || item.pageURL || item.largeImageURL
       }));
+      candidates = candidates.filter(c =>
+        !usedClips.some(u =>
+          typeof u === 'string' && (
+            u.includes(c.url) ||
+            (c.id && u.includes(c.id)) ||
+            (u.endsWith('.jpg') && path.basename(u).includes(c.id || ''))
+          )
+        )
+      );
       candidates.forEach(c => { c.score = scoreImage(c, subject, usedClips); });
-      candidates = candidates.filter(c => !usedClips.some(u => u.includes(c.url)));
       candidates.sort((a, b) => b.score - a.score);
       candidates.slice(0, 4).forEach((c, i) => {
         console.log(`[10D][PIXABAY-IMG][CANDIDATE][${i + 1}] ${c.largeImageURL} | score=${c.score} | tags="${c.tags}"`);
@@ -377,7 +416,16 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     }
 
     // Score all, remove used or blank
-    candidates = candidates.filter(c => c.url && !usedClips.some(u => u.includes(c.url)));
+    candidates = candidates.filter(c =>
+      c.url &&
+      !usedClips.some(u =>
+        typeof u === 'string' && (
+          u.includes(c.url) ||
+          (c.id && u.includes(c.id)) ||
+          (u.endsWith('.jpg') && path.basename(u).includes(c.id || ''))
+        )
+      )
+    );
     for (let c of candidates) {
       c.score = scoreImage({ ...c, url: c.url }, subject, usedClips);
     }
