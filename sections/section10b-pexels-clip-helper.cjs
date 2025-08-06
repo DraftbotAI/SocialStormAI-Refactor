@@ -3,12 +3,23 @@
 // Exports: findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
 // Bulletproof: always tries all options, never blocks on strict match
 // Max logs at every step, accepts best available, NO silent fails
+// 2024-08: Ready for universal scoring, anti-dupe, anti-generic
 // ===========================================================
 
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+
+// === Universal scorer import stub (ready to wire) ===
+let scoreSceneCandidate = null;
+try {
+  scoreSceneCandidate = require('./section10g-scene-scoring-helper.cjs').scoreSceneCandidate;
+  console.log('[10B][INIT] Universal scene scorer loaded.');
+} catch (e) {
+  // Not fatal, fallback to local scoring logic for now
+  console.warn('[10B][INIT][WARN] Universal scene scorer NOT loaded, using local scoring.');
+}
 
 console.log('[10B][INIT] Pexels clip helper loaded.');
 
@@ -120,7 +131,24 @@ function isDupe(fileUrl, usedClips = []) {
 }
 
 // --- Scoring function: now accepts fuzzy, partial, and strict matches ---
-function scorePexelsMatch(video, file, subject, usedClips = []) {
+// Will use universal scorer if present, else fallback to local
+function scorePexelsMatch(video, file, subject, usedClips = [], scene = null) {
+  if (typeof scoreSceneCandidate === 'function') {
+    // Use the universal scoring system (10G)
+    const candidate = {
+      type: 'video',
+      source: 'pexels',
+      file: file.link,
+      filename: path.basename(file.link),
+      subject,
+      video,
+      pexelsFile: file,
+      scene,
+    };
+    return scoreSceneCandidate(candidate, scene || { subject });
+  }
+
+  // --- Local fallback scoring (legacy logic) ---
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
@@ -175,7 +203,7 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
 /**
  * Finds and downloads the best Pexels video for a given subject/scene,
  * using strict/fuzzy/partial keyword matching. Will always pick the best result available.
- * @param {string} subject - Main scene subject (clean, descriptive)
+ * @param {string|object} subject - Main scene subject (string or scene object with .subject)
  * @param {string} workDir - Local job folder for saving video
  * @param {number} sceneIdx
  * @param {string} jobId
@@ -183,15 +211,17 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
  * @returns {Promise<string|null>} Local .mp4 path, or null
  */
 async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
-  console.log(`[10B][PEXELS][${jobId}] findPexelsClipForScene | subject="${subject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
+  // Accept scene object OR raw subject string (backward compatible)
+  const scene = typeof subject === 'object' && subject.subject ? subject : { subject };
+  console.log(`[10B][PEXELS][${jobId}] findPexelsClipForScene | subject="${scene.subject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
 
   if (!PEXELS_API_KEY) {
     console.error('[10B][PEXELS][ERR] No Pexels API key set!');
     return null;
   }
   try {
-    const query = encodeURIComponent(cleanQuery(subject));
-    const url = `https://api.pexels.com/videos/search?query=${query}&per_page=10`;
+    const query = encodeURIComponent(cleanQuery(scene.subject));
+    const url = `https://api.pexels.com/videos/search?query=${query}&per_page=15`;
     console.log(`[10B][PEXELS][${jobId}] Searching: ${url}`);
     const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY } });
 
@@ -205,7 +235,7 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
             console.log(`[10B][PEXELS][${jobId}][DUPE] Skipping duplicate file: ${file.link}`);
             continue;
           }
-          const score = scorePexelsMatch(video, file, subject, usedClips);
+          const score = scorePexelsMatch(video, file, scene.subject, usedClips, scene);
           scored.push({ video, file, score });
         }
       }
@@ -215,20 +245,30 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
         console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`)
       );
 
-      // === Always pick the best available, even if score is low ===
-      let best = scored.find(s => s.score > 5) || scored[0];
-      if (!best && scored.length > 0) best = scored[0];
+      // === Block irrelevants if a strong match exists ===
+      const maxScore = scored.length ? scored[0].score : -999;
+      const hasGoodMatch = maxScore >= 80;
+      let eligible = scored;
+      if (hasGoodMatch) {
+        eligible = scored.filter(s => s.score >= 20);
+        if (eligible.length < scored.length) {
+          console.log(`[10B][PEXELS][${jobId}] [FILTER] Blocked ${scored.length - eligible.length} irrelevants — real match exists.`);
+        }
+      }
+
+      let best = eligible.find(s => s.score > 5) || eligible[0];
+      if (!best && eligible.length > 0) best = eligible[0];
       if (best) {
         console.log(`[10B][PEXELS][${jobId}][PICKED] Selected: ${best.file.link} | score=${best.score}`);
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
         const resultPath = await downloadPexelsVideoToLocal(best.file.link, outPath, jobId);
         if (resultPath) return resultPath;
-        // If download fails, try next best
+        // If download fails, try next best (not implemented yet — possible TODO)
       } else {
         console.warn(`[10B][PEXELS][${jobId}] No Pexels videos matched subject, but candidates were returned.`);
       }
     } else {
-      console.log(`[10B][PEXELS][${jobId}] No Pexels video results found for "${subject}"`);
+      console.log(`[10B][PEXELS][${jobId}] No Pexels video results found for "${scene.subject}"`);
     }
     return null;
   } catch (err) {

@@ -245,3 +245,4 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
 }
 
 module.exports = { findUnsplashImageForScene };
+

@@ -2,14 +2,17 @@
 // SECTION 10A: R2 CLIP HELPER (Cloudflare R2)
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for parallel dedupe/scan)
 // MAX LOGGING EVERY STEP, Modular System Compatible
-// Parallel safe: no temp file collisions, NO silent fails
-// 2024-08: Fuzzy/partial/strict scoring, normalized folders/files, pro matching
+// Now uses universal scoreSceneCandidate from 10G (pro match, anti-dupe, anti-generic)
+// 2024-08: Strict, fuzzy, and partial match, never dupe, never silent fail
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+
+// === Universal scorer from Section 10G ===
+const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
 console.log('[10A][INIT] R2 clip helper loaded.');
 
@@ -31,24 +34,6 @@ const s3Client = new S3Client({
     secretAccessKey: R2_SECRET,
   }
 });
-
-// --- Normalization helpers ---
-function cleanForFilename(str) {
-  return (str || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 80);
-}
-
-function normalizeForMatch(str) {
-  return (str || '')
-    .toLowerCase()
-    .replace(/[\s_\-\.]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 // --- Main: List all files in R2 (with full path relative to bucket root) ---
 async function listAllFilesInR2(prefix = '', jobId = '') {
@@ -78,64 +63,6 @@ async function listAllFilesInR2(prefix = '', jobId = '') {
   }
 }
 
-// --- Major words extraction ---
-function majorWords(subject) {
-  return (subject || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
-}
-
-// --- Scoring function for filename match ---
-function scoreR2Match(filename, subject) {
-  if (!filename || !subject) return -99999;
-  let score = 0;
-  const fn = normalizeForMatch(filename);
-  const subj = normalizeForMatch(subject);
-
-  // 1. Strict match: subject as full word in filename (bonus)
-  if (strictSubjectMatch(filename, subject)) score += 100;
-  // 2. Fuzzy match: all major words somewhere in filename
-  if (fuzzyMatch(filename, subject)) score += 35;
-  // 3. Partial match: any major word in filename
-  if (partialMatch(filename, subject)) score += 15;
-  // 4. Exact phrase somewhere in filename (bonus)
-  if (fn.includes(subj) && subj.length > 2) score += 12;
-  // 5. Each major word that appears, +5
-  majorWords(subject).forEach(word => {
-    if (fn.includes(word)) score += 5;
-  });
-  // 6. Prefer portrait (ends in _portrait.mp4 or has 9_16, tiktok, shorts)
-  if (/_portrait\.mp4$/.test(filename) || fn.includes('9 16') || fn.includes('shorts') || fn.includes('tiktok')) score += 8;
-  // 7. Prefer recent (higher-numbered files)
-  const nums = filename.match(/\d+/g) || [];
-  nums.forEach(n => { if (Number(n) > 2020) score += 2; });
-  // 8. Prefer shorter filenames (tighter match)
-  score -= fn.length;
-  return score;
-}
-
-// --- Fuzzy/partial/strict match helpers ---
-function fuzzyMatch(filename, subject) {
-  if (!filename || !subject) return false;
-  const fn = normalizeForMatch(filename);
-  const words = majorWords(subject);
-  return words.length && words.every(word => fn.includes(word));
-}
-function partialMatch(filename, subject) {
-  if (!filename || !subject) return false;
-  const fn = normalizeForMatch(filename);
-  const words = majorWords(subject);
-  return words.some(word => fn.includes(word));
-}
-function strictSubjectMatch(filename, subject) {
-  if (!filename || !subject) return false;
-  const safeSubject = cleanForFilename(subject);
-  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|\\.|$)`, 'i');
-  return re.test(cleanForFilename(filename));
-}
-
 // --- FILE VALIDATOR: Ensures file exists and is >2kb (not broken)
 function isValidClip(filePath, jobId) {
   try {
@@ -156,20 +83,21 @@ function isValidClip(filePath, jobId) {
 }
 
 /**
- * Finds the *best-scoring* video in R2 for the subject, using strict, fuzzy, or partial match (in that order).
- * ALWAYS returns the best available candidate (never null if any .mp4 exists).
- * @param {string} subject
+ * Finds the *best-scoring* video in R2 for the subject, using universal scorer (Section 10G)
+ * NEVER returns a dupe; NEVER picks generic/irrelevant if a real match exists.
+ * If nothing, returns null (upstream fallback handles images, etc)
+ * @param {object} scene  // { subject, matchPhrases, ... }
  * @param {string} workDir
  * @param {number} sceneIdx
  * @param {string} jobId
  * @param {string[]} usedClips
  * @returns {Promise<string|null>} Local video path (or null if not found)
  */
-async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
-  console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${subject}" | sceneIdx=${sceneIdx} | workDir="${workDir}" | usedClips=${JSON.stringify(usedClips)}`);
+async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
+  console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${scene?.subject}" | sceneIdx=${sceneIdx} | workDir="${workDir}" | usedClips=${JSON.stringify(usedClips)}`);
 
-  if (!subject || typeof subject !== 'string') {
-    console.error(`[10A][R2][${jobId}] No valid subject passed!`);
+  if (!scene?.subject || typeof scene.subject !== 'string') {
+    console.error(`[10A][R2][${jobId}] No valid subject in scene!`);
     return null;
   }
 
@@ -180,57 +108,87 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
       return null;
     }
 
-    // Only .mp4s, skip any usedClips (allow both basename and full key in usedClips)
+    // Only .mp4s, never a usedClip (basename or full R2 key)
     const mp4Files = files.filter(f =>
-      f.endsWith('.mp4') && !usedClips.some(u => f.endsWith(u) || f === u)
+      f.endsWith('.mp4') && !usedClips.some(u => f.endsWith(u) || f === u || path.basename(f) === u)
     );
     if (!mp4Files.length) {
       console.warn(`[10A][R2][${jobId}] No .mp4 files found in R2 bucket!`);
       return null;
     }
 
-    // Score all files for this subject
-    const scored = mp4Files.map(f => ({
+    // Build candidate objects for scoring
+    const candidates = mp4Files.map(f => ({
+      type: 'video',
+      source: 'r2',
       file: f,
-      score: scoreR2Match(f, subject)
+      filename: path.basename(f),
+      subject: scene.subject,
+      matchPhrases: scene.matchPhrases || [],
+      scene, // Pass full scene object for richer scoring if needed
     }));
 
-    // Log all candidate scores for debug
+    // Score with universal helper (Section 10G)
+    const scored = candidates.map(candidate => ({
+      ...candidate,
+      score: scoreSceneCandidate(candidate, scene)
+    }));
+
+    // Log top candidates
     scored
       .sort((a, b) => b.score - a.score)
       .slice(0, 10)
       .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.file} | score=${s.score}`));
 
-    // Take the highest-scoring file ALWAYS, even if score is negative (as last resort)
-    let best = scored[0];
+    // Filter out true irrelevants (score <20) IF a strong match exists (score >=80)
+    const maxScore = Math.max(...scored.map(s => s.score));
+    const hasGoodMatch = maxScore >= 80;
+    let eligible = scored;
+    if (hasGoodMatch) {
+      eligible = scored.filter(s => s.score >= 20);
+      if (eligible.length < scored.length) {
+        console.log(`[10A][R2][${jobId}] [FILTER] Blocked ${scored.length - eligible.length} irrelevants — real match exists.`);
+      }
+    }
+
+    // Sort by score descending, take first
+    eligible.sort((a, b) => b.score - a.score);
+    const best = eligible[0];
+
     if (!best || typeof best.file !== 'string') {
-      console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No candidates for subject "${subject}". Aborting.`);
+      console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No suitable candidates for subject "${scene.subject}". Aborting.`);
       return null;
     }
 
-    // Log whether this is strict/fuzzy/partial/last-resort
+    // Deduplication log
+    if (usedClips.includes(best.file) || usedClips.includes(path.basename(best.file))) {
+      console.warn(`[10A][R2][${jobId}][DEDUPE_BLOCK] Skipped candidate already used in this video: ${best.file}`);
+      return null;
+    }
+
+    // Log how/why this candidate was chosen
     if (best.score >= 100) {
       console.log(`[10A][R2][${jobId}][SELECTED][STRICT] ${best.file} | score=${best.score}`);
+    } else if (best.score >= 80) {
+      console.log(`[10A][R2][${jobId}][SELECTED][STRONG] ${best.file} | score=${best.score}`);
     } else if (best.score >= 35) {
       console.log(`[10A][R2][${jobId}][SELECTED][FUZZY] ${best.file} | score=${best.score}`);
-    } else if (best.score >= 1) {
+    } else if (best.score >= 20) {
       console.log(`[10A][R2][${jobId}][SELECTED][PARTIAL] ${best.file} | score=${best.score}`);
     } else {
       console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] No strong match, using best available: ${best.file} | score=${best.score}`);
     }
 
-    const bestFile = best.file;
-
-    // Unique filename for every download attempt (parallel safe)
     const unique = uuidv4();
     const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2-${unique}.mp4`);
     if (fs.existsSync(outPath) && isValidClip(outPath, jobId)) {
       console.log(`[10A][R2][${jobId}] File already downloaded: ${outPath}`);
       return outPath;
     }
-    console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${bestFile} -> ${outPath}`);
+    console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${best.file} -> ${outPath}`);
 
-    const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: bestFile });
+    // Download from R2
+    const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: best.file });
     const resp = await s3Client.send(getCmd);
 
     await new Promise((resolve, reject) => {
