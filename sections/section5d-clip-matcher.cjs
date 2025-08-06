@@ -1,8 +1,7 @@
 // ===========================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Bulletproof, Anti-Dupe, Best-Visual Wins)
-// Returns best possible visual: R2, Pexels, Pixabay, Unsplash (photo/video), or Ken Burns.
-// Never repeats a clip/image in the same video unless absolutely unavoidable.
-// MAX LOGS at every step. No endless loops.
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Ultimate Best-Visual, No Generic Dupe Fallback)
+// Always returns the BEST: R2, Pexels, Pixabay, Unsplash (photo or KB video).
+// No repeats or generics if a real subject match exists. Max logs, no endless fallback.
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
@@ -15,12 +14,13 @@ const { extractVisualSubjects } = require('./section11-visual-subject-extractor.
 const fs = require('fs');
 const path = require('path');
 
-console.log('[5D][INIT] Clip matcher orchestrator (bulletproof, anti-dupe, best-visual wins) loaded.');
+console.log('[5D][INIT] Clip matcher orchestrator (BEST-VISUAL, NO-GENERIC-DUPES) loaded.');
 
 const GENERIC_SUBJECTS = [
-  'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children'
+  'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text'
 ];
 
+// Normalize for loose matching
 function normalize(str) {
   return (str || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
@@ -67,8 +67,8 @@ function assertFileExists(file, label = 'FILE', minSize = 10240) {
   }
 }
 
-// --- Scoring function: returns higher score for better subject match, prefers video in tie ---
-function scoreCandidate(candidate, subject, isVideo = false) {
+// --- Scoring: Block generic, dupe, and sign/irrelevant clips if real match exists ---
+function scoreCandidate(candidate, subject, isVideo = false, realMatchExists = false) {
   let score = 0;
   const cleanedSubject = normalize(subject);
   const words = getMajorWords(subject);
@@ -77,31 +77,31 @@ function scoreCandidate(candidate, subject, isVideo = false) {
   const basename = path.basename(candidate.path).toLowerCase();
 
   // Strict subject in filename: big win
-  if (strictSubjectMatch(basename, subject)) score += 90;
+  if (strictSubjectMatch(basename, subject)) score += 120;
 
   // All words present (loose match): good
-  if (words.every(w => basename.includes(w))) score += 35;
+  if (words.every(w => basename.includes(w))) score += 40;
 
   // Any word present
-  words.forEach(word => { if (basename.includes(word)) score += 6; });
+  words.forEach(word => { if (basename.includes(word)) score += 8; });
 
   // Raw subject string present
   if (basename.includes(cleanedSubject)) score += 15;
 
   // Prefer HD (only for video)
-  if (isVideo) score += 6;
+  if (isVideo) score += 10;
 
-  // Slightly prefer video in tie, but allow great photo to win
-  if (isVideo) score += 6;
+  // Prefer video, but only if tie or close
+  if (isVideo) score += 10;
 
-  // Penalty if generic
-  if (GENERIC_SUBJECTS.some(g => basename.includes(g))) score -= 25;
+  // Massive penalty if generic/irrelevant, *unless* there is nothing better
+  if (GENERIC_SUBJECTS.some(g => basename.includes(g))) score -= (realMatchExists ? 2000 : 200);
 
-  // Strong bonus if video has subject and is not generic
-  if (isVideo && score >= 60) score += 5;
+  // Penalty for 'sign', 'logo', 'text'
+  if (/\b(sign|logo|text)\b/.test(basename)) score -= (realMatchExists ? 2000 : 200);
 
   // Lower score if file was used
-  if (candidate.used) score -= 80;
+  if (candidate.used) score -= 5000;
 
   return score;
 }
@@ -216,9 +216,10 @@ async function findClipForScene({
   const contextOverride = await tryContextualLandmarkOverride(searchSubject, mainTopic, usedClips, jobId);
   if (contextOverride) return contextOverride;
 
-  // === 1. Aggregate all possible candidates, score head-to-head ===
+  // === 1. Aggregate all candidates (videos and Unsplash photo), score hard ===
   let bestCandidate = null;
   let allCandidates = [];
+  let realMatchExists = false;
 
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
@@ -276,12 +277,24 @@ async function findClipForScene({
     }
   }
 
-  // --- Remove any used clips (shouldn't happen, but double check) ---
+  // --- Remove any used clips ---
   allCandidates = allCandidates.filter(c => !usedClips.includes(c.path));
 
-  // --- Score all candidates ---
+  // --- Determine if any real (non-generic, non-sign, non-dupe) match exists ---
+  for (const c of allCandidates) {
+    const basename = path.basename(c.path).toLowerCase();
+    if (
+      !GENERIC_SUBJECTS.some(g => basename.includes(g)) &&
+      !/\b(sign|logo|text)\b/.test(basename)
+    ) {
+      realMatchExists = true;
+      break;
+    }
+  }
+
+  // --- Score all candidates (block/penalize generic/dupe if real exists) ---
   for (let candidate of allCandidates) {
-    candidate.score = scoreCandidate(candidate, candidate.subject, candidate.isVideo);
+    candidate.score = scoreCandidate(candidate, candidate.subject, candidate.isVideo, realMatchExists);
   }
 
   // --- Sort descending by score, prefer video on tie ---
@@ -300,7 +313,23 @@ async function findClipForScene({
   bestCandidate = allCandidates.length ? allCandidates[0] : null;
 
   if (bestCandidate && bestCandidate.score > -1000) {
-    console.log(`[5D][PICK][${jobId}] BEST MATCH: ${bestCandidate.source} | ${bestCandidate.path} | Score: ${bestCandidate.score} | Video: ${bestCandidate.isVideo ? 'Y' : 'N'}`);
+    const isGeneric = GENERIC_SUBJECTS.some(g => path.basename(bestCandidate.path).toLowerCase().includes(g));
+    if (realMatchExists && isGeneric) {
+      console.warn(`[5D][BLOCK][${jobId}] BLOCKED generic/irrelevant fallback: ${bestCandidate.path}`);
+      // Try next best candidate that is NOT generic/irrelevant
+      const nextReal = allCandidates.find(c => {
+        const b = path.basename(c.path).toLowerCase();
+        return !GENERIC_SUBJECTS.some(g => b.includes(g)) && !/\b(sign|logo|text)\b/.test(b);
+      });
+      if (nextReal) {
+        bestCandidate = nextReal;
+        console.log(`[5D][PICK][${jobId}] Promoted to real match: ${bestCandidate.path}`);
+      } else {
+        // Only option left is generic, allow as absolute last resort
+        console.warn(`[5D][GENERIC][${jobId}] Only generic fallback left: ${bestCandidate.path}`);
+      }
+    }
+
     usedClips.push(bestCandidate.path);
 
     // If photo, run Ken Burns fallback (guaranteed video output)
@@ -314,7 +343,6 @@ async function findClipForScene({
         }
       } catch (e) {
         console.error(`[5D][KENBURNS][ERR][${jobId}] Error running Ken Burns for Unsplash image:`, e);
-        // If Ken Burns fails, just return the image path (should not happen)
         return bestCandidate.path;
       }
     } else {
