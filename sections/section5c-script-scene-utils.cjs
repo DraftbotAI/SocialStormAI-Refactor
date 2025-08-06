@@ -59,8 +59,10 @@ function splitScriptToScenes(script, topic = '') {
 
   const summaryLine = generateViralHookAndSummary(script, topic);
 
+  // Always keep the original order so indices line up for bulletproofing
   let restLines = rawLines.filter(l => l !== summaryLine && l.length > 4);
 
+  // Guess main topic (for fallback) if not provided
   const mainTopic = topic && typeof topic === 'string' && topic.length > 1 ? topic : guessMainSubjectFromScenes(restLines);
 
   const scenes = [];
@@ -79,7 +81,7 @@ function splitScriptToScenes(script, topic = '') {
   seenIds.add(hookId);
   console.log(`[5C][HOOK] Created HOOK SCENE: "${summaryLine}" [ID: ${hookId}] visualSubject="${scenes[0].visualSubject}"`);
 
-  // === Scene 2: MEGA-SCENE (combine next 2 lines)
+  // === Scene 2: MEGA-SCENE (combine next 2 lines, if possible)
   if (restLines.length > 1) {
     const megaId = `megascene-2-${uuid.v4()}`;
     const megaTexts = [restLines[0], restLines[1]];
@@ -114,6 +116,7 @@ function splitScriptToScenes(script, topic = '') {
       console.log(`[5C][SCENE] Created scene ${i + 1}: "${restLines[i]}" [ID: ${sceneId}] visualSubject="${subject}"`);
     }
   } else if (restLines.length === 1) {
+    // If only one line left after hook, make it a normal scene
     const sceneId = `scene2-${uuid.v4()}`;
     const subject = extractVisualSubject(restLines[0], mainTopic);
     scenes.push({
