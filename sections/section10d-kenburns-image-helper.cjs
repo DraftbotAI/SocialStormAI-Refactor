@@ -54,7 +54,7 @@ function strictSubjectPresent(fields, subject) {
 }
 
 // --- SCORING: Scores images for fallback Ken Burns ---
-function scoreImage(candidate, subject, usedClips = [], extra = {}) {
+function scoreImage(candidate, subject, usedClips = []) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
@@ -117,7 +117,7 @@ async function findImageInUnsplash(subject, usedClips = []) {
     const query = encodeURIComponent(subject);
     const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=10&orientation=portrait&client_id=${UNSPLASH_ACCESS_KEY}`;
     console.log(`[10D][UNSPLASH] Request: ${url}`);
-    const resp = await axios.get(url);
+    const resp = await axios.get(url, { timeout: 12000 });
     if (resp.data && resp.data.results && resp.data.results.length > 0) {
       let candidates = resp.data.results.map(item => ({
         ...item,
@@ -156,7 +156,7 @@ async function findImageInPexels(subject, usedClips = []) {
     const query = encodeURIComponent(subject);
     const url = `https://api.pexels.com/v1/search?query=${query}&per_page=8&orientation=portrait`;
     console.log(`[10D][PEXELS-IMG] Request: ${url}`);
-    const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY } });
+    const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY }, timeout: 12000 });
     if (resp.data && resp.data.photos && resp.data.photos.length > 0) {
       let candidates = resp.data.photos.map(item => ({
         ...item,
@@ -195,7 +195,7 @@ async function findImageInPixabay(subject, usedClips = []) {
     const query = encodeURIComponent(subject);
     const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=8&orientation=vertical`;
     console.log(`[10D][PIXABAY-IMG] Request: ${url}`);
-    const resp = await axios.get(url);
+    const resp = await axios.get(url, { timeout: 12000 });
     if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
       let candidates = resp.data.hits.map(item => ({
         ...item,
@@ -233,7 +233,6 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
       console.log(`[10D][DL][${jobId}] File already exists, skipping download: ${outPath}`);
       return;
     }
-
     const writer = fs.createWriteStream(outPath);
     const resp = await axios({
       url,

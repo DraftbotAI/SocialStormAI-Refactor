@@ -1,7 +1,8 @@
 // ===========================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Loosest, Bulletproof)
-// Always returns something: video, image, Ken Burns, or any available.
-// Never loops forever. Max logs at each fallback step.
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Bulletproof, Anti-Dupe)
+// Always returns something: R2, Pexels, Pixabay, Unsplash image, or Ken Burns.
+// Never repeats a clip/image in the same video unless absolutely unavoidable.
+// MAX LOGS at every step. No endless loops.
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
@@ -14,7 +15,7 @@ const { extractVisualSubjects } = require('./section11-visual-subject-extractor.
 const fs = require('fs');
 const path = require('path');
 
-console.log('[5D][INIT] Clip matcher orchestrator (bulletproof, loose) loaded.');
+console.log('[5D][INIT] Clip matcher orchestrator (bulletproof, anti-dupe) loaded.');
 
 const GENERIC_SUBJECTS = [
   'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children'
@@ -40,7 +41,6 @@ function looseSubjectMatch(filename, subject) {
   for (const word of words) {
     if (safeFile.includes(word)) return true;
   }
-  // As a last resort, partial substring
   return safeFile.includes(normalize(subject));
 }
 
@@ -70,12 +70,9 @@ function assertFileExists(file, label = 'FILE', minSize = 10240) {
   }
 }
 
-// --- Helper: Tries strict R2 match for landmark context if possible ---
+// --- Helper: Try contextual landmark override (strict R2) ---
 async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobId) {
-  // If subject includes e.g. "face of the Statue of Liberty", "roof of the White House", "door of the Sphinx", etc.
-  // Try strict R2 match for the landmark name (mainTopic or detected subject in subject string)
   if (!findR2ClipForScene.getAllFiles) return null;
-
   const LANDMARK_WORDS = [
     'statue of liberty', 'white house', 'empire state building', 'eiffel tower',
     'sphinx', 'great wall', 'mount rushmore', 'big ben', 'colosseum', 'machu picchu',
@@ -83,7 +80,6 @@ async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobI
     'leaning tower', 'buckingham palace', 'niagara falls', 'grand canyon', 'hollywood sign',
     'stonehenge', 'burj khalifa', 'golden gate bridge', 'petra', 'cristo redentor', 'opera house'
   ];
-
   const lowerSubj = (subject || '').toLowerCase();
   let foundLandmark = '';
   for (let landmark of LANDMARK_WORDS) {
@@ -92,7 +88,6 @@ async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobI
       break;
     }
   }
-  // If not found but mainTopic is one of the landmarks, use it
   if (!foundLandmark && mainTopic) {
     for (let landmark of LANDMARK_WORDS) {
       if (mainTopic.toLowerCase().includes(landmark)) {
@@ -102,8 +97,6 @@ async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobI
     }
   }
   if (!foundLandmark) return null;
-
-  // Try strict R2 match for the landmark
   try {
     const r2Files = await findR2ClipForScene.getAllFiles();
     for (const fname of r2Files) {
@@ -119,6 +112,7 @@ async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobI
   return null;
 }
 
+// Main matcher: bulletproof, anti-dupe, ultimate fallback to Unsplash+KenBurns
 async function findClipForScene({
   subject,
   sceneIdx,
@@ -135,7 +129,7 @@ async function findClipForScene({
 }) {
   let searchSubject = subject;
 
-  // Anchor logic
+  // --- Anchor subject logic (first scene, mega-scene, etc.) ---
   if (isMegaScene || sceneIdx === 0) {
     if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())) {
       searchSubject = megaSubject;
@@ -148,7 +142,6 @@ async function findClipForScene({
       console.log(`[5D][ANCHOR][${jobId}] Final fallback to first scene text: "${searchSubject}"`);
     }
   }
-
   if (!searchSubject || GENERIC_SUBJECTS.includes((searchSubject || '').toLowerCase())) {
     if (mainTopic && !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())) {
       searchSubject = mainTopic;
@@ -158,23 +151,19 @@ async function findClipForScene({
       console.log(`[5D][FALLBACK][${jobId}] Subject was generic, using first scene text: "${searchSubject}"`);
     }
   }
-
   if (!searchSubject || searchSubject.length < 2) {
     console.error(`[5D][FATAL][${jobId}] No valid subject for scene ${sceneIdx + 1}.`);
     return null;
   }
-
   if (forceClipPath) {
     console.log(`[5D][FORCE][${jobId}] Forcing clip path: ${forceClipPath}`);
     if (assertFileExists(forceClipPath, 'FORCE_CLIP')) return forceClipPath;
     return null;
   }
-
   if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !findUnsplashImageForScene || !fallbackKenBurnsVideo) {
     console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
     return null;
   }
-
   let prioritizedSubjects = [];
   try {
     prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
@@ -184,11 +173,14 @@ async function findClipForScene({
     prioritizedSubjects = [searchSubject, mainTopic];
   }
 
-  // === 0. Try contextual landmark override FIRST ===
+  // === 0. Contextual strict R2 match (landmark override) ===
   const contextOverride = await tryContextualLandmarkOverride(searchSubject, mainTopic, usedClips, jobId);
-  if (contextOverride) return contextOverride;
+  if (contextOverride && !usedClips.includes(contextOverride)) {
+    usedClips.push(contextOverride);
+    return contextOverride;
+  }
 
-  // === 1. Try STRICT R2 match for each subject ===
+  // === 1. Try STRICT R2 for each prioritized subject ===
   async function findStrictR2Clip(subjectPhrase, usedClipsArr) {
     try {
       const r2Files = await (findR2ClipForScene.getAllFiles ? findR2ClipForScene.getAllFiles() : []);
@@ -206,28 +198,25 @@ async function findClipForScene({
     }
   }
 
-  // Try all prioritized subjects
+  // --- Try all prioritized subjects, all sources in order ---
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // 1. Try strict R2 filename match
+    // Strict R2 match (no dupes)
     let r2StrictResult = null;
     if (findR2ClipForScene.getAllFiles) {
       r2StrictResult = await findStrictR2Clip(subjectOption, usedClips);
-      if (r2StrictResult) {
-        console.log(`[5D][PICK][${jobId}] STRICT R2 subject match: ${r2StrictResult}`);
+      if (r2StrictResult && !usedClips.includes(r2StrictResult)) {
+        usedClips.push(r2StrictResult);
         return r2StrictResult;
       }
     }
 
-    // 2. Try R2, loose mode (your original loose logic, next)
+    // R2 loose match (no dupes)
     async function findDedupedR2ClipLoose(searchPhrase, usedClipsArr) {
       try {
-        const r2Files = await findR2ClipForScene.getAllFiles
-          ? await findR2ClipForScene.getAllFiles()
-          : [];
+        const r2Files = await findR2ClipForScene.getAllFiles ? await findR2ClipForScene.getAllFiles() : [];
         let found = null;
-        // a) Loose match: any major word or substring
         for (const fname of r2Files) {
           if (usedClipsArr.includes(fname)) continue;
           if (looseSubjectMatch(fname, searchPhrase)) {
@@ -236,7 +225,6 @@ async function findClipForScene({
             break;
           }
         }
-        // b) Any unused file as last resort
         if (!found && r2Files.length) {
           for (const fname of r2Files) {
             if (usedClipsArr.includes(fname)) continue;
@@ -252,36 +240,33 @@ async function findClipForScene({
         return null;
       }
     }
-
     let r2Result = null;
     if (findR2ClipForScene.getAllFiles) {
       r2Result = await findDedupedR2ClipLoose(subjectOption, usedClips);
-      if (r2Result) {
-        console.log(`[5D][PICK][${jobId}] R2 subject match: ${r2Result}`);
+      if (r2Result && !usedClips.includes(r2Result)) {
+        usedClips.push(r2Result);
         return r2Result;
       }
       console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
     }
 
-    // --- Try Pexels, Pixabay, Unsplash with loose match ---
+    // --- Pexels, Pixabay, then Unsplash ---
     let sources = [
       { fn: findPexelsClipForScene, label: 'PEXELS', meta: 'meta' },
       { fn: findPixabayClipForScene, label: 'PIXABAY', meta: 'meta' }
     ];
-
     for (const src of sources) {
       try {
         let result = await src.fn(subjectOption, workDir, sceneIdx, jobId, usedClips);
         const candidatePath = (result && result.path) ? result.path : result;
         if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, src.label + '_RESULT')) {
-          // Loose match: accept if ANY major word from subject appears in filename/tags
           let valid = false;
           if (result.meta && Array.isArray(result.meta.tags)) {
             valid = result.meta.tags.some(tag => getMajorWords(subjectOption).some(word => tag.toLowerCase().includes(word)));
           } else if (typeof candidatePath === 'string') {
             valid = looseSubjectMatch(candidatePath, subjectOption);
           }
-          // **KEY IMPROVEMENT**: accept first available even if not a perfect tag match
+          // Accept first available if it exists
           if (valid || true) {
             console.log(`[5D][PICK][${jobId}] ${src.label} subject match: ${candidatePath}`);
             if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
@@ -293,6 +278,7 @@ async function findClipForScene({
                 categoryFolder
               });
             }
+            usedClips.push(candidatePath);
             return candidatePath;
           } else {
             console.warn(`[5D][${src.label}][${jobId}] ${src.label} clip rejected (no subject match): ${candidatePath}`);
@@ -303,22 +289,24 @@ async function findClipForScene({
       }
     }
 
-    // --- Unsplash: always loose, just check for unused image
+    // --- Unsplash (never returns same image twice in video) ---
     try {
       let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
       if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
-        console.log(`[5D][PICK][${jobId}] Unsplash image (loose): ${unsplashResult}`);
+        console.log(`[5D][PICK][${jobId}] Unsplash image: ${unsplashResult}`);
+        usedClips.push(unsplashResult);
         return unsplashResult;
       }
     } catch (e) {
       console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
     }
 
-    // --- Ken Burns (final fallback, always returns an image)
+    // --- Ken Burns fallback (never repeats) ---
     try {
       let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (kenBurnsResult && !usedClips.includes(kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
-        console.log(`[5D][PICK][${jobId}] KenBurns fallback (loose): ${kenBurnsResult}`);
+        console.log(`[5D][PICK][${jobId}] KenBurns fallback: ${kenBurnsResult}`);
+        usedClips.push(kenBurnsResult);
         return kenBurnsResult;
       }
     } catch (e) {
@@ -326,13 +314,14 @@ async function findClipForScene({
     }
   }
 
-  // === If absolutely nothing was found, pick any unused R2 file ===
+  // --- Absolute last resort: pick any unused R2 file ---
   try {
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
       for (const fname of r2Files) {
         if (!usedClips.includes(fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
           console.warn(`[5D][FINALFALLBACK][${jobId}] ABSOLUTE fallback, picking any available R2: ${fname}`);
+          usedClips.push(fname);
           return fname;
         }
       }
@@ -341,20 +330,19 @@ async function findClipForScene({
     console.error(`[5D][FINALFALLBACK][${jobId}] Error during final R2 fallback:`, e);
   }
 
-  // Still nothing!
-  console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
-  // Instead of returning null, let's try one last Ken Burns with a generic prompt:
+  // --- If literally nothing, one last Ken Burns with generic prompt ---
   try {
     let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
       console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic fallback: ${kenBurnsResult}`);
+      usedClips.push(kenBurnsResult);
       return kenBurnsResult;
     }
   } catch (e) {
     console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}] Error during generic KenBurns fallback:`, e);
   }
 
-  // If literally nothing, return null
+  console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
   return null;
 }
 
