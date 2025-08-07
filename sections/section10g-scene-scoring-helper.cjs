@@ -2,6 +2,7 @@
 // SECTION 10G: SCENE SCORING HELPER (Universal Candidate Matcher)
 // Scores candidate videos/images for best subject match, no matter source.
 // Bulletproof: penalizes generics, signs, logos, dupes, and prefers video.
+// Handles subject as string, object, or array. Max logging.
 // Used by Section 5D and all video/image helpers.
 // ===========================================================
 
@@ -33,6 +34,34 @@ function isGeneric(filename = '') {
   return GENERIC_SUBJECTS.some(g => filename.includes(g)) || /\b(sign|logo|text)\b/.test(filename);
 }
 
+function getAllSubjectTokens(subject) {
+  // Accepts string, object, or array, returns array of major words
+  if (!subject) return [];
+  if (typeof subject === 'string') return getMajorWords(subject);
+  if (Array.isArray(subject)) return subject.flatMap(getAllSubjectTokens);
+  // Object: look for main, secondary, synonyms, tokens
+  let tokens = [];
+  if (subject.main) tokens.push(...getMajorWords(subject.main));
+  if (subject.secondary) tokens.push(...getMajorWords(subject.secondary));
+  if (Array.isArray(subject.synonyms)) tokens.push(...subject.synonyms.flatMap(getMajorWords));
+  if (Array.isArray(subject.tokens)) tokens.push(...subject.tokens.flatMap(getMajorWords));
+  return tokens.filter(Boolean);
+}
+
+function getAllSubjectStrings(subject) {
+  // Extracts all possible string values from a subject
+  if (!subject) return [];
+  if (typeof subject === 'string') return [subject];
+  if (Array.isArray(subject)) return subject.flatMap(getAllSubjectStrings);
+  // Object fields (main, secondary, synonyms, tokens)
+  let out = [];
+  if (subject.main) out.push(subject.main);
+  if (subject.secondary) out.push(subject.secondary);
+  if (Array.isArray(subject.synonyms)) out.push(...subject.synonyms);
+  if (Array.isArray(subject.tokens)) out.push(...subject.tokens);
+  return out.filter(Boolean);
+}
+
 /**
  * Bulletproof scorer for scene candidates.
  * - Blocks generic/sign/logo if real match exists.
@@ -41,14 +70,19 @@ function isGeneric(filename = '') {
  * - Uses strong/loose token, synonym, and fallback scoring.
  *
  * @param {object} candidate - { filename, tags, title, description, filePath, provider, isVideo }
- * @param {string} subject
+ * @param {string|object|array} subject
  * @param {string[]} usedFiles - Array of filePaths/filenames used so far in this job
  * @param {boolean} realMatchExists - Are there any real (non-generic) candidates in this batch?
  * @returns {number} score (0–150)
  */
 function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists = false) {
-  if (!candidate || !subject) return -9999;
-  const subj = (subject || '').toLowerCase().trim();
+  // Defensive null checks
+  if (!candidate || !subject) {
+    console.log('[10G][SCORE][ERR] Missing candidate or subject!', { candidate, subject });
+    return 0;
+  }
+
+  // Pull candidate fields
   const fname = (candidate.filename || path.basename(candidate.filePath || '') || '').toLowerCase();
   const tags = (candidate.tags || []).map(t => t.toLowerCase());
   const title = (candidate.title || '').toLowerCase();
@@ -56,50 +90,57 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
   const isVid = candidate.isVideo === true;
   const used = usedFiles.includes(candidate.filePath || candidate.filename);
 
-  // Already used = MASSIVE penalty
+  // [DUPLICATE BLOCKER]
   if (used) {
     console.log(`[10G][SCORE][BLOCKED][DUPLICATE] ${fname}`);
     return -5000;
   }
 
-  // Strong/strict subject match (filename/tag/title/desc)
-  if (
-    fname.includes(subj) ||
-    tags.includes(subj) ||
-    title.includes(subj) ||
-    desc.includes(subj)
-  ) {
-    let score = 120;
-    if (isVid) score += 20;
-    if (isGeneric(fname) && realMatchExists) score -= 2000;
-    if (isGeneric(fname) && !realMatchExists) score -= 200;
-    console.log(`[10G][SCORE][STRICT][${subj}] = ${score} [${fname}]`);
-    return score;
-  }
+  // Support: Accepts subject as string/object/array
+  const subjectStrings = getAllSubjectStrings(subject);
+  const subjectTokens = getAllSubjectTokens(subject);
+  const rawSubj = (typeof subject === 'string') ? subject : (subject.main || subject.secondary || subjectStrings[0] || '');
 
-  // Synonym match
-  const syns = SYNONYMS[subj] || [];
-  for (const syn of syns) {
+  // 1. Strong/strict subject match (filename/tag/title/desc)
+  for (const subjStr of subjectStrings) {
+    const subj = subjStr.toLowerCase().trim();
     if (
-      fname.includes(syn) ||
-      tags.includes(syn) ||
-      title.includes(syn) ||
-      desc.includes(syn)
+      fname.includes(subj) ||
+      tags.includes(subj) ||
+      title.includes(subj) ||
+      desc.includes(subj)
     ) {
-      let score = 100;
-      if (isVid) score += 10;
+      let score = 120;
+      if (isVid) score += 20;
       if (isGeneric(fname) && realMatchExists) score -= 2000;
       if (isGeneric(fname) && !realMatchExists) score -= 200;
-      console.log(`[10G][SCORE][SYNONYM][${subj}] = ${score} [${fname}]`);
+      console.log(`[10G][SCORE][STRICT][${subj}] = ${score} [${fname}] [${typeof subject}]`);
       return score;
+    }
+
+    // Synonym match
+    const syns = SYNONYMS[subj] || [];
+    for (const syn of syns) {
+      if (
+        fname.includes(syn) ||
+        tags.includes(syn) ||
+        title.includes(syn) ||
+        desc.includes(syn)
+      ) {
+        let score = 100;
+        if (isVid) score += 10;
+        if (isGeneric(fname) && realMatchExists) score -= 2000;
+        if (isGeneric(fname) && !realMatchExists) score -= 200;
+        console.log(`[10G][SCORE][SYNONYM][${subj}→${syn}] = ${score} [${fname}]`);
+        return score;
+      }
     }
   }
 
-  // Loose token/major word match
-  const words = getMajorWords(subj);
+  // 2. Loose token/major word match (ANY token)
   let looseScore = 0;
   let tokensMatched = 0;
-  words.forEach(word => {
+  subjectTokens.forEach(word => {
     if (
       fname.includes(word) ||
       tags.some(t => t.includes(word)) ||
@@ -110,16 +151,16 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
       tokensMatched++;
     }
   });
-  if (tokensMatched === words.length && words.length > 0) looseScore += 20; // All words match
+  if (tokensMatched === subjectTokens.length && tokensMatched > 0) looseScore += 20; // All tokens matched
   if (looseScore > 0) {
     if (isVid) looseScore += 10;
     if (isGeneric(fname) && realMatchExists) looseScore -= 2000;
     if (isGeneric(fname) && !realMatchExists) looseScore -= 200;
-    console.log(`[10G][SCORE][LOOSE][${subj}] = ${looseScore} [${fname}]`);
+    console.log(`[10G][SCORE][LOOSE][${rawSubj}] = ${looseScore} [${fname}] [${typeof subject}]`);
     return looseScore;
   }
 
-  // Weakly related (animal, nature, etc.)
+  // 3. Weakly related (animal, nature, etc.)
   if (
     tags.some(t => ['primate', 'jungle', 'wildlife', 'nature', 'animal'].includes(t))
   ) {
@@ -127,14 +168,14 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
     if (isVid) weakScore += 10;
     if (isGeneric(fname) && realMatchExists) weakScore -= 2000;
     if (isGeneric(fname) && !realMatchExists) weakScore -= 200;
-    console.log(`[10G][SCORE][WEAK][${subj}] = ${weakScore} [${fname}]`);
+    console.log(`[10G][SCORE][WEAK][${rawSubj}] = ${weakScore} [${fname}]`);
     return weakScore;
   }
 
-  // Generic fallback (absolutely nothing else matches)
+  // 4. Generic fallback (absolutely nothing else matches)
   let genericScore = isGeneric(fname) ? (realMatchExists ? -2000 : -200) : 10;
   if (isVid) genericScore += 2;
-  console.log(`[10G][SCORE][GENERIC/DEFAULT][${subj}] = ${genericScore} [${fname}]`);
+  console.log(`[10G][SCORE][GENERIC/DEFAULT][${rawSubj}] = ${genericScore} [${fname}]`);
   return genericScore;
 }
 
