@@ -6,12 +6,16 @@
 // BulletproofScenes for size/audio normalization
 // Never repeats same song twice! AI mood detection fallback!
 // 2024-08: PRO — Always 9:16 output, validated output, logging
+// Upgraded: Library upload happens ONLY after final video is complete
 // ===========================================================
 
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { v4: uuidv4 } = require('uuid');
+
+// === Library upload helper (10E) ===
+const { uploadSceneClipToR2, cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 
 // === Load music moods (if available) ===
 let musicMoods = null;
@@ -302,7 +306,7 @@ async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
   });
 }
 
-// === Async Scene Clip Archiver Hook (call this from 5H job cleanup) ===
+// === Async Scene Clip Archiver Hook (call this from 5H job cleanup if you ever want to background-archive scenes after video done) ===
 async function postProcessSceneClipArchiving(sceneClipMetaList, asyncArchiveFn) {
   if (!Array.isArray(sceneClipMetaList) || !sceneClipMetaList.length) {
     console.warn('[5G][ARCHIVE][WARN] No sceneClipMetaList provided.');
@@ -626,6 +630,49 @@ async function create9x16FromInput(inputPath, outputPath) {
 }
 
 // ============================================
+// FINAL LIBRARY UPLOAD (AFTER VIDEO COMPLETE)
+// ============================================
+/**
+ * Uploads the completed final video to R2 library (in correct folder, named by subject/category).
+ * @param {string} localFilePath - Path to the finished video (should be final, fully rendered file)
+ * @param {string} mainSubject - Main subject/topic of the video (for naming/folder)
+ * @param {string} categoryFolder - Library folder to upload into (e.g. "food_cooking")
+ * @param {string} [source] - "socialstorm" or user/system name
+ * @returns {Promise<string|false>} - R2 path if successful, false if fail
+ */
+async function uploadFinalVideoToLibrary(localFilePath, mainSubject, categoryFolder, source = 'socialstorm') {
+  console.log(`[5G][LIBRARY-UPLOAD][START] Uploading final video to library: ${localFilePath}`);
+  if (!localFilePath || !fs.existsSync(localFilePath)) {
+    console.error('[5G][LIBRARY-UPLOAD][ERR] Local file missing for upload:', localFilePath);
+    return false;
+  }
+  if (!mainSubject || !categoryFolder) {
+    console.error('[5G][LIBRARY-UPLOAD][ERR] mainSubject or categoryFolder not provided!');
+    return false;
+  }
+  try {
+    const sceneIdx = 'final'; // For library, use 'final' so filenames are unique and clear
+    const r2Path = await uploadSceneClipToR2(
+      localFilePath,
+      mainSubject,
+      sceneIdx,
+      source,
+      categoryFolder
+    );
+    if (r2Path) {
+      console.log(`[5G][LIBRARY-UPLOAD][OK] Uploaded final video to library: ${r2Path}`);
+      return r2Path;
+    } else {
+      console.error('[5G][LIBRARY-UPLOAD][FAIL] Upload returned false');
+      return false;
+    }
+  } catch (err) {
+    console.error('[5G][LIBRARY-UPLOAD][ERR]', err);
+    return false;
+  }
+}
+
+// ============================================
 // MODULE EXPORTS
 // ============================================
 module.exports = {
@@ -641,5 +688,6 @@ module.exports = {
   simpleDetectMood,
   create16x9FromInput,
   create9x16FromInput,
-  postProcessSceneClipArchiving // NEW: bulk-archive scene clips after job
+  postProcessSceneClipArchiving,
+  uploadFinalVideoToLibrary // <-- NEW!
 };

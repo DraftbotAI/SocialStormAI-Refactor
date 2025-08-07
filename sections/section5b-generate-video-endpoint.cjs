@@ -4,6 +4,8 @@
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // NO DUPLICATE CLIPS IN A SINGLE VIDEO — ABSOLUTE
 // ACCURATE PROGRESS BAR (No more stuck at 95%)
+// 2024-08: Uploads to R2 ONLY AFTER final video is generated,
+// uses correct library/category path with bulletproof naming
 // ============================================================
 
 const { v4: uuidv4 } = require('uuid');
@@ -11,7 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
-const { s3Client, PutObjectCommand, GetObjectCommand } = require('./section1-setup.cjs');
+const { s3Client } = require('./section1-setup.cjs');
 const {
   bulletproofScenes,
   splitScriptToScenes,
@@ -33,6 +35,7 @@ const {
 } = require('./section5f-video-processing.cjs');
 const { findClipForScene } = require('./section5d-clip-matcher.cjs');
 const { cleanupJob } = require('./section5h-job-cleanup.cjs');
+const { uploadSceneClipToR2, cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
 
@@ -60,29 +63,13 @@ function getCategoryFolder(mainTopic) {
   return 'misc';
 }
 
-function getFallbackSubjects(fullSubject, mainTopic) {
-  const subs = [];
-  if (fullSubject) {
-    const words = fullSubject.split(' ').filter(Boolean);
-    if (words.length > 2) {
-      for (let i = 0; i < words.length - 1; i++) {
-        const two = words.slice(i, i + 2).join(' ');
-        if (two.length > 2) subs.push(two);
-      }
-    }
-    subs.push(...words.filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as'].includes(w.toLowerCase())));
-  }
-  if (mainTopic && !subs.includes(mainTopic)) subs.push(mainTopic);
-  subs.push('landmark', 'famous building', 'tourist attraction');
-  return [...new Set(subs.map(s => s.trim()).filter(Boolean))];
-}
-
 async function ensureLocalClipExists(r2Path, localPath) {
   if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10240) return localPath;
-  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
+  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-library';
   const key = r2Path.replace(/^(\.\/)+/, '').replace(/^\/+/, '');
   console.log(`[5B][R2][DOWNLOAD] Fetching from R2: bucket=${bucket} key=${key} → ${localPath}`);
   try {
+    const { GetObjectCommand } = require('@aws-sdk/client-s3');
     const data = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
     const fileStream = fs.createWriteStream(localPath);
     await new Promise((resolve, reject) => {
@@ -269,25 +256,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           if (megaClipPath) break;
         }
         if (!megaClipPath) {
-          let fallbackSubjects = getFallbackSubjects(megaText, mainTopic);
-          for (let subj of fallbackSubjects) {
-            megaClipPath = await findClipForScene({
-              subject: subj,
-              sceneIdx: 1,
-              allSceneTexts,
-              mainTopic,
-              isMegaScene: true,
-              usedClips,
-              workDir,
-              jobId,
-              megaSubject: subj,
-              jobContext,
-              categoryFolder
-            });
-            if (megaClipPath) break;
-          }
-        }
-        if (!megaClipPath) {
+          // Fallback (see Section 10d)
           const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
           megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
           if (!megaClipPath) throw new Error(`[5B][MEGA][ERR][${jobId}] No fallback Ken Burns visual for MEGA!`);
@@ -399,7 +368,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           throw new Error(`[5B][BULLETPROOF][ERR][${jobId}] Failed to get video info: ${e}`);
         }
         try {
-          await bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo);
+          await bulletproofScenes(sceneFiles, refInfo, getVideoInfo, deps.standardizeVideo);
           progress[jobId] = { percent: 68, status: 'Perfecting your video quality...' };
         } catch (e) {
           throw new Error(`[5B][BULLETPROOF][ERR][${jobId}] bulletproofScenes failed: ${e}`);
@@ -445,13 +414,12 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
 
         let finalPath = musicPath;
-        let r2FinalName = getUniqueFinalName('final-with-outro');
         if (outro) {
           const outroPath = path.join(__dirname, '..', 'public', 'assets', 'outro.mp4');
           if (fs.existsSync(outroPath)) {
             try {
               progress[jobId] = { percent: 92, status: 'Adding your outro...' };
-              const outroOutput = path.join(workDir, r2FinalName);
+              const outroOutput = path.join(workDir, getUniqueFinalName('final-with-outro'));
               await appendOutro(musicPath, outroPath, outroOutput, workDir);
               assertFileExists(outroOutput, 'OUTRO_OUT');
               finalPath = outroOutput;
@@ -466,11 +434,23 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 92, status: 'Outro skipped (user setting).' };
         }
 
-        // === Upload final video to R2 and finish ===
+        // === FINAL UPLOAD TO LIBRARY (SOCIALSTORM-LIBRARY) ===
         try {
-          progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2...' };
-          const r2VideoUrl = await uploadToR2(finalPath, r2FinalName, jobId);
-          progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
+          progress[jobId] = { percent: 98, status: 'Uploading final video to Cloudflare R2 library...' };
+          const subjectForName = cleanForFilename(mainTopic);
+          const finalSceneIdx = scenes.length - 1;
+          const resultR2Path = await uploadSceneClipToR2(
+            finalPath,
+            subjectForName,
+            finalSceneIdx,
+            'socialstorm',
+            categoryFolder
+          );
+          const publicBase = process.env.R2_PUBLIC_CUSTOM_DOMAIN || 'https://videos.socialstormai.com';
+          const url = resultR2Path
+            ? `${publicBase.replace(/\/$/, '')}/${resultR2Path.replace(/^socialstorm-library\//, '')}`
+            : finalPath;
+          progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: url };
         } catch (uploadErr) {
           progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
         }
@@ -495,21 +475,3 @@ function registerGenerateVideoEndpoint(app, deps) {
 
 console.log('[5B][EXPORT] registerGenerateVideoEndpoint exported');
 module.exports = registerGenerateVideoEndpoint;
-
-// === UPLOAD TO R2 (Helper) ===
-async function uploadToR2(finalPath, r2FinalName, jobId) {
-  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  const fileData = fs.readFileSync(finalPath);
-  const key = r2FinalName.startsWith('jobs/') ? r2FinalName : `jobs/${jobId}/${r2FinalName}`;
-  console.log(`[5B][R2][UPLOAD] Uploading final to bucket=${bucket} key=${key}`);
-  await s3Client.send(new PutObjectCommand({
-    Bucket: bucket,
-    Key: key,
-    Body: fileData,
-    ContentType: 'video/mp4'
-  }));
-  const urlBase = process.env.R2_PUBLIC_CUSTOM_DOMAIN || 'https://videos.socialstormai.com';
-  const url = `${urlBase.replace(/\/$/, '')}/${key}`;
-  console.log(`[5B][R2][UPLOAD][OK] Final uploaded: ${url}`);
-  return url;
-}
