@@ -325,22 +325,32 @@ async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
   }
 }
 
-// --- Make Ken Burns video from local image ---
+// --- Make Ken Burns video from local image (MINIMAL ZOOM) ---
 async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
-  console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}) | ${imgPath} → ${outPath} (${duration}s)`);
+  console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}, minimal zoom) | ${imgPath} → ${outPath} (${duration}s)`);
 
   if (!fs.existsSync(imgPath)) throw new Error('[10D][KENBURNS][ERR] Image does not exist: ' + imgPath);
 
   const width = 1080, height = 1920;
-  const baseScale = `${width * 1.4}:${height * 1.4}`;
+  // --- MINIMAL zoom factor (show more of image, avoid close crop) ---
+  const ZOOM_START = 1.04;   // 4% zoom (barely perceptible)
+  const ZOOM_END   = 1.01;   // 1% zoom (almost same as start)
+  const baseScale  = `${Math.round(width * ZOOM_START)}:${Math.round(height * ZOOM_START)}`;
+
   const panExpr = direction === 'ltr'
-    ? `x='(iw-${width})*t/${duration}'`
-    : `x='(iw-${width})-(iw-${width})*t/${duration}'`;
+    ? `x='(iw-${width})*t/${duration}',y='(ih-${height})/2',zoom=if(gte(t,0),${ZOOM_START}-(${ZOOM_START}-${ZOOM_END})*t/${duration},1)`
+    : `x='(iw-${width})-(iw-${width})*t/${duration}',y='(ih-${height})/2',zoom=if(gte(t,0),${ZOOM_START}-(${ZOOM_START}-${ZOOM_END})*t/${duration},1)`;
+
+  // Use scale + pad (contain, never crop), then crop and pan with minimal zoom
+  // NOTE: The zoom is barely perceptible, just enough to feel dynamic.
   const filter = `
     [0:v]scale=${baseScale}:force_original_aspect_ratio=decrease,
-    pad=${width * 1.4}:${height * 1.4}:(ow-iw)/2:(oh-ih)/2,setsar=1,
-    crop=${width}:${height}:${panExpr},setpts=PTS-STARTPTS[v]
+    pad=${width * ZOOM_START}:${height * ZOOM_START}:(ow-iw)/2:(oh-ih)/2,setsar=1,
+    crop=${width}:${height}:${direction === 'ltr'
+      ? `x='(iw-${width})*t/${duration}',y='(ih-${height})/2'`
+      : `x='(iw-${width})-(iw-${width})*t/${duration}',y='(ih-${height})/2'`
+    },zoompan=z='if(gte(t,0),${ZOOM_START}-(${ZOOM_START}-${ZOOM_END})*t/${duration},1)':d=1:s=${width}x${height},setpts=PTS-STARTPTS[v]
   `.replace(/\s+/g, '');
 
   const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
@@ -483,4 +493,3 @@ module.exports = {
   staticImageToVideo,
   preprocessImageToJpeg,
 };
-
