@@ -59,6 +59,20 @@ function getCategoryFolder(mainTopic) {
   if (/basketball|soccer|sports|lebron|fitness|exercise|workout|football/.test(lower)) return 'sports_fitness';
   if (/car|truck|tesla|vehicle|drive|race/.test(lower)) return 'cars_vehicles';
   if (/chimp|chimpanzee|ape|gorilla|orangutan|primate/.test(lower)) return 'animals_primates';
+  if (/food|cook|recipe|kitchen|ziti|meatball|bake|meal/.test(lower)) return 'food_cooking';
+  if (/wellness|health|medical|doctor|treatment/.test(lower)) return 'health_wellness';
+  if (/holiday|christmas|halloween|birthday|celebrate/.test(lower)) return 'holidays_events';
+  if (/emotion|feel|sad|happy|angry|love|cry|smile/.test(lower)) return 'human_emotion_social';
+  if (/kid|child|baby|family|parent/.test(lower)) return 'kids_family';
+  if (/love|relationship|date|couple|romance/.test(lower)) return 'love_relationships';
+  if (/money|business|success|profit|finance|stock/.test(lower)) return 'money_business_success';
+  if (/motivate|inspire|success|goal|achievement/.test(lower)) return 'motivation_success';
+  if (/music|dance|sing|band|song/.test(lower)) return 'music_dance';
+  if (/science|nature|animal|earth|planet|tree/.test(lower)) return 'science_nature';
+  if (/sport|fitness|workout|exercise/.test(lower)) return 'sports_fitness';
+  if (/tech|innovation|gadget|app|robot/.test(lower)) return 'technology_innovation';
+  if (/travel|adventure|trip|journey|tourist|vacation/.test(lower)) return 'travel_adventure';
+  if (/viral|trend|tiktok|reels|shorts/.test(lower)) return 'viral_trendy_content';
   return 'misc';
 }
 
@@ -255,7 +269,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           if (megaClipPath) break;
         }
         if (!megaClipPath) {
-          // Fallback (see Section 10d)
           const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
           megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
           if (!megaClipPath) throw new Error(`[5B][MEGA][ERR][${jobId}] No fallback Ken Burns visual for MEGA!`);
@@ -438,7 +451,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         let r2VideoUrl = null;
         try {
           progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2 (player bucket)...' };
-          r2VideoUrl = await uploadFinalToVideosBucket(finalPath, finalName, jobId);
+          r2VideoUrl = await uploadFinalToVideosBucket(finalPath, finalName, jobId, categoryFolder);
           progress[jobId] = { percent: 99, status: 'Video uploaded to player bucket. Archiving to library...' };
         } catch (uploadErr) {
           progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
@@ -485,10 +498,11 @@ console.log('[5B][EXPORT] registerGenerateVideoEndpoint exported');
 module.exports = registerGenerateVideoEndpoint;
 
 // === UPLOAD FINAL VIDEO TO R2 VIDEOS BUCKET (FOR PLAYER) ===
-async function uploadFinalToVideosBucket(finalPath, finalName, jobId) {
+async function uploadFinalToVideosBucket(finalPath, finalName, jobId, categoryFolder) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
   const fileData = fs.readFileSync(finalPath);
-  const key = `jobs/${jobId}/${finalName}`;
+  // Put in a category folder for organization
+  const key = `${categoryFolder}/jobs/${jobId}/${finalName}`;
   console.log(`[5B][R2][UPLOAD] Uploading final to bucket=${bucket} key=${key}`);
   await s3Client.send(new PutObjectCommand({
     Bucket: bucket,
@@ -497,7 +511,7 @@ async function uploadFinalToVideosBucket(finalPath, finalName, jobId) {
     ContentType: 'video/mp4'
   }));
   const urlBase = process.env.R2_PUBLIC_CUSTOM_DOMAIN || 'https://videos.socialstormai.com';
-  const url = `${urlBase.replace(/\/$/, '')}/jobs/${jobId}/${finalName}`;
+  const url = `${urlBase.replace(/\/$/, '')}/${categoryFolder}/jobs/${jobId}/${finalName}`;
   console.log(`[5B][R2][UPLOAD][OK] Final uploaded: ${url}`);
   return url;
 }
