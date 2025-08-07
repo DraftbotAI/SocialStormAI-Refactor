@@ -79,8 +79,8 @@ function scoreCandidate(candidate, subject, isVideo = false, realMatchExists = f
   if (basename.includes(cleanedSubject)) score += 15;
 
   // Strong video bias, but not "video or die"
-  if (isVideo) score += 70;    // Boost for video (lowered from 120 for better balance)
-  else score -= 35;            // Mild penalty for images/photos.
+  if (isVideo) score += 70;
+  else score -= 35;
 
   if (GENERIC_SUBJECTS.some(g => basename.includes(g))) score -= (realMatchExists ? 2000 : 200);
   if (/\b(sign|logo|text)\b/.test(basename)) score -= (realMatchExists ? 2000 : 200);
@@ -216,47 +216,34 @@ async function findClipForScene({
 
   // === [A] MULTI-STRATEGY SUBJECT EXTRACTION (CONCRETE ONLY) ===
   let extractedSubjects = [];
-  // Multi-Subject handler
   try {
     const multiVisual = await extractMultiSubjectVisual(searchSubject, mainTopic);
     if (multiVisual && !GENERIC_SUBJECTS.includes(multiVisual.toLowerCase())) {
       extractedSubjects.push(multiVisual);
       console.log(`[5D][SUBJECT][MULTI] ${multiVisual}`);
     }
-  } catch (err) {
-    console.error(`[5D][MULTI][${jobId}][ERR]`, err);
-  }
-  // Question fallback
+  } catch (err) { console.error(`[5D][MULTI][${jobId}][ERR]`, err); }
   try {
     const questionVisual = await extractQuestionVisual(searchSubject, mainTopic);
     if (questionVisual && !GENERIC_SUBJECTS.includes(questionVisual.toLowerCase())) {
       extractedSubjects.push(questionVisual);
       console.log(`[5D][SUBJECT][QUESTION] ${questionVisual}`);
     }
-  } catch (err) {
-    console.error(`[5D][QUESTION][${jobId}][ERR]`, err);
-  }
-  // Symbolic/Abstract matcher
+  } catch (err) { console.error(`[5D][QUESTION][${jobId}][ERR]`, err); }
   try {
     const symbolicVisual = await extractSymbolicVisualSubject(searchSubject, mainTopic);
     if (symbolicVisual && !GENERIC_SUBJECTS.includes(symbolicVisual.toLowerCase())) {
       extractedSubjects.push(symbolicVisual);
       console.log(`[5D][SUBJECT][SYMBOLIC] ${symbolicVisual}`);
     }
-  } catch (err) {
-    console.error(`[5D][SYMBOLIC][${jobId}][ERR]`, err);
-  }
-  // Emotion/action/transition
+  } catch (err) { console.error(`[5D][SYMBOLIC][${jobId}][ERR]`, err); }
   try {
     const emotionVisual = await extractEmotionActionVisual(searchSubject, mainTopic);
     if (emotionVisual && !GENERIC_SUBJECTS.includes(emotionVisual.toLowerCase())) {
       extractedSubjects.push(emotionVisual);
       console.log(`[5D][SUBJECT][EMOTION] ${emotionVisual}`);
     }
-  } catch (err) {
-    console.error(`[5D][EMOTION][${jobId}][ERR]`, err);
-  }
-  // Literal extractor (always last, most literal/concrete)
+  } catch (err) { console.error(`[5D][EMOTION][${jobId}][ERR]`, err); }
   try {
     const prioritized = await extractVisualSubjects(searchSubject, mainTopic);
     if (prioritized && prioritized.length) {
@@ -265,12 +252,8 @@ async function findClipForScene({
       });
       console.log(`[5D][SUBJECT][PRIORITIZED]`, prioritized);
     }
-  } catch (err) {
-    console.error(`[5D][LITERAL][${jobId}][ERR]`, err);
-  }
-  // Fallback to original subject if nothing left
+  } catch (err) { console.error(`[5D][LITERAL][${jobId}][ERR]`, err); }
   if (!extractedSubjects.length) extractedSubjects.push(searchSubject);
-  // Dedup (keep order)
   extractedSubjects = [...new Set(extractedSubjects)];
 
   // === [B] REPETITION/VARIETY BLOCKER ===
@@ -313,7 +296,7 @@ async function findClipForScene({
       if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, 'PEXELS_RESULT')) {
         candidates.push({ path: candidatePath, source: 'PEXELS_VIDEO', isVideo: true, subject: subjectOption, used: false });
       }
-    } catch (e) {}
+    } catch (e) { console.error(`[5D][PEXELS][${jobId}][ERR]`, e); }
     // --- Pixabay video ---
     try {
       let pixabayResult = await findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
@@ -321,8 +304,7 @@ async function findClipForScene({
       if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, 'PIXABAY_RESULT')) {
         candidates.push({ path: candidatePath, source: 'PIXABAY_VIDEO', isVideo: true, subject: subjectOption, used: false });
       }
-    } catch (e) {}
-
+    } catch (e) { console.error(`[5D][PIXABAY][${jobId}][ERR]`, e); }
     // === PHOTOS (with fallback) ===
     // --- Pexels photo ---
     try {
@@ -330,21 +312,21 @@ async function findClipForScene({
       if (pexelsPhoto && !usedClips.includes(pexelsPhoto) && assertFileExists(pexelsPhoto, 'PEXELS_PHOTO')) {
         candidates.push({ path: pexelsPhoto, source: 'PEXELS_PHOTO', isVideo: false, subject: subjectOption, used: false });
       }
-    } catch (e) {}
+    } catch (e) { console.error(`[5D][PEXELS_PHOTO][${jobId}][ERR]`, e); }
     // --- Pixabay photo ---
     try {
       let pixabayPhoto = await findPixabayPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (pixabayPhoto && !usedClips.includes(pixabayPhoto) && assertFileExists(pixabayPhoto, 'PIXABAY_PHOTO')) {
         candidates.push({ path: pixabayPhoto, source: 'PIXABAY_PHOTO', isVideo: false, subject: subjectOption, used: false });
       }
-    } catch (e) {}
+    } catch (e) { console.error(`[5D][PIXABAY_PHOTO][${jobId}][ERR]`, e); }
     // --- Unsplash photo ---
     try {
       let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
       if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
         candidates.push({ path: unsplashResult, source: 'UNSPLASH', isVideo: false, subject: subjectOption, used: false });
       }
-    } catch (e) {}
+    } catch (e) { console.error(`[5D][UNSPLASH][${jobId}][ERR]`, e); }
   }
 
   // --- Score all candidates ---
