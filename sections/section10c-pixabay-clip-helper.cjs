@@ -3,7 +3,7 @@
 // Finds and downloads best-matching video or photo from Pixabay API
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Bulletproof: unique files, dedupe, valid output, crash-proof
-// 2024-08: Scoring with strict/fuzzy/partial keyword filter, no skips
+// Scoring with universal strict/fuzzy/partial, no skips
 // ===========================================================
 
 const axios = require('axios');
@@ -11,14 +11,13 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-// === Universal scorer import stub (ready to wire) ===
+// === Universal scorer import (required!) ===
 let scoreSceneCandidate = null;
 try {
   scoreSceneCandidate = require('./section10g-scene-scoring-helper.cjs').scoreSceneCandidate;
   console.log('[10C][INIT] Universal scene scorer loaded.');
 } catch (e) {
-  // Not fatal, fallback to local scoring logic for now
-  console.warn('[10C][INIT][WARN] Universal scene scorer NOT loaded, using local scoring.');
+  console.warn('[10C][INIT][WARN] Universal scene scorer NOT loaded, using fallback scoring.');
 }
 
 console.log('[10C][INIT] Pixabay clip helper loaded.');
@@ -26,66 +25,6 @@ console.log('[10C][INIT] Pixabay clip helper loaded.');
 const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
 if (!PIXABAY_API_KEY) {
   console.error('[10C][FATAL] Missing PIXABAY_API_KEY in environment!');
-}
-
-// --- Utility: Query normalization & keyword helpers ---
-function cleanQuery(str) {
-  if (!str) return '';
-  return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
-}
-function getKeywords(str) {
-  return String(str || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .split(/[\s\-]+/)
-    .filter(w => w.length > 2);
-}
-function majorWords(subject) {
-  return (subject || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
-}
-function normalizeForMatch(str) {
-  return (str || '')
-    .toLowerCase()
-    .replace(/[\s_\-\.]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-// --- Match helpers (handles underscores, loose matches, etc) ---
-function strictSubjectMatchPixabay(filename, subject) {
-  if (!filename || !subject) return false;
-  const safeSubject = cleanQuery(subject).replace(/\s+/g, '_');
-  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|\\.|$)`, 'i');
-  return re.test(filename.replace(/ /g, '_'));
-}
-function fuzzyMatchPixabay(filename, subject) {
-  if (!filename || !subject) return false;
-  const fn = normalizeForMatch(filename);
-  const words = majorWords(subject);
-  return words.length && words.every(word => fn.includes(word));
-}
-function partialMatchPixabay(filename, subject) {
-  if (!filename || !subject) return false;
-  const fn = normalizeForMatch(filename);
-  const words = majorWords(subject);
-  return words.some(word => fn.includes(word));
-}
-
-// --- Dedupe (anti-repeat) ---
-function isDupePixabay(url, usedClips = []) {
-  if (!url) return false;
-  return usedClips.some(u =>
-    typeof u === 'string' && (
-      u === url ||
-      u.endsWith(path.basename(url)) ||
-      u.includes(url) ||
-      url.includes(u)
-    )
-  );
 }
 
 // --- File validation ---
@@ -134,11 +73,23 @@ async function downloadPixabayVideoToLocal(url, outPath, jobId) {
   }
 }
 
-// --- Scoring (strict > fuzzy > partial > fallback, anti-dupe!) ---
-// Uses universal scorer if present, else local fallback
-function scorePixabayMatch(hit, vid, subject, usedClips = [], scene = null) {
+// --- Anti-dupe: Checks both full URL and basename ---
+function isDupePixabay(url, usedClips = []) {
+  if (!url) return false;
+  const base = path.basename(url);
+  return usedClips.some(u =>
+    typeof u === 'string' && (
+      u === url ||
+      u === base ||
+      url.endsWith(u) ||
+      base === u
+    )
+  );
+}
+
+// --- Universal scoring: Always uses global scorer if loaded ---
+function scorePixabayVideo(hit, vid, subject, usedClips = [], scene = null) {
   if (typeof scoreSceneCandidate === 'function') {
-    // Use the universal scoring system (10G)
     const candidate = {
       type: 'video',
       source: 'pixabay',
@@ -148,55 +99,34 @@ function scorePixabayMatch(hit, vid, subject, usedClips = [], scene = null) {
       pixabayHit: hit,
       pixabayVid: vid,
       scene,
+      isVideo: true
     };
-    return scoreSceneCandidate(candidate, scene || { subject });
+    return scoreSceneCandidate(candidate, scene || subject, usedClips);
   }
+  // Fallback: random if global scorer missing (should almost never happen)
+  return Math.random() * 100 - (isDupePixabay(vid.url, usedClips) ? 100 : 0);
+}
 
-  // --- Local fallback scoring logic ---
-  let score = 0;
-  const cleanedSubject = cleanQuery(subject).toLowerCase();
-  const subjectWords = getKeywords(subject);
-  const filename = (vid.url || '').split('/').pop();
-
-  // Deduplication (anti-repeat) – penalize any kind of dupe
-  if (isDupePixabay(vid.url, usedClips)) score -= 100;
-
-  // Score subject in filename (strict > fuzzy > partial)
-  if (strictSubjectMatchPixabay(filename, subject)) score += 90;
-  else if (fuzzyMatchPixabay(filename, subject)) score += 28;
-  else if (partialMatchPixabay(filename, subject)) score += 14;
-
-  // Metadata keyword/phrase
-  const fields = [
-    ...(hit.tags ? hit.tags.split(',').map(t => t.trim()) : []),
-    hit.user || '',
-    hit.pageURL || '',
-    vid.url || ''
-  ].join(' ').toLowerCase();
-
-  if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 45;
-  if (subjectWords.every(w => fields.includes(w)) && subjectWords.length > 1) score += 25;
-  subjectWords.forEach(word => { if (fields.includes(word)) score += 5; });
-
-  // Aspect/size
-  if (vid.height > vid.width) score += 8; // Portrait
-  if (vid.width > vid.height) score += 6; // Landscape
-  if (vid.height >= 720) score += 7;
-  score += Math.floor(vid.width / 120);
-
-  // Penalize very short
-  if (hit.duration && hit.duration < 4) score -= 8;
-  if (hit.id && Number(hit.id) > 1000000) score += 2;
-
-  // Bonus: shorter filename, newer id, better match
-  score -= filename.length;
-  return score;
+function scorePixabayPhoto(hit, subject, usedClips = []) {
+  if (typeof scoreSceneCandidate === 'function') {
+    const candidate = {
+      type: 'photo',
+      source: 'pixabay',
+      file: hit.largeImageURL,
+      filename: path.basename(hit.largeImageURL),
+      subject,
+      hit,
+      isVideo: false
+    };
+    return scoreSceneCandidate(candidate, subject, usedClips);
+  }
+  return Math.random() * 100 - (isDupePixabay(hit.largeImageURL, usedClips) ? 80 : 0);
 }
 
 /**
  * Finds and downloads best-scoring Pixabay video for a subject/scene.
  * All normalization, strict/fuzzy/partial, deduping, logging, crash-proof.
- * @param {string|object} subject         Main scene subject (string or scene object with .subject)
+ * @param {string|object|array} subject         Main scene subject (string/object/array)
  * @param {string} workDir         Local job folder for saving video
  * @param {number} sceneIdx
  * @param {string} jobId
@@ -204,16 +134,18 @@ function scorePixabayMatch(hit, vid, subject, usedClips = [], scene = null) {
  * @returns {Promise<string|null>} Local .mp4 path, or null
  */
 async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
-  // Accept scene object OR raw subject string (backward compatible)
-  const scene = typeof subject === 'object' && subject.subject ? subject : { subject };
-  console.log(`[10C][PIXABAY][${jobId}] findPixabayClipForScene | subject="${scene.subject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
+  // Accept subject as string, object, or array (universal)
+  const scene = subject;
+  let logSubject = (typeof subject === 'object' && subject.subject) ? subject.subject : subject;
+  console.log(`[10C][PIXABAY][${jobId}] findPixabayClipForScene | subject="${logSubject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
 
   if (!PIXABAY_API_KEY) {
     console.error('[10C][PIXABAY][ERR] No Pixabay API key set!');
     return null;
   }
   try {
-    const query = encodeURIComponent(cleanQuery(scene.subject)).slice(0, 100);
+    let queryStr = (typeof subject === 'object' && subject.subject) ? subject.subject : (Array.isArray(subject) ? subject[0] : subject);
+    const query = encodeURIComponent(String(queryStr || '').replace(/[^\w\s]/gi, '').trim()).slice(0, 100);
     const url = `https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${query}&per_page=15`;
     console.log(`[10C][PIXABAY][${jobId}] Searching: ${url}`);
     const resp = await axios.get(url);
@@ -223,12 +155,11 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
       for (const hit of resp.data.hits) {
         const videoCandidates = Object.values(hit.videos || {});
         for (const vid of videoCandidates) {
-          // Do NOT add to scored if dupe
           if (isDupePixabay(vid.url, usedClips)) {
             console.log(`[10C][PIXABAY][${jobId}][DUPE] Skipping duplicate file: ${vid.url}`);
             continue;
           }
-          const score = scorePixabayMatch(hit, vid, scene.subject, usedClips, scene);
+          const score = scorePixabayVideo(hit, vid, scene, usedClips, scene);
           scored.push({ hit, vid, score });
         }
       }
@@ -237,7 +168,6 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
         console.log(`[10C][PIXABAY][${jobId}][CANDIDATE][${i + 1}] ${s.vid.url} | score=${s.score} | size=${s.vid.width}x${s.vid.height}`)
       );
 
-      // Always pick the best available, even if score is low
       let best = scored.find(s => s.score > 15) || scored[0];
       if (!best && scored.length > 0) best = scored[0];
       if (best) {
@@ -245,12 +175,11 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
         const resultPath = await downloadPixabayVideoToLocal(best.vid.url, outPath, jobId);
         if (resultPath) return resultPath;
-        // If download fails, try next best (not implemented here, fallback handled by 5D)
       } else {
         console.warn(`[10C][PIXABAY][${jobId}] No Pixabay videos matched subject, but candidates were returned.`);
       }
     } else {
-      console.log(`[10C][PIXABAY][${jobId}] No Pixabay video results found for "${scene.subject}"`);
+      console.log(`[10C][PIXABAY][${jobId}] No Pixabay video results found for "${logSubject}"`);
     }
     return null;
   } catch (err) {
@@ -263,29 +192,34 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
   }
 }
 
-// --- FIND PIXABAY PHOTO FOR SCENE (THE REQUIRED FUNCTION) ---
+// --- FIND PIXABAY PHOTO FOR SCENE ---
 async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
   if (!PIXABAY_API_KEY) {
     console.warn('[10C][PIXABAY-PHOTO][ERR] No Pixabay API key set!');
     return null;
   }
   try {
-    // Pixabay API q param max 100 chars
-    const safeSubject = String(subject).slice(0, 90); // leave room for encoding
-    const query = encodeURIComponent(safeSubject);
+    let queryStr = (typeof subject === 'object' && subject.subject) ? subject.subject : (Array.isArray(subject) ? subject[0] : subject);
+    const query = encodeURIComponent(String(queryStr || '').replace(/[^\w\s]/gi, '').trim()).slice(0, 90);
     const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=12&orientation=vertical`;
     console.log(`[10C][PIXABAY-PHOTO][${jobId}] Request: ${url}`);
     const resp = await axios.get(url, { timeout: 12000 });
     if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
+      let scored = [];
       for (const hit of resp.data.hits) {
-        // Dedup by URL or basename
         if (isDupePixabay(hit.largeImageURL, usedClips)) {
           console.log(`[10C][PIXABAY-PHOTO][${jobId}] Skipping duplicate photo: ${hit.largeImageURL}`);
           continue;
         }
-        // Optionally: download image, but fallbackKenBurns will handle it.
-        console.log(`[10C][PIXABAY-PHOTO][${jobId}] Picked: ${hit.largeImageURL}`);
-        return hit.largeImageURL;
+        const score = scorePixabayPhoto(hit, subject, usedClips);
+        scored.push({ hit, score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      let best = scored.find(s => s.score > 10) || scored[0];
+      if (!best && scored.length > 0) best = scored[0];
+      if (best) {
+        console.log(`[10C][PIXABAY-PHOTO][${jobId}][PICKED] ${best.hit.largeImageURL} | score=${best.score}`);
+        return best.hit.largeImageURL;
       }
     }
     console.log(`[10C][PIXABAY-PHOTO][${jobId}] No Pixabay photos found for "${subject}"`);

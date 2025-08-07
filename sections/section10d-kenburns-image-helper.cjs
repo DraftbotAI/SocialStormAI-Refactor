@@ -3,7 +3,7 @@
 // Finds fallback still images from Unsplash, Pexels, Pixabay.
 // Downloads, scores, creates slow-pan video with FFmpeg.
 // MAX LOGGING EVERY STEP, Modular, Deduped, Never dies
-// NO ZOOM, only slow pan!
+// NO ZOOM, only slow pan! Always returns a video if at all possible.
 // ============================================================
 
 const axios = require('axios');
@@ -46,8 +46,6 @@ function cleanQuery(str) {
 function getKeywords(str) {
   return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
 }
-
-// --- STRICT SUBJECT: ALL subject keywords must be present in fields ---
 function strictSubjectPresent(fields, subject) {
   const subjectWords = getKeywords(subject);
   if (!subjectWords.length) return false;
@@ -85,21 +83,15 @@ function scoreImage(candidate, subject, usedClips = []) {
     ].join(' ').toLowerCase();
   }
 
-  // Strong: strict
   if (strictSubjectPresent(fields, subject)) score += 100;
-  // Fuzzy: all words
   if (subjectWords.every(w => fields.includes(w))) score += 35;
-  // Each word
   subjectWords.forEach(word => { if (fields.includes(word)) score += 6; });
-  // Phrase
   if (fields.includes(cleanedSubject)) score += 18;
 
-  // HD preference
   if (candidate.width && candidate.width >= 1000) score += 7;
   if (candidate.height && candidate.height >= 1000) score += 7;
   if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8;
 
-  // Penalize used/dup (by url, id, and basename)
   if (
     usedClips &&
     candidate.url &&
@@ -112,9 +104,7 @@ function scoreImage(candidate, subject, usedClips = []) {
     )
   ) score -= 60;
 
-  // Bonus for Unsplash editorial/high download count (if present)
   if (candidate.downloads && candidate.downloads > 10000) score += 4;
-  // Bonus for newer image
   if (candidate.id && Number(candidate.id) > 1000000) score += 1;
   return score;
 }
@@ -139,7 +129,6 @@ async function findImageInUnsplash(subject, usedClips = []) {
         height: item.height,
         id: item.id
       }));
-      // Filter out any used images by url, id, or basename
       candidates = candidates.filter(c =>
         !usedClips.some(u =>
           typeof u === 'string' && (
@@ -307,7 +296,7 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
   }
 }
 
-// --- Bulletproof: Preprocess every image to standard JPEG with sharp ---
+// --- Preprocess: always scale to 1080x1920 (portrait), pad, and JPEG output ---
 async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
   try {
     console.log(`[10D][PREPROCESS][${jobId}] Preprocessing image: ${inPath} → ${outPath}`);
@@ -326,7 +315,7 @@ async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
   }
 }
 
-// --- Make Ken Burns video from local image (NO ZOOM, PAN ONLY) ---
+// --- Make Ken Burns video from local image (PAN ONLY, NO ZOOM) ---
 async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
   console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}, NO ZOOM) | ${imgPath} → ${outPath} (${duration}s)`);
@@ -335,18 +324,12 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
 
   const width = 1080, height = 1920;
 
-  // Only a smooth horizontal pan, no zoom at all!
-  // The "crop" filter moves left-right (or right-left) over the still, no zoom.
+  // Pan only (NO ZOOM)
   const panExpr = direction === 'ltr'
     ? `crop=${width}:${height}:x='(iw-${width})*t/${duration}':y='(ih-${height})/2'`
     : `crop=${width}:${height}:x='(iw-${width})-(iw-${width})*t/${duration}':y='(ih-${height})/2'`;
 
-  // Full chain: scale to fit, pad to container, then pan-crop
-  const filter = `
-    [0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,
-    pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,
-    ${panExpr},setpts=PTS-STARTPTS[v]
-  `.replace(/\s+/g, '');
+  const filter = `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,${panExpr},setpts=PTS-STARTPTS[v]`.replace(/\s+/g, '');
 
   const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
 
@@ -399,28 +382,25 @@ async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
 // --- Main entry: fallback to Ken Burns if no video found ---
 async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClips = []) {
   try {
-    console.log(`[10D][FALLBACK][${jobId}] Attempting Ken Burns fallback video for "${subject}" | workDir="${workDir}" | sceneIdx=${sceneIdx}`);
+    // Accept subject as object/array/string
+    let logSubject = (typeof subject === 'object' && subject.subject) ? subject.subject : subject;
+    console.log(`[10D][FALLBACK][${jobId}] Attempting Ken Burns fallback video for "${logSubject}" | workDir="${workDir}" | sceneIdx=${sceneIdx}`);
 
-    // --- Try all sources and score them ---
     let candidates = [];
 
-    // Unsplash
     if (UNSPLASH_ACCESS_KEY) {
-      const url = await findImageInUnsplash(subject, usedClips);
+      const url = await findImageInUnsplash(logSubject, usedClips);
       if (url) candidates.push({ url, api: 'unsplash', score: 100 });
     }
-    // Pexels
     if (PEXELS_API_KEY) {
-      const url = await findImageInPexels(subject, usedClips);
+      const url = await findImageInPexels(logSubject, usedClips);
       if (url) candidates.push({ url, api: 'pexels', score: 100 });
     }
-    // Pixabay
     if (PIXABAY_API_KEY) {
-      const url = await findImageInPixabay(subject, usedClips);
+      const url = await findImageInPixabay(logSubject, usedClips);
       if (url) candidates.push({ url, api: 'pixabay', score: 100 });
     }
 
-    // Score all, remove used or blank
     candidates = candidates.filter(c =>
       c.url &&
       !usedClips.some(u =>
@@ -432,12 +412,12 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
       )
     );
     for (let c of candidates) {
-      c.score = scoreImage({ ...c, url: c.url }, subject, usedClips);
+      c.score = scoreImage({ ...c, url: c.url }, logSubject, usedClips);
     }
     candidates.sort((a, b) => b.score - a.score);
 
     if (!candidates.length) {
-      console.warn(`[10D][FALLBACK][${jobId}] No fallback image found for "${subject}"`);
+      console.warn(`[10D][FALLBACK][${jobId}] No fallback image found for "${logSubject}"`);
       return null;
     }
 
@@ -450,7 +430,6 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     const rawImgPath = path.join(realTmpDir, `kenburns-raw-${uuidv4()}.jpg`);
     await downloadRemoteFileToLocal(best.url, rawImgPath, jobId);
 
-    // ALWAYS preprocess image to bulletproof JPEG
     const jpegImgPath = path.join(realTmpDir, `kenburns-prepped-${uuidv4()}.jpg`);
     await preprocessImageToJpeg(rawImgPath, jpegImgPath, jobId);
 

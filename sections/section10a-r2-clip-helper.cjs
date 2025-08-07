@@ -2,16 +2,14 @@
 // SECTION 10A: R2 CLIP HELPER (Cloudflare R2)
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for parallel dedupe/scan)
 // MAX LOGGING EVERY STEP, Modular System Compatible
-// Now uses universal scoreSceneCandidate from 10G (pro match, anti-dupe, anti-generic)
-// 2024-08: Strict, fuzzy, and partial match, never dupe, never silent fail
+// Uses universal scoreSceneCandidate from 10G (pro match, anti-dupe, anti-generic)
+// Strict, fuzzy, and partial match, never dupe, never silent fail
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-
-// === Universal scorer from Section 10G ===
 const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
 console.log('[10A][INIT] R2 clip helper loaded.');
@@ -82,11 +80,38 @@ function isValidClip(filePath, jobId) {
   }
 }
 
+// === UNIVERSAL SUBJECT EXTRACTOR ===
+function extractSubjectAndPhrases(scene) {
+  // Accepts string, object, or array. Returns { subject, matchPhrases }
+  if (typeof scene === 'string') return { subject: scene, matchPhrases: [] };
+  if (Array.isArray(scene)) {
+    // Use first non-generic as subject, rest as matchPhrases
+    const strItems = scene.map(x => typeof x === 'string' ? x : (x.subject || '')).filter(Boolean);
+    return {
+      subject: strItems[0] || '',
+      matchPhrases: strItems.slice(1)
+    };
+  }
+  if (scene && typeof scene === 'object') {
+    // Prefers .subject, .main, .matchPhrases, or .tokens fields
+    const subject =
+      scene.subject ||
+      scene.main ||
+      (scene.visual && scene.visual.subject) ||
+      '';
+    let matchPhrases = [];
+    if (Array.isArray(scene.matchPhrases)) matchPhrases = scene.matchPhrases;
+    else if (Array.isArray(scene.tokens)) matchPhrases = scene.tokens;
+    return { subject, matchPhrases };
+  }
+  return { subject: '', matchPhrases: [] };
+}
+
 /**
  * Finds the *best-scoring* video in R2 for the subject, using universal scorer (Section 10G)
  * NEVER returns a dupe; NEVER picks generic/irrelevant if a real match exists.
  * If nothing, returns null (upstream fallback handles images, etc)
- * @param {object|string} scene  // { subject, matchPhrases, ... } OR subject string
+ * @param {object|string|array} scene  // { subject, matchPhrases, ... } OR subject string/array
  * @param {string} workDir
  * @param {number} sceneIdx
  * @param {string} jobId
@@ -94,10 +119,9 @@ function isValidClip(filePath, jobId) {
  * @returns {Promise<string|null>} Local video path (or null if not found)
  */
 async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
-  // --- Accept plain string for backward compatibility ---
-  let subject = (typeof scene === 'string') ? scene : scene?.subject || '';
-  let matchPhrases = (typeof scene === 'object' && scene.matchPhrases) ? scene.matchPhrases : [];
-  if (!subject || typeof subject !== 'string') {
+  const { subject, matchPhrases } = extractSubjectAndPhrases(scene);
+
+  if (!subject || typeof subject !== 'string' || subject.length < 2) {
     console.error(`[10A][R2][${jobId}] No valid subject for R2 lookup! Input:`, scene);
     return null;
   }
@@ -125,27 +149,27 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
     const candidates = mp4Files.map(f => ({
       type: 'video',
       source: 'r2',
-      file: f,
+      path: f,
       filename: path.basename(f),
       subject,
       matchPhrases,
       scene: (typeof scene === 'object') ? scene : { subject, matchPhrases },
+      isVideo: true
     }));
 
     // Score with universal helper (Section 10G)
     const scored = candidates.map(candidate => ({
       ...candidate,
-      score: scoreSceneCandidate(candidate, candidate.scene)
+      score: scoreSceneCandidate(candidate, candidate.scene, usedClips)
     }));
 
-    // Log all candidates (even if zero strong matches)
     if (scored.length === 0) {
       console.log(`[10A][R2][${jobId}][CANDIDATE] No .mp4 candidates to score.`);
     } else {
       scored
         .sort((a, b) => b.score - a.score)
         .slice(0, 10)
-        .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.file} | score=${s.score}`));
+        .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.path} | score=${s.score}`));
     }
 
     // Filter out true irrelevants (score <20) IF a strong match exists (score >=80)
@@ -162,28 +186,28 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
     eligible.sort((a, b) => b.score - a.score);
     const best = eligible[0];
 
-    if (!best || typeof best.file !== 'string') {
+    if (!best || typeof best.path !== 'string') {
       console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No suitable candidates for subject "${subject}". Aborting.`);
       return null;
     }
 
     // Deduplication log
-    if (usedClips.includes(best.file) || usedClips.includes(path.basename(best.file))) {
-      console.warn(`[10A][R2][${jobId}][DEDUPE_BLOCK] Skipped candidate already used in this video: ${best.file}`);
+    if (usedClips.includes(best.path) || usedClips.includes(path.basename(best.path))) {
+      console.warn(`[10A][R2][${jobId}][DEDUPE_BLOCK] Skipped candidate already used in this video: ${best.path}`);
       return null;
     }
 
     // Log how/why this candidate was chosen
     if (best.score >= 100) {
-      console.log(`[10A][R2][${jobId}][SELECTED][STRICT] ${best.file} | score=${best.score}`);
+      console.log(`[10A][R2][${jobId}][SELECTED][STRICT] ${best.path} | score=${best.score}`);
     } else if (best.score >= 80) {
-      console.log(`[10A][R2][${jobId}][SELECTED][STRONG] ${best.file} | score=${best.score}`);
+      console.log(`[10A][R2][${jobId}][SELECTED][STRONG] ${best.path} | score=${best.score}`);
     } else if (best.score >= 35) {
-      console.log(`[10A][R2][${jobId}][SELECTED][FUZZY] ${best.file} | score=${best.score}`);
+      console.log(`[10A][R2][${jobId}][SELECTED][FUZZY] ${best.path} | score=${best.score}`);
     } else if (best.score >= 20) {
-      console.log(`[10A][R2][${jobId}][SELECTED][PARTIAL] ${best.file} | score=${best.score}`);
+      console.log(`[10A][R2][${jobId}][SELECTED][PARTIAL] ${best.path} | score=${best.score}`);
     } else {
-      console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] No strong match, using best available: ${best.file} | score=${best.score}`);
+      console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] No strong match, using best available: ${best.path} | score=${best.score}`);
     }
 
     // Download logic (always download to local workDir, uniquely named for dedupe)
@@ -193,10 +217,10 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       console.log(`[10A][R2][${jobId}] File already downloaded: ${outPath}`);
       return outPath;
     }
-    console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${best.file} -> ${outPath}`);
+    console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${best.path} -> ${outPath}`);
 
     // Download from R2
-    const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: best.file });
+    const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: best.path });
     const resp = await s3Client.send(getCmd);
 
     await new Promise((resolve, reject) => {
