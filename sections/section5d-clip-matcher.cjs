@@ -4,17 +4,12 @@
 // Never repeats a clip/image in the same video unless absolutely unavoidable.
 // Scores and ranks all candidates, always prefers video in case of tie.
 // Handles edge cases: emotion, question, multi-subject, symbolic, repetition.
+// Now bulletproofed to instantly log missing/broken helpers (no more silent fail).
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
-const {
-  findPexelsClipForScene,
-  findPexelsPhotoForScene,
-} = require('./section10b-pexels-clip-helper.cjs');
-const {
-  findPixabayClipForScene,
-  findPixabayPhotoForScene,
-} = require('./section10c-pixabay-clip-helper.cjs');
+const { findPexelsClipForScene, findPexelsPhotoForScene } = require('./section10b-pexels-clip-helper.cjs');
+const { findPixabayClipForScene, findPixabayPhotoForScene } = require('./section10c-pixabay-clip-helper.cjs');
 const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
@@ -29,21 +24,30 @@ const path = require('path');
 
 console.log('[5D][INIT] Smart, Video-Preferred, No-Dupe Clip Matcher loaded.');
 
-// Helper load check at startup: will instantly show if any import is broken
-console.log('[5D][DEBUG][HELPERS] Helper load status:');
-console.log('findR2ClipForScene:', !!findR2ClipForScene);
-console.log('findPexelsClipForScene:', !!findPexelsClipForScene);
-console.log('findPixabayClipForScene:', !!findPixabayClipForScene);
-console.log('findPexelsPhotoForScene:', !!findPexelsPhotoForScene);
-console.log('findPixabayPhotoForScene:', !!findPixabayPhotoForScene);
-console.log('findUnsplashImageForScene:', !!findUnsplashImageForScene);
-console.log('fallbackKenBurnsVideo:', !!fallbackKenBurnsVideo);
+// === DEBUG: Verify all helpers are loaded ===
+(() => {
+  const helpers = {
+    findR2ClipForScene,
+    findPexelsClipForScene,
+    findPexelsPhotoForScene,
+    findPixabayClipForScene,
+    findPixabayPhotoForScene,
+    findUnsplashImageForScene,
+    fallbackKenBurnsVideo
+  };
+  Object.entries(helpers).forEach(([name, fn]) => {
+    if (typeof fn !== 'function') {
+      console.error(`[5D][FATAL][HELPER MISSING] "${name}" is type:`, typeof fn, fn === undefined ? '(undefined)' : '(not a function)');
+    } else {
+      console.log(`[5D][HELPER][OK] ${name}`);
+    }
+  });
+})();
 
 const GENERIC_SUBJECTS = [
   'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text', 'skyline', 'dubai'
 ];
 
-// --- Helper functions ---
 function normalize(str) { return (str || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 function getMajorWords(subject) {
   return (subject || '')
@@ -163,20 +167,6 @@ async function findClipForScene({
   categoryFolder,
   prevVisualSubjects = [],
 }) {
-  // Sanity check: hard fail if any required helper is missing
-  if (
-    !findR2ClipForScene ||
-    !findPexelsClipForScene ||
-    !findPixabayClipForScene ||
-    !findUnsplashImageForScene ||
-    !findPexelsPhotoForScene ||
-    !findPixabayPhotoForScene ||
-    !fallbackKenBurnsVideo
-  ) {
-    console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
-    throw new Error('[5D][FATAL][HELPERS] One or more clip helpers not loaded! See logs above for which ones.');
-  }
-
   let searchSubject = subject;
 
   // --- Anchor subject logic (MEGA-SCENE + SCENE 1) ---
@@ -228,7 +218,25 @@ async function findClipForScene({
     return null;
   }
 
-  // === [A] MULTI-STRATEGY SUBJECT EXTRACTION (CONCRETE ONLY) ===
+  // === [A] VERIFY HELPERS ===
+  const missingHelpers = [];
+  [
+    ['findR2ClipForScene', findR2ClipForScene],
+    ['findPexelsClipForScene', findPexelsClipForScene],
+    ['findPixabayClipForScene', findPixabayClipForScene],
+    ['findUnsplashImageForScene', findUnsplashImageForScene],
+    ['findPexelsPhotoForScene', findPexelsPhotoForScene],
+    ['findPixabayPhotoForScene', findPixabayPhotoForScene],
+    ['fallbackKenBurnsVideo', fallbackKenBurnsVideo]
+  ].forEach(([name, fn]) => {
+    if (typeof fn !== 'function') missingHelpers.push(name);
+  });
+  if (missingHelpers.length) {
+    console.error('[5D][FATAL][HELPERS] The following helpers are missing or not functions:', missingHelpers.join(', '));
+    return null;
+  }
+
+  // === [B] MULTI-STRATEGY SUBJECT EXTRACTION (CONCRETE ONLY) ===
   let extractedSubjects = [];
   try {
     const multiVisual = await extractMultiSubjectVisual(searchSubject, mainTopic);
@@ -270,7 +278,7 @@ async function findClipForScene({
   if (!extractedSubjects.length) extractedSubjects.push(searchSubject);
   extractedSubjects = [...new Set(extractedSubjects)];
 
-  // === [B] REPETITION/VARIETY BLOCKER ===
+  // === [C] REPETITION/VARIETY BLOCKER ===
   let finalSubjects = [];
   for (let sub of extractedSubjects) {
     try {
@@ -287,7 +295,7 @@ async function findClipForScene({
   const contextOverride = await tryContextualLandmarkOverride(finalSubjects[0], mainTopic, usedClips, jobId);
   if (contextOverride) return contextOverride;
 
-  // === [C] Gather ALL candidates (video then photo, separate selection) ===
+  // === [D] Gather ALL candidates (video then photo, separate selection) ===
   let videoCandidates = [];
   let imageCandidates = [];
   for (const subjectOption of finalSubjects) {
