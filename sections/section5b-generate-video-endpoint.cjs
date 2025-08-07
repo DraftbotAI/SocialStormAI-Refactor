@@ -4,16 +4,15 @@
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
 // NO DUPLICATE CLIPS IN A SINGLE VIDEO — ABSOLUTE
 // ACCURATE PROGRESS BAR (No more stuck at 95%)
-// 2024-08: Uploads to R2 ONLY AFTER final video is generated,
-// uses correct library/category path with bulletproof naming
+// 2024-08: Uploads to R2 "videos" bucket BEFORE player returns URL,
+// then archives to "library" after video is ready
 // ============================================================
 
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-
-const { s3Client } = require('./section1-setup.cjs');
+const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
 const {
   bulletproofScenes,
   splitScriptToScenes,
@@ -65,7 +64,7 @@ function getCategoryFolder(mainTopic) {
 
 async function ensureLocalClipExists(r2Path, localPath) {
   if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10240) return localPath;
-  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-library';
+  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
   const key = r2Path.replace(/^(\.\/)+/, '').replace(/^\/+/, '');
   console.log(`[5B][R2][DOWNLOAD] Fetching from R2: bucket=${bucket} key=${key} → ${localPath}`);
   try {
@@ -414,12 +413,13 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
 
         let finalPath = musicPath;
+        let finalName = getUniqueFinalName('final-with-outro');
         if (outro) {
           const outroPath = path.join(__dirname, '..', 'public', 'assets', 'outro.mp4');
           if (fs.existsSync(outroPath)) {
             try {
               progress[jobId] = { percent: 92, status: 'Adding your outro...' };
-              const outroOutput = path.join(workDir, getUniqueFinalName('final-with-outro'));
+              const outroOutput = path.join(workDir, finalName);
               await appendOutro(musicPath, outroPath, outroOutput, workDir);
               assertFileExists(outroOutput, 'OUTRO_OUT');
               finalPath = outroOutput;
@@ -434,26 +434,34 @@ function registerGenerateVideoEndpoint(app, deps) {
           progress[jobId] = { percent: 92, status: 'Outro skipped (user setting).' };
         }
 
-        // === FINAL UPLOAD TO LIBRARY (SOCIALSTORM-LIBRARY) ===
+        // === STEP 1: UPLOAD FINAL VIDEO TO VIDEOS BUCKET (PLAYER) ===
+        let r2VideoUrl = null;
         try {
-          progress[jobId] = { percent: 98, status: 'Uploading final video to Cloudflare R2 library...' };
+          progress[jobId] = { percent: 98, status: 'Uploading video to Cloudflare R2 (player bucket)...' };
+          r2VideoUrl = await uploadFinalToVideosBucket(finalPath, finalName, jobId);
+          progress[jobId] = { percent: 99, status: 'Video uploaded to player bucket. Archiving to library...' };
+        } catch (uploadErr) {
+          progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
+          throw uploadErr;
+        }
+
+        // === STEP 2: ARCHIVE TO LIBRARY ===
+        try {
           const subjectForName = cleanForFilename(mainTopic);
           const finalSceneIdx = scenes.length - 1;
-          const resultR2Path = await uploadSceneClipToR2(
+          await uploadSceneClipToR2(
             finalPath,
             subjectForName,
             finalSceneIdx,
             'socialstorm',
             categoryFolder
           );
-          const publicBase = process.env.R2_PUBLIC_CUSTOM_DOMAIN || 'https://videos.socialstormai.com';
-          const url = resultR2Path
-            ? `${publicBase.replace(/\/$/, '')}/${resultR2Path.replace(/^socialstorm-library\//, '')}`
-            : finalPath;
-          progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: url };
-        } catch (uploadErr) {
-          progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
+        } catch (e) {
+          console.warn(`[5B][ARCHIVE][LIBRARY][WARN] Could not archive video to library:`, e);
         }
+
+        // === DONE! Player gets direct videos bucket link ===
+        progress[jobId] = { percent: 100, status: 'Your video is ready! 🎉', output: r2VideoUrl };
 
       } catch (err) {
         console.error(`[5B][FATAL][JOB][${jobId}] Video job failed:`, err, err && err.stack ? err.stack : '');
@@ -475,3 +483,21 @@ function registerGenerateVideoEndpoint(app, deps) {
 
 console.log('[5B][EXPORT] registerGenerateVideoEndpoint exported');
 module.exports = registerGenerateVideoEndpoint;
+
+// === UPLOAD FINAL VIDEO TO R2 VIDEOS BUCKET (FOR PLAYER) ===
+async function uploadFinalToVideosBucket(finalPath, finalName, jobId) {
+  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
+  const fileData = fs.readFileSync(finalPath);
+  const key = `jobs/${jobId}/${finalName}`;
+  console.log(`[5B][R2][UPLOAD] Uploading final to bucket=${bucket} key=${key}`);
+  await s3Client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: fileData,
+    ContentType: 'video/mp4'
+  }));
+  const urlBase = process.env.R2_PUBLIC_CUSTOM_DOMAIN || 'https://videos.socialstormai.com';
+  const url = `${urlBase.replace(/\/$/, '')}/jobs/${jobId}/${finalName}`;
+  console.log(`[5B][R2][UPLOAD][OK] Final uploaded: ${url}`);
+  return url;
+}
