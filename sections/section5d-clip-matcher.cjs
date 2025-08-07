@@ -76,10 +76,17 @@ function scoreCandidate(candidate, subject, isVideo = false, realMatchExists = f
   if (words.every(w => basename.includes(w))) score += 40;
   words.forEach(word => { if (basename.includes(word)) score += 8; });
   if (basename.includes(cleanedSubject)) score += 15;
-  if (isVideo) score += 20;
+
+  // >>>>>>>>>>>>>> HEAVY VIDEO BIAS <<<<<<<<<<<<<<<<
+  if (isVideo) score += 120;         // MASSIVE boost for all videos!
+  else score -= 60;                  // Penalize all images/photos.
+  // >>>>>>>>>>>>>> END VIDEO BIAS <<<<<<<<<<<<<<<<<
+
   if (GENERIC_SUBJECTS.some(g => basename.includes(g))) score -= (realMatchExists ? 2000 : 200);
   if (/\b(sign|logo|text)\b/.test(basename)) score -= (realMatchExists ? 2000 : 200);
   if (candidate.used) score -= 5000;
+
+  console.log(`[5D][SCORE] ${candidate.path} | subject="${subject}" | video=${isVideo ? 'Y' : 'N'} | score=${score}`);
   return score;
 }
 
