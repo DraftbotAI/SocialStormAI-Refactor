@@ -1,8 +1,9 @@
 // ===========================================================
-// SECTION 5C: SCRIPT & SCENE UTILITIES
+// SECTION 5C: SCRIPT & SCENE UTILITIES (AI-Optimized, Bulletproof, Mega-Scene Safe)
 // Splits script into scenes, extracts main topics, and bulletproofs output
 // MAX LOGGING EVERY STEP. Never returns repeated visualSubjects unless unavoidable.
-// Enhanced: Viral summary/hook-first, mega-scene, bulletproof dedupe
+// Enhanced: Viral summary/hook-first, mega-scene, bulletproof dedupe, AI subject extraction
+// 2024-08: Ultra strict subject pass-through for 5D, compatible with new pro helpers
 // ===========================================================
 
 const uuid = require('uuid');
@@ -27,7 +28,7 @@ function generateViralHookAndSummary(script, topic = '') {
   return summaryLine;
 }
 
-// === Visual Subject Extraction (ultra strict, context-aware) ===
+// === Visual Subject Extraction (strict, but now only for fallback/defense) ===
 function extractVisualSubject(line, mainTopic = '') {
   if (!line && mainTopic) return mainTopic;
   if (
@@ -59,7 +60,7 @@ function extractVisualSubject(line, mainTopic = '') {
   return mainTopic || '';
 }
 
-// === Main: Script → Scenes Array (w/ bulletproof deduplication) ===
+// === Main: Script → Scenes Array (w/ bulletproof deduplication & pro subject handling) ===
 function splitScriptToScenes(script, topic = '') {
   console.log('[5C][SPLIT] splitScriptToScenes called.');
 
@@ -69,12 +70,13 @@ function splitScriptToScenes(script, topic = '') {
   }
   let rawLines = script.split('\n').map(line => line.trim()).filter(Boolean);
 
+  // Always extract hook/summary from line 1 (already enforced in Section 4)
   const summaryLine = generateViralHookAndSummary(script, topic);
 
-  // Always keep original order so indices line up for bulletproofing
+  // Keep original order for index tracking
   let restLines = rawLines.filter(l => l !== summaryLine && l.length > 4);
 
-  // Guess main topic (for fallback) if not provided
+  // Guess main topic if not provided
   const mainTopic = topic && typeof topic === 'string' && topic.length > 1
     ? topic
     : guessMainSubjectFromScenes(restLines);
@@ -85,7 +87,8 @@ function splitScriptToScenes(script, topic = '') {
 
   // === Scene 1: HOOK ===
   const hookId = `hookscene-1-${uuid.v4()}`;
-  const hookVisual = extractVisualSubject(summaryLine, mainTopic);
+  // Visual subject is now always the mainTopic for the hook (ensures clip anchoring)
+  const hookVisual = mainTopic || extractVisualSubject(summaryLine, mainTopic);
   scenes.push({
     id: hookId,
     texts: [summaryLine],
@@ -102,11 +105,17 @@ function splitScriptToScenes(script, topic = '') {
   if (restLines.length > 1) {
     const megaId = `megascene-2-${uuid.v4()}`;
     const megaTexts = [restLines[0], restLines[1]];
+
+    // Use the *more subject-rich* of the first two context lines (AI helpers will refine in 5D)
     let megaSubject = extractVisualSubject(restLines[1], mainTopic);
-    // Enforce uniqueness if possible
     if (seenSubjects.has(megaSubject.toLowerCase())) {
       megaSubject = extractVisualSubject(restLines[0], mainTopic) || megaSubject;
     }
+    // Extra defense: If both are vague, fallback to mainTopic
+    if (!megaSubject || megaSubject.length < 2 || megaSubject === hookVisual) {
+      megaSubject = mainTopic;
+    }
+
     scenes.push({
       id: megaId,
       texts: megaTexts,
@@ -136,6 +145,7 @@ function splitScriptToScenes(script, topic = '') {
         tries++;
       }
       subject = altSubject;
+      if (!subject || subject.length < 2) subject = mainTopic;
 
       scenes.push({
         id: sceneId,
@@ -152,7 +162,7 @@ function splitScriptToScenes(script, topic = '') {
   } else if (restLines.length === 1) {
     // Only one line left after hook, make it a normal scene
     const sceneId = `scene2-${uuid.v4()}`;
-    const subject = extractVisualSubject(restLines[0], mainTopic);
+    const subject = extractVisualSubject(restLines[0], mainTopic) || mainTopic;
     scenes.push({
       id: sceneId,
       texts: [restLines[0]],
@@ -188,7 +198,7 @@ function splitScriptToScenes(script, topic = '') {
     }
     let subject = scene.visualSubject;
     if (!subject || typeof subject !== 'string' || subject.length > 40) {
-      subject = extractVisualSubject(safeTexts[0], mainTopic);
+      subject = extractVisualSubject(safeTexts[0], mainTopic) || mainTopic;
     }
     return { ...scene, texts: safeTexts, visualSubject: subject || mainTopic };
   });

@@ -1,5 +1,5 @@
 // ===========================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Bulletproof, Anti-Dupe, Pro Helper Integration)
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Bulletproof, Anti-Dupe, Pro Helper Integration, MANATEE FIXED)
 // Always returns something: R2, Pexels Video, Pixabay Video, Pexels Photo, Pixabay Photo, Unsplash image, or Ken Burns.
 // Never repeats a clip/image in the same video unless absolutely unavoidable.
 // MAX LOGS at every step. Handles edge cases: emotion, question, multi-subject, symbolic, repetition.
@@ -20,7 +20,7 @@ const { breakRepetition } = require('./section10l-repetition-blocker.cjs');
 const fs = require('fs');
 const path = require('path');
 
-console.log('[5D][INIT] Clip matcher orchestrator (ALL-HELPERS, PHOTOS FALLBACK, ANTI-DUPE, EDGE CASES) loaded.');
+console.log('[5D][INIT] Clip matcher orchestrator (ALL-HELPERS, PHOTOS FALLBACK, ANTI-DUPE, EDGE CASES, MANATEE-PROOF) loaded.');
 
 const GENERIC_SUBJECTS = [
   'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text', 'skyline', 'dubai'
@@ -146,25 +146,34 @@ async function findClipForScene({
 }) {
   let searchSubject = subject;
 
-  // --- Anchor subject logic ---
+  // --- Anchor subject logic (MEGA-SCENE + SCENE 1) ---
   if (isMegaScene || sceneIdx === 0) {
-    if (
-      megaSubject &&
-      typeof megaSubject === 'string' &&
-      megaSubject.length > 2 &&
-      !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())
+    // Pull only a visual keyword, never a phrase/hook for matching!
+    // Use subject extractor to get the top subject for matching.
+    let anchorSubjects = [];
+    try {
+      anchorSubjects = await extractVisualSubjects(megaSubject || mainTopic || allSceneTexts[0], mainTopic);
+      anchorSubjects = anchorSubjects.filter(s => !!s && !GENERIC_SUBJECTS.includes(s.toLowerCase()));
+    } catch (err) {
+      anchorSubjects = [];
+      console.error(`[5D][ANCHOR][${jobId}] Error extracting mega/anchor subject(s):`, err);
+    }
+    if (anchorSubjects && anchorSubjects.length) {
+      searchSubject = anchorSubjects[0];
+      console.log(`[5D][ANCHOR][${jobId}] (MANATEE-PROOF) Using best visual subject for anchor: "${searchSubject}"`);
+    } else if (
+      megaSubject && typeof megaSubject === 'string' &&
+      megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())
     ) {
       searchSubject = megaSubject;
-      console.log(`[5D][ANCHOR][${jobId}] Using megaSubject for first/mega-scene: "${searchSubject}"`);
+      console.log(`[5D][ANCHOR][${jobId}] Fallback to megaSubject for anchor: "${searchSubject}"`);
     } else if (
-      mainTopic &&
-      typeof mainTopic === 'string' &&
-      mainTopic.length > 2 &&
-      !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())
+      mainTopic && typeof mainTopic === 'string' &&
+      mainTopic.length > 2 && !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())
     ) {
       searchSubject = mainTopic;
-      console.log(`[5D][ANCHOR][${jobId}] Fallback to mainTopic for mega-scene: "${searchSubject}"`);
-    } else {
+      console.log(`[5D][ANCHOR][${jobId}] Fallback to mainTopic for anchor: "${searchSubject}"`);
+    } else if (allSceneTexts && allSceneTexts.length > 0) {
       searchSubject = allSceneTexts[0];
       console.log(`[5D][ANCHOR][${jobId}] Final fallback to first scene text: "${searchSubject}"`);
     }
@@ -200,10 +209,9 @@ async function findClipForScene({
     return null;
   }
 
-  // === [A] MULTI-STRATEGY SUBJECT EXTRACTION ===
-
-  // 1. Multi-Subject handler
+  // === [A] MULTI-STRATEGY SUBJECT EXTRACTION (CONCRETE ONLY) ===
   let extractedSubjects = [];
+  // Multi-Subject handler
   try {
     const multiVisual = await extractMultiSubjectVisual(searchSubject, mainTopic);
     if (multiVisual && !GENERIC_SUBJECTS.includes(multiVisual.toLowerCase())) {
@@ -213,8 +221,7 @@ async function findClipForScene({
   } catch (err) {
     console.error(`[5D][MULTI][${jobId}][ERR]`, err);
   }
-
-  // 2. Question fallback
+  // Question fallback
   try {
     const questionVisual = await extractQuestionVisual(searchSubject, mainTopic);
     if (questionVisual && !GENERIC_SUBJECTS.includes(questionVisual.toLowerCase())) {
@@ -224,8 +231,7 @@ async function findClipForScene({
   } catch (err) {
     console.error(`[5D][QUESTION][${jobId}][ERR]`, err);
   }
-
-  // 3. Symbolic/Abstract matcher
+  // Symbolic/Abstract matcher
   try {
     const symbolicVisual = await extractSymbolicVisualSubject(searchSubject, mainTopic);
     if (symbolicVisual && !GENERIC_SUBJECTS.includes(symbolicVisual.toLowerCase())) {
@@ -235,8 +241,7 @@ async function findClipForScene({
   } catch (err) {
     console.error(`[5D][SYMBOLIC][${jobId}][ERR]`, err);
   }
-
-  // 4. Emotion/action/transition
+  // Emotion/action/transition
   try {
     const emotionVisual = await extractEmotionActionVisual(searchSubject, mainTopic);
     if (emotionVisual && !GENERIC_SUBJECTS.includes(emotionVisual.toLowerCase())) {
@@ -246,8 +251,7 @@ async function findClipForScene({
   } catch (err) {
     console.error(`[5D][EMOTION][${jobId}][ERR]`, err);
   }
-
-  // 5. Literal extractor (always last, most literal)
+  // Literal extractor (always last, most literal/concrete)
   try {
     const prioritized = await extractVisualSubjects(searchSubject, mainTopic);
     if (prioritized && prioritized.length) {
@@ -259,10 +263,8 @@ async function findClipForScene({
   } catch (err) {
     console.error(`[5D][LITERAL][${jobId}][ERR]`, err);
   }
-
   // Fallback to original subject if nothing left
   if (!extractedSubjects.length) extractedSubjects.push(searchSubject);
-
   // Dedup (keep order)
   extractedSubjects = [...new Set(extractedSubjects)];
 
@@ -277,7 +279,6 @@ async function findClipForScene({
       console.error(`[5D][REPEAT][${jobId}][ERR]`, err);
     }
   }
-
   // Fallback if nothing passed
   if (!finalSubjects.length) finalSubjects = [searchSubject];
 
@@ -292,7 +293,6 @@ async function findClipForScene({
 
   for (const subjectOption of finalSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
-
     // --- R2 strict ---
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
