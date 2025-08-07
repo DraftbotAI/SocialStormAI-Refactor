@@ -7,8 +7,14 @@
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
-const { findPexelsClipForScene, findPexelsPhotoForScene } = require('./section10b-pexels-clip-helper.cjs');
-const { findPixabayClipForScene, findPixabayPhotoForScene } = require('./section10c-pixabay-clip-helper.cjs');
+const {
+  findPexelsClipForScene,
+  findPexelsPhotoForScene,
+} = require('./section10b-pexels-clip-helper.cjs');
+const {
+  findPixabayClipForScene,
+  findPixabayPhotoForScene,
+} = require('./section10c-pixabay-clip-helper.cjs');
 const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
@@ -22,6 +28,16 @@ const fs = require('fs');
 const path = require('path');
 
 console.log('[5D][INIT] Smart, Video-Preferred, No-Dupe Clip Matcher loaded.');
+
+// Helper load check at startup: will instantly show if any import is broken
+console.log('[5D][DEBUG][HELPERS] Helper load status:');
+console.log('findR2ClipForScene:', !!findR2ClipForScene);
+console.log('findPexelsClipForScene:', !!findPexelsClipForScene);
+console.log('findPixabayClipForScene:', !!findPixabayClipForScene);
+console.log('findPexelsPhotoForScene:', !!findPexelsPhotoForScene);
+console.log('findPixabayPhotoForScene:', !!findPixabayPhotoForScene);
+console.log('findUnsplashImageForScene:', !!findUnsplashImageForScene);
+console.log('fallbackKenBurnsVideo:', !!fallbackKenBurnsVideo);
 
 const GENERIC_SUBJECTS = [
   'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text', 'skyline', 'dubai'
@@ -77,15 +93,11 @@ function scoreCandidate(candidate, subject, isVideo = false, realMatchExists = f
   if (words.every(w => basename.includes(w))) score += 40;
   words.forEach(word => { if (basename.includes(word)) score += 8; });
   if (basename.includes(cleanedSubject)) score += 15;
-
-  // Strong video bias, but not "video or die"
   if (isVideo) score += 70;
   else score -= 35;
-
   if (GENERIC_SUBJECTS.some(g => basename.includes(g))) score -= (realMatchExists ? 2000 : 200);
   if (/\b(sign|logo|text)\b/.test(basename)) score -= (realMatchExists ? 2000 : 200);
   if (candidate.used) score -= 5000;
-
   console.log(`[5D][SCORE] ${candidate.path} | subject="${subject}" | video=${isVideo ? 'Y' : 'N'} | score=${score}`);
   return score;
 }
@@ -151,6 +163,20 @@ async function findClipForScene({
   categoryFolder,
   prevVisualSubjects = [],
 }) {
+  // Sanity check: hard fail if any required helper is missing
+  if (
+    !findR2ClipForScene ||
+    !findPexelsClipForScene ||
+    !findPixabayClipForScene ||
+    !findUnsplashImageForScene ||
+    !findPexelsPhotoForScene ||
+    !findPixabayPhotoForScene ||
+    !fallbackKenBurnsVideo
+  ) {
+    console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
+    throw new Error('[5D][FATAL][HELPERS] One or more clip helpers not loaded! See logs above for which ones.');
+  }
+
   let searchSubject = subject;
 
   // --- Anchor subject logic (MEGA-SCENE + SCENE 1) ---
@@ -199,18 +225,6 @@ async function findClipForScene({
   if (forceClipPath) {
     console.log(`[5D][FORCE][${jobId}] Forcing clip path: ${forceClipPath}`);
     if (assertFileExists(forceClipPath, 'FORCE_CLIP')) return forceClipPath;
-    return null;
-  }
-  if (
-    !findR2ClipForScene ||
-    !findPexelsClipForScene ||
-    !findPixabayClipForScene ||
-    !findUnsplashImageForScene ||
-    !findPexelsPhotoForScene ||
-    !findPixabayPhotoForScene ||
-    !fallbackKenBurnsVideo
-  ) {
-    console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
     return null;
   }
 
