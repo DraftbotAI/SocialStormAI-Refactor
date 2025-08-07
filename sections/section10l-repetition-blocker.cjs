@@ -1,9 +1,9 @@
 // ===========================================================
-// SECTION 10L: REPETITION BLOCKER & VARIETY HANDLER
-// Detects if a subject/visual was recently used too many times.
-// If repeated, returns a new angle, "text-only" scene, or "variety" fallback.
-// Ensures scene variety for maximum retention and viral watch-through.
-// MAX LOGGING every step, crash-proof, never blocks scene flow.
+// SECTION 10L: REPETITION BLOCKER & VARIETY HANDLER (Bulletproof)
+// Detects if a subject/visual was recently used too many times in the video.
+// If repeated, returns a new angle, text-only scene, emoji, or variety fallback.
+// MAX LOGGING every step, never blocks, always returns a valid subject.
+// Anti-generic, anti-silent, anti-infinite. Foolproof.
 // ===========================================================
 
 const axios = require('axios');
@@ -13,54 +13,83 @@ if (!OPENAI_API_KEY) {
   console.error('[10L][FATAL] Missing OPENAI_API_KEY in environment!');
 }
 
+// Extra: Even more generic subjects to block
+const GENERIC_SUBJECTS = [
+  'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something',
+  'body', 'eyes', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text',
+  'boy', 'girl', 'they', 'we', 'background', 'sky', 'view', 'caption', 'photo'
+];
+
+// Normalizer for subject comparison (strict, ignores punctuation/case)
+function normalized(str = '') {
+  return (str || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+    .trim();
+}
+
+function isGeneric(subject = '') {
+  const n = normalized(subject);
+  return GENERIC_SUBJECTS.some(g => n === normalized(g) || n.includes(normalized(g)));
+}
+
 /**
- * Checks the last N subjects for repetition and, if detected,
- * returns a new visual suggestion for variety.
+ * Checks the last N subjects for repetition, returns a variety subject if repeated.
  *
- * @param {string} subject          The current proposed visual subject
- * @param {Array<string>} prevSubjects  Array of previous visual subjects (latest last)
- * @param {object} options              { maxRepeats: 2, varietyMode: "auto" }
+ * @param {string} subject - The current proposed visual subject
+ * @param {Array<string>} prevSubjects - Array of previous visual subjects (latest last)
+ * @param {object} options - { maxRepeats: 2, varietyMode: "auto" }
  * @returns {Promise<string>} New subject suggestion, "text-only", or same subject if no repeat.
  */
 async function breakRepetition(subject, prevSubjects = [], options = {}) {
-  const maxRepeats = options.maxRepeats || 2;
-  const varietyMode = options.varietyMode || 'auto'; // 'auto', 'text-only', 'emoji', etc.
+  const maxRepeats = typeof options.maxRepeats === 'number' ? options.maxRepeats : 2;
+  const varietyMode = options.varietyMode || 'auto';
 
-  // Count how many times the subject appears in the last N
-  const normalized = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   const currNorm = normalized(subject);
   const recent = prevSubjects.slice(-maxRepeats).map(normalized);
   const repeatCount = recent.filter(s => s === currNorm).length;
 
   console.log(`[10L][CHECK] "${subject}" | recent(${maxRepeats}): ${JSON.stringify(recent)} | repeats: ${repeatCount}`);
 
+  // If subject is generic, *always* force variety (never allow repeat of generic)
+  if (isGeneric(subject)) {
+    console.warn(`[10L][GENERIC_BLOCK] Subject "${subject}" is generic, forcing variety fallback.`);
+    return "text-only viral caption card";
+  }
+
   // If not repeated over threshold, return subject as-is
   if (repeatCount < maxRepeats) {
     return subject;
   }
 
-  // Otherwise, ask GPT for a new angle or fallback variety visual
+  // If no OpenAI key, fallback to text-only or emoji/transition
   if (!OPENAI_API_KEY) {
     console.warn('[10L][NO_API] No OpenAI key for variety suggestion.');
     return "text-only viral caption card";
   }
 
   const SYSTEM_PROMPT = `
-You are an expert viral video editor.
+You are a world-class viral video editor.
 The last scenes all used the same visual subject: "${subject}".
-Suggest a new visual scene, angle, or style for the next scene to break the repetition.
-Options include: a new camera angle, a different context, a "viral text card" (text-only), a dramatic emoji/transition card, or a related but new subject.
-Be brief. Output only the new visual suggestion (never a sentence).
+Suggest a NEW visual, angle, style, or related visual for variety:
+- A new camera angle (e.g. "cat from above")
+- Different context or location ("cat with family")
+- Text-only viral caption card
+- Dramatic emoji/transition card
+- Related but new subject
+NEVER repeat the last subject, and NEVER return a generic (like "person", "scene", "caption").
+Be BRIEF. Output only the new visual (max 10 words), never a sentence.
+If truly stuck, say "text-only viral caption card".
 Examples:
-Input: "cat closeup" (after 3 repeats) => "cat jumping from table", "cat text-only caption card", "animated cat emoji card"
+Input: "cat closeup" after 3 repeats → "cat jumping from table", "animated cat emoji card"
+Input: "LeBron James dunk" after 2 repeats → "LeBron James celebrating", "basketball crowd cheering"
 `;
 
   const prompt = `
 Current subject: "${subject}"
 Recent subjects: ${JSON.stringify(prevSubjects.slice(-maxRepeats))}
-Suggest a new visual for variety. Output only the subject or fallback (5-10 words).
-If you can't, reply "text-only viral caption card".
-  `.trim();
+Suggest a NEW visual for variety (5-10 words). If truly stuck, reply "text-only viral caption card". Output ONLY the new visual.
+`.trim();
 
   try {
     console.log(`[10L][PROMPT] ${prompt}`);
@@ -87,7 +116,18 @@ If you can't, reply "text-only viral caption card".
 
     let raw = response.data?.choices?.[0]?.message?.content?.trim() || '';
     raw = raw.replace(/^output\s*[:\-]\s*/i, '').replace(/["'.]+$/g, '').trim();
-    if (!raw || raw.length < 3) raw = "text-only viral caption card";
+
+    // Defensive: Fallback if still generic or empty or repeats the last subject
+    if (
+      !raw ||
+      raw.length < 3 ||
+      isGeneric(raw) ||
+      recent.includes(normalized(raw)) ||
+      normalized(raw) === currNorm
+    ) {
+      console.warn(`[10L][RESULT][NO_VARIETY] Fallback: "${raw}" too generic or still repetitive.`);
+      return "text-only viral caption card";
+    }
 
     console.log(`[10L][RESULT] "${subject}" => "${raw}"`);
     return raw;

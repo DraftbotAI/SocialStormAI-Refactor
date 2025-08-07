@@ -72,19 +72,23 @@ Return ONLY the core visual subject or action in 5-10 words. Never output a sent
       .replace(/^(show|display)\s*/i, '')
       .trim();
 
-    // Sanitize: never empty, never generic
+    // Sanitize: never empty, never generic, fallback to mainTopic or sceneLine
+    const GENERIC = [
+      'something', 'someone', 'person', 'people', 'scene', 'man', 'woman',
+      'it', 'thing', 'they', 'we', 'body', 'face', 'eyes'
+    ];
     if (
       !visual ||
       visual.length < 3 ||
-      [
-        'something', 'someone', 'person', 'people', 'scene', 'man', 'woman', 
-        'it', 'thing', 'they', 'we', 'body', 'face', 'eyes'
-      ].includes(visual.toLowerCase())
+      GENERIC.includes(visual.toLowerCase())
     ) {
-      console.warn('[10H][WARN] Symbolic subject too generic or empty:', visual);
-      visual = mainTopic || sceneLine;
+      console.warn('[10H][WARN] Symbolic subject too generic or empty:', visual, '| Fallback to mainTopic or sceneLine.');
+      visual = mainTopic && typeof mainTopic === 'string' && mainTopic.length > 2
+        ? mainTopic
+        : (sceneLine || 'visual subject');
     }
 
+    // Ultra logging for audit trail
     console.log(`[10H][RESULT] "${sceneLine}" => "${visual}"`);
     return visual;
   } catch (err) {
@@ -93,9 +97,13 @@ Return ONLY the core visual subject or action in 5-10 words. Never output a sent
     } else {
       console.error('[10H][ERR]', err);
     }
-    return mainTopic || sceneLine;
+    // Fallback: never let upstream break, always return something visual
+    const fallback = mainTopic && typeof mainTopic === 'string' && mainTopic.length > 2
+      ? mainTopic
+      : (sceneLine || 'visual subject');
+    console.warn(`[10H][FALLBACK] Returning fallback subject: ${fallback}`);
+    return fallback;
   }
 }
 
 module.exports = { extractSymbolicVisualSubject };
-

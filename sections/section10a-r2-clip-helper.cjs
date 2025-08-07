@@ -1,9 +1,9 @@
 // ===========================================================
-// SECTION 10A: R2 CLIP HELPER (Cloudflare R2)
+// SECTION 10A: R2 CLIP HELPER (Cloudflare R2) - UPGRADED 2024-08
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for parallel dedupe/scan)
-// MAX LOGGING EVERY STEP, Modular System Compatible
-// Uses universal scoreSceneCandidate from 10G (pro match, anti-dupe, anti-generic)
-// Strict, fuzzy, and partial match, never dupe, never silent fail
+// MAX LOGGING EVERY STEP, Modular, Video-Preferred, Anti-Dupe, Multi-Angle
+// Uses universal scoreSceneCandidate from 10G (pro match, anti-generic, pro-topic)
+// Never silent fail. Smart fallback if no strong match.
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
@@ -12,7 +12,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
-console.log('[10A][INIT] R2 clip helper loaded.');
+console.log('[10A][INIT] R2 clip helper (video-first, max logs, multi-angle) loaded.');
 
 const R2_LIBRARY_BUCKET = process.env.R2_LIBRARY_BUCKET || 'socialstorm-library';
 const R2_ENDPOINT = process.env.R2_ENDPOINT;
@@ -33,7 +33,10 @@ const s3Client = new S3Client({
   }
 });
 
-// --- Main: List all files in R2 (with full path relative to bucket root) ---
+// ============================
+// FILE UTILITIES
+// ============================
+
 async function listAllFilesInR2(prefix = '', jobId = '') {
   let files = [];
   let continuationToken;
@@ -61,7 +64,7 @@ async function listAllFilesInR2(prefix = '', jobId = '') {
   }
 }
 
-// --- FILE VALIDATOR: Ensures file exists and is >2kb (not broken)
+// Ensures file exists and is >2kb (not broken)
 function isValidClip(filePath, jobId) {
   try {
     if (!fs.existsSync(filePath)) {
@@ -80,12 +83,12 @@ function isValidClip(filePath, jobId) {
   }
 }
 
-// === UNIVERSAL SUBJECT EXTRACTOR ===
+// ============================
+// SUBJECT AND PHRASE EXTRACTOR
+// ============================
 function extractSubjectAndPhrases(scene) {
-  // Accepts string, object, or array. Returns { subject, matchPhrases }
   if (typeof scene === 'string') return { subject: scene, matchPhrases: [] };
   if (Array.isArray(scene)) {
-    // Use first non-generic as subject, rest as matchPhrases
     const strItems = scene.map(x => typeof x === 'string' ? x : (x.subject || '')).filter(Boolean);
     return {
       subject: strItems[0] || '',
@@ -93,7 +96,6 @@ function extractSubjectAndPhrases(scene) {
     };
   }
   if (scene && typeof scene === 'object') {
-    // Prefers .subject, .main, .matchPhrases, or .tokens fields
     const subject =
       scene.subject ||
       scene.main ||
@@ -107,17 +109,10 @@ function extractSubjectAndPhrases(scene) {
   return { subject: '', matchPhrases: [] };
 }
 
-/**
- * Finds the *best-scoring* video in R2 for the subject, using universal scorer (Section 10G)
- * NEVER returns a dupe; NEVER picks generic/irrelevant if a real match exists.
- * If nothing, returns null (upstream fallback handles images, etc)
- * @param {object|string|array} scene  // { subject, matchPhrases, ... } OR subject string/array
- * @param {string} workDir
- * @param {number} sceneIdx
- * @param {string} jobId
- * @param {string[]} usedClips
- * @returns {Promise<string|null>} Local video path (or null if not found)
- */
+// ============================
+// MAIN MATCHER (VIDEO-FIRST)
+// ============================
+
 async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
   const { subject, matchPhrases } = extractSubjectAndPhrases(scene);
 
@@ -129,13 +124,14 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
   console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${subject}" | sceneIdx=${sceneIdx} | workDir="${workDir}" | usedClips=${JSON.stringify(usedClips)}`);
 
   try {
+    // === 1. List all mp4 files from R2 (with path info for category logic)
     const files = await listAllFilesInR2('', jobId);
     if (!files.length) {
       console.warn(`[10A][R2][${jobId}][WARN] No files found in R2 bucket!`);
       return null;
     }
 
-    // Only .mp4s, never a usedClip (basename or full R2 key)
+    // === 2. Only .mp4s, never a usedClip (basename or full R2 key)
     const mp4Files = files.filter(f =>
       f.endsWith('.mp4') &&
       !usedClips.some(u => f.endsWith(u) || f === u || path.basename(f) === u)
@@ -145,19 +141,41 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       return null;
     }
 
-    // Build candidate objects for scoring
-    const candidates = mp4Files.map(f => ({
-      type: 'video',
-      source: 'r2',
-      path: f,
-      filename: path.basename(f),
-      subject,
-      matchPhrases,
-      scene: (typeof scene === 'object') ? scene : { subject, matchPhrases },
-      isVideo: true
-    }));
+    // === 3. Candidate building with advanced keyword/topic/cat/angle logic
+    const keywords = [subject, ...(matchPhrases || [])].map(k => typeof k === 'string' ? k.toLowerCase().replace(/[^a-z0-9_ ]+/gi, '') : '').filter(Boolean);
+    // Try category prioritization based on folder name
+    const catFolders = ['lore_history_mystery_horror','sports_fitness','cars_vehicles','animals_primates','misc'];
+    let relevantFiles = mp4Files;
 
-    // Score with universal helper (Section 10G)
+    // Optional: prioritize files in topic-aligned folders
+    for (let folder of catFolders) {
+      if (subject.toLowerCase().includes(folder.replace(/_/g, ' '))) {
+        relevantFiles = mp4Files.filter(f => f.includes(folder));
+        if (relevantFiles.length) break;
+      }
+    }
+
+    // === 4. Build candidates array
+    const candidates = relevantFiles.map(f => {
+      // Extract "topic" and "angle" from filename
+      const base = path.basename(f, '.mp4');
+      const [topicPart, ...rest] = base.split('_');
+      return {
+        type: 'video',
+        source: 'r2',
+        path: f,
+        filename: path.basename(f),
+        subject,
+        matchPhrases,
+        category: catFolders.find(cat => f.includes(cat)) || 'misc',
+        topic: topicPart,
+        angle: rest.join('_'),
+        scene,
+        isVideo: true
+      };
+    });
+
+    // === 5. Score with universal helper (Section 10G)
     const scored = candidates.map(candidate => ({
       ...candidate,
       score: scoreSceneCandidate(candidate, candidate.scene, usedClips)
@@ -172,7 +190,18 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
         .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.path} | score=${s.score}`));
     }
 
-    // Filter out true irrelevants (score <20) IF a strong match exists (score >=80)
+    // === 6. Prefer "multi-angle" / non-duplicate for same topic
+    const multiAngle = scored.filter(s => s.topic === subject.toLowerCase().replace(/ /g, '_'));
+    if (multiAngle.length) {
+      multiAngle.sort((a, b) => b.score - a.score);
+      const bestAngle = multiAngle[0];
+      if (bestAngle && bestAngle.score >= 35 && !usedClips.includes(bestAngle.path)) {
+        console.log(`[10A][R2][${jobId}][MULTIANGLE][SELECTED] ${bestAngle.path} | score=${bestAngle.score}`);
+        return await downloadAndValidate(bestAngle.path, workDir, sceneIdx, jobId, usedClips);
+      }
+    }
+
+    // === 7. Filter out true irrelevants (score <20) IF a strong match exists (score >=80)
     const maxScore = Math.max(...scored.map(s => s.score));
     const hasGoodMatch = maxScore >= 80;
     let eligible = scored;
@@ -197,7 +226,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       return null;
     }
 
-    // Log how/why this candidate was chosen
+    // Log why this candidate was chosen
     if (best.score >= 100) {
       console.log(`[10A][R2][${jobId}][SELECTED][STRICT] ${best.path} | score=${best.score}`);
     } else if (best.score >= 80) {
@@ -210,49 +239,54 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] No strong match, using best available: ${best.path} | score=${best.score}`);
     }
 
-    // Download logic (always download to local workDir, uniquely named for dedupe)
-    const unique = uuidv4();
-    const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2-${unique}.mp4`);
-    if (fs.existsSync(outPath) && isValidClip(outPath, jobId)) {
-      console.log(`[10A][R2][${jobId}] File already downloaded: ${outPath}`);
-      return outPath;
-    }
-    console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${best.path} -> ${outPath}`);
-
-    // Download from R2
-    const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: best.path });
-    const resp = await s3Client.send(getCmd);
-
-    await new Promise((resolve, reject) => {
-      const stream = resp.Body;
-      const fileStream = fs.createWriteStream(outPath);
-      stream.pipe(fileStream);
-      stream.on('end', resolve);
-      stream.on('error', (err) => {
-        console.error(`[10A][R2][${jobId}][ERR] Stream error during download:`, err);
-        reject(err);
-      });
-      fileStream.on('finish', () => {
-        console.log(`[10A][R2][${jobId}] Clip downloaded to: ${outPath}`);
-        resolve();
-      });
-      fileStream.on('error', (err) => {
-        console.error(`[10A][R2][${jobId}][ERR] Write error during download:`, err);
-        reject(err);
-      });
-    });
-
-    if (!isValidClip(outPath, jobId)) {
-      console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
-      return null;
-    }
-
-    return outPath;
+    // === 8. Download and return local path
+    return await downloadAndValidate(best.path, workDir, sceneIdx, jobId, usedClips);
 
   } catch (err) {
     console.error(`[10A][R2][${jobId}][ERR] findR2ClipForScene failed:`, err);
     return null;
   }
+}
+
+// --- Helper: Download, validate, and return local path
+async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
+  const unique = uuidv4();
+  const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2-${unique}.mp4`);
+  if (fs.existsSync(outPath) && isValidClip(outPath, jobId)) {
+    console.log(`[10A][R2][${jobId}] File already downloaded: ${outPath}`);
+    return outPath;
+  }
+  console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${r2Key} -> ${outPath}`);
+
+  const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: r2Key });
+  const resp = await s3Client.send(getCmd);
+
+  await new Promise((resolve, reject) => {
+    const stream = resp.Body;
+    const fileStream = fs.createWriteStream(outPath);
+    stream.pipe(fileStream);
+    stream.on('end', resolve);
+    stream.on('error', (err) => {
+      console.error(`[10A][R2][${jobId}][ERR] Stream error during download:`, err);
+      reject(err);
+    });
+    fileStream.on('finish', () => {
+      console.log(`[10A][R2][${jobId}] Clip downloaded to: ${outPath}`);
+      resolve();
+    });
+    fileStream.on('error', (err) => {
+      console.error(`[10A][R2][${jobId}][ERR] Write error during download:`, err);
+      reject(err);
+    });
+  });
+
+  if (!isValidClip(outPath, jobId)) {
+    console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+    return null;
+  }
+
+  usedClips.push(r2Key);
+  return outPath;
 }
 
 // === Static export for advanced dedupe (used by 5D) ===

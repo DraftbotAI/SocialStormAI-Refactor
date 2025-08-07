@@ -1,289 +1,229 @@
 // ===========================================================
 // SECTION 10B: PEXELS CLIP HELPER (Video & Photo Search & Download)
-// Exports: 
+// Exports:
 //   - findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
 //   - findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips)
 // Bulletproof: always tries all options, never blocks on strict match
 // Max logs at every step, accepts best available, NO silent fails
-// Universal subject/object scoring, anti-dupe, anti-generic
+// 2024-08: Ready for universal scoring, anti-dupe, anti-generic, max debug
 // ===========================================================
 
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
-// === Universal scorer from Section 10G ===
-let scoreSceneCandidate = null;
-try {
-  scoreSceneCandidate = require('./section10g-scene-scoring-helper.cjs').scoreSceneCandidate;
-  console.log('[10B][INIT] Universal scene scorer loaded.');
-} catch (e) {
-  console.warn('[10B][INIT][WARN] Universal scene scorer NOT loaded, using fallback scoring.');
-}
-
-console.log('[10B][INIT] Pexels clip helper loaded.');
-
-const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
+const PEXELS_API_KEY = process.env.PEXELS_API_KEY || '';
 if (!PEXELS_API_KEY) {
-  console.error('[10B][FATAL] Missing PEXELS_API_KEY in environment!');
+  console.error('[10B][FATAL] Missing PEXELS_API_KEY in env!');
 }
 
-// --- File validation ---
-function isValidClip(filePath, jobId, minSize = 2048) {
-  try {
-    if (!fs.existsSync(filePath)) {
-      console.warn(`[10B][DL][${jobId}] File does not exist: ${filePath}`);
-      return false;
-    }
-    const size = fs.statSync(filePath).size;
-    if (size < minSize) {
-      console.warn(`[10B][DL][${jobId}] File too small or broken: ${filePath} (${size} bytes)`);
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.error(`[10B][DL][${jobId}] File validation error:`, err);
-    return false;
-  }
-}
+console.log('[10B][INIT] Pexels helper loaded.');
 
-// --- Download video from Pexels to local file ---
-async function downloadPexelsVideoToLocal(url, outPath, jobId) {
+const PEXELS_VIDEO_URL = 'https://api.pexels.com/videos/search';
+const PEXELS_PHOTO_URL = 'https://api.pexels.com/v1/search';
+
+async function downloadFile(url, outPath, jobId) {
   try {
-    console.log(`[10B][DL][${jobId}] Downloading Pexels video: ${url} -> ${outPath}`);
-    const response = await axios.get(url, { responseType: 'stream' });
+    const response = await axios({
+      url,
+      method: 'GET',
+      responseType: 'stream',
+      headers: { 'Authorization': PEXELS_API_KEY }
+    });
+
     await new Promise((resolve, reject) => {
-      const stream = response.data.pipe(fs.createWriteStream(outPath));
-      stream.on('finish', () => {
-        console.log(`[10B][DL][${jobId}] Video saved to: ${outPath}`);
-        resolve();
+      const fileStream = fs.createWriteStream(outPath);
+      response.data.pipe(fileStream);
+      response.data.on('error', (err) => {
+        console.error(`[10B][${jobId}][DOWNLOAD][ERR] Stream error:`, err);
+        reject(err);
       });
-      stream.on('error', (err) => {
-        console.error('[10B][DL][ERR]', err);
+      fileStream.on('finish', resolve);
+      fileStream.on('error', (err) => {
+        console.error(`[10B][${jobId}][DOWNLOAD][ERR] File write error:`, err);
         reject(err);
       });
     });
-    if (!isValidClip(outPath, jobId)) {
-      console.warn(`[10B][DL][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 2048) {
+      console.log(`[10B][${jobId}][DOWNLOAD][OK] File downloaded: ${outPath}`);
+      return outPath;
+    } else {
+      console.warn(`[10B][${jobId}][DOWNLOAD][WARN] Downloaded file invalid/broken: ${outPath}`);
       return null;
     }
-    return outPath;
   } catch (err) {
-    console.error('[10B][DL][ERR]', err);
+    console.error(`[10B][${jobId}][DOWNLOAD][ERR] Download failed:`, err);
     return null;
   }
 }
 
-// --- Download photo from Pexels to local file ---
-async function downloadPexelsPhotoToLocal(url, outPath, jobId) {
-  try {
-    console.log(`[10B][DL][${jobId}] Downloading Pexels photo: ${url} -> ${outPath}`);
-    const response = await axios.get(url, { responseType: 'stream' });
-    await new Promise((resolve, reject) => {
-      const stream = response.data.pipe(fs.createWriteStream(outPath));
-      stream.on('finish', () => {
-        console.log(`[10B][DL][${jobId}] Photo saved to: ${outPath}`);
-        resolve();
-      });
-      stream.on('error', (err) => {
-        console.error('[10B][DL][ERR]', err);
-        reject(err);
-      });
-    });
-    if (!isValidClip(outPath, jobId, 2048)) {
-      console.warn(`[10B][DL][${jobId}] Downloaded photo file is invalid/broken: ${outPath}`);
-      return null;
-    }
-    return outPath;
-  } catch (err) {
-    console.error('[10B][DL][ERR]', err);
-    return null;
-  }
+// --- Universal candidate builder for scoring ---
+function buildCandidates(items, subject, source, isVideo) {
+  return items.map(item => ({
+    ...item,
+    type: isVideo ? 'video' : 'photo',
+    source,
+    subject,
+    isVideo,
+    score: 0, // Score will be filled in after
+  }));
 }
 
-// --- Anti-dupe check (checks both URL and basename) ---
-function isDupe(fileUrl, usedClips = []) {
-  if (!fileUrl) return false;
-  const base = path.basename(fileUrl);
-  return usedClips.some(u =>
-    (typeof u === 'string') &&
-    (
-      u === fileUrl ||
-      u === base ||
-      fileUrl.endsWith(u) ||
-      base === u
-    )
-  );
-}
+// ===========================================================
+// MAIN VIDEO FINDER
+// ===========================================================
 
-// --- SCORING WRAPPER: always uses the universal scorer if loaded ---
-function scorePexelsVideo(video, file, subject, usedClips = [], scene = null) {
-  if (typeof scoreSceneCandidate === 'function') {
-    const candidate = {
-      type: 'video',
-      source: 'pexels',
-      file: file.link,
-      filename: path.basename(file.link),
-      subject,
-      pexelsFile: file,
-      scene,
-      isVideo: true
-    };
-    return scoreSceneCandidate(candidate, scene || subject, usedClips);
-  }
-  // Fallback score (only used if scorer fails to load, logs warning)
-  return Math.random() * 100 - (isDupe(file.link, usedClips) ? 100 : 0);
-}
-
-function scorePexelsPhoto(photo, subject, usedClips = []) {
-  if (typeof scoreSceneCandidate === 'function') {
-    const candidate = {
-      type: 'photo',
-      source: 'pexels',
-      file: photo.src.original,
-      filename: path.basename(photo.src.original),
-      subject,
-      photo,
-      isVideo: false
-    };
-    return scoreSceneCandidate(candidate, subject, usedClips);
-  }
-  // Fallback score (only used if scorer fails to load, logs warning)
-  return Math.random() * 100 - (isDupe(photo.src.original, usedClips) ? 80 : 0);
-}
-
-/**
- * Finds and downloads the best Pexels video for a given subject/scene,
- * using strict/fuzzy/partial keyword matching. Will always pick the best result available.
- * @returns {Promise<string|null>} Local .mp4 path, or null
- */
 async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
-  // Pass object/array/string subject directly to scoring logic!
-  const scene = subject;
-  let logSubject = (typeof subject === 'object' && subject.subject) ? subject.subject : subject;
-  console.log(`[10B][PEXELS][${jobId}] findPexelsClipForScene | subject="${logSubject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
-
   if (!PEXELS_API_KEY) {
-    console.error('[10B][PEXELS][ERR] No Pexels API key set!');
+    console.error('[10B][FATAL] No PEXELS_API_KEY!');
     return null;
   }
-  try {
-    // If subject is object/array, use main for query, but pass full subject to scoring
-    let queryStr = (typeof subject === 'object' && subject.subject) ? subject.subject : (Array.isArray(subject) ? subject[0] : subject);
-    const query = encodeURIComponent(String(queryStr || '').replace(/[^\w\s]/gi, '').trim());
-    const url = `https://api.pexels.com/videos/search?query=${query}&per_page=15`;
-    console.log(`[10B][PEXELS][${jobId}] Searching: ${url}`);
-    const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY } });
 
-    if (resp.data && resp.data.videos && resp.data.videos.length > 0) {
-      let scored = [];
-      for (const video of resp.data.videos) {
-        const files = (video.video_files || []).filter(f => f.file_type === 'video/mp4');
-        for (const file of files) {
-          if (isDupe(file.link, usedClips)) {
-            console.log(`[10B][PEXELS][${jobId}][DUPE] Skipping duplicate file: ${file.link}`);
-            continue;
-          }
-          const score = scorePexelsVideo(video, file, scene, usedClips, scene);
-          scored.push({ video, file, score });
-        }
-      }
-      scored.sort((a, b) => b.score - a.score);
-      scored.slice(0, 7).forEach((s, i) =>
-        console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`)
-      );
-      const maxScore = scored.length ? scored[0].score : -999;
-      const hasGoodMatch = maxScore >= 80;
-      let eligible = scored;
-      if (hasGoodMatch) {
-        eligible = scored.filter(s => s.score >= 20);
-        if (eligible.length < scored.length) {
-          console.log(`[10B][PEXELS][${jobId}] [FILTER] Blocked ${scored.length - eligible.length} irrelevants — real match exists.`);
-        }
-      }
-      let best = eligible.find(s => s.score > 5) || eligible[0];
-      if (!best && eligible.length > 0) best = eligible[0];
-      if (best) {
-        console.log(`[10B][PEXELS][${jobId}][PICKED] Selected: ${best.file.link} | score=${best.score}`);
-        const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
-        const resultPath = await downloadPexelsVideoToLocal(best.file.link, outPath, jobId);
-        if (resultPath) return resultPath;
-      } else {
-        console.warn(`[10B][PEXELS][${jobId}] No Pexels videos matched subject, but candidates were returned.`);
+  // ---- 1. Search for videos
+  try {
+    console.log(`[10B][VIDEO][${jobId}] Searching Pexels for: "${subject}"`);
+    const res = await axios.get(PEXELS_VIDEO_URL, {
+      params: { query: subject, per_page: 20 },
+      headers: { Authorization: PEXELS_API_KEY }
+    });
+    const videos = (res.data && res.data.videos) ? res.data.videos : [];
+    if (!videos.length) {
+      console.warn(`[10B][VIDEO][${jobId}] No videos found for "${subject}"`);
+      return null;
+    }
+
+    // Build scored candidates, filter by used
+    const candidates = videos.map(video => {
+      // Best quality fallback
+      const bestFile = video.video_files.sort((a, b) => b.width - a.width)[0];
+      return {
+        pexelsId: video.id,
+        url: bestFile.link,
+        width: bestFile.width,
+        height: bestFile.height,
+        duration: video.duration,
+        photographer: video.user && video.user.name,
+        title: video.url,
+        tags: video.tags || [],
+        subject,
+        isVideo: true,
+        path: null, // Will be filled after download
+      };
+    }).filter(video => {
+      // Try to avoid re-downloading files if URL matches any used
+      return !usedClips.includes(video.url);
+    });
+
+    // Score each candidate
+    candidates.forEach(c => {
+      c.score = scoreSceneCandidate(c, subject, usedClips);
+    });
+
+    candidates.sort((a, b) => b.score - a.score);
+    if (!candidates.length) {
+      console.warn(`[10B][VIDEO][${jobId}] No valid video candidates to download.`);
+      return null;
+    }
+
+    // Pick best candidate
+    const best = candidates[0];
+    const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${best.pexelsId}.mp4`);
+
+    // Download if not already exists
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 2048) {
+      console.log(`[10B][VIDEO][${jobId}] Downloading Pexels video: ${best.url} -> ${outPath}`);
+      const dl = await downloadFile(best.url, outPath, jobId);
+      if (!dl) {
+        console.warn(`[10B][VIDEO][${jobId}] Download failed: ${best.url}`);
+        return null;
       }
     } else {
-      console.log(`[10B][PEXELS][${jobId}] No Pexels video results found for "${logSubject}"`);
+      console.log(`[10B][VIDEO][${jobId}] Video already downloaded: ${outPath}`);
     }
-    return null;
+
+    best.path = outPath;
+    usedClips.push(outPath);
+
+    console.log(`[10B][VIDEO][${jobId}] Best Pexels video selected: ${outPath} | score=${best.score}`);
+    return outPath;
   } catch (err) {
-    if (err.response?.data) {
-      console.error('[10B][PEXELS][ERR]', JSON.stringify(err.response.data));
-    } else {
-      console.error('[10B][PEXELS][ERR]', err);
-    }
+    console.error(`[10B][VIDEO][${jobId}][ERR]`, err);
     return null;
   }
 }
 
-/**
- * Finds and downloads the best Pexels photo for a given subject/scene,
- * using strict/fuzzy/partial keyword matching. Returns path to the saved photo or null.
- * @returns {Promise<string|null>} Local image file path, or null
- */
+// ===========================================================
+// PHOTO FALLBACK FINDER
+// ===========================================================
+
 async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
-  const scene = subject;
-  let logSubject = (typeof subject === 'object' && subject.subject) ? subject.subject : subject;
-  console.log(`[10B][PEXELS_PHOTO][${jobId}] findPexelsPhotoForScene | subject="${logSubject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
-
   if (!PEXELS_API_KEY) {
-    console.error('[10B][PEXELS_PHOTO][ERR] No Pexels API key set!');
+    console.error('[10B][FATAL] No PEXELS_API_KEY!');
     return null;
   }
-  try {
-    let queryStr = (typeof subject === 'object' && subject.subject) ? subject.subject : (Array.isArray(subject) ? subject[0] : subject);
-    const query = encodeURIComponent(String(queryStr || '').replace(/[^\w\s]/gi, '').trim());
-    const url = `https://api.pexels.com/v1/search?query=${query}&per_page=15`;
-    console.log(`[10B][PEXELS_PHOTO][${jobId}] Searching: ${url}`);
-    const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY } });
 
-    if (resp.data && resp.data.photos && resp.data.photos.length > 0) {
-      let scored = [];
-      for (const photo of resp.data.photos) {
-        if (isDupe(photo.src.original, usedClips)) {
-          console.log(`[10B][PEXELS_PHOTO][${jobId}][DUPE] Skipping duplicate photo: ${photo.src.original}`);
-          continue;
-        }
-        const score = scorePexelsPhoto(photo, scene, usedClips);
-        scored.push({ photo, score });
-      }
-      scored.sort((a, b) => b.score - a.score);
-      scored.slice(0, 7).forEach((s, i) =>
-        console.log(`[10B][PEXELS_PHOTO][${jobId}][CANDIDATE][${i + 1}] ${s.photo.src.original} | score=${s.score} | size=${s.photo.width}x${s.photo.height}`)
-      );
-      let best = scored.find(s => s.score > 5) || scored[0];
-      if (!best && scored.length > 0) best = scored[0];
-      if (best) {
-        console.log(`[10B][PEXELS_PHOTO][${jobId}][PICKED] Selected: ${best.photo.src.original} | score=${best.score}`);
-        const ext = path.extname(best.photo.src.original) || '.jpg';
-        const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-photo-${uuidv4()}${ext}`);
-        const resultPath = await downloadPexelsPhotoToLocal(best.photo.src.original, outPath, jobId);
-        if (resultPath) return resultPath;
-      } else {
-        console.warn(`[10B][PEXELS_PHOTO][${jobId}] No Pexels photos matched subject, but candidates were returned.`);
+  try {
+    console.log(`[10B][PHOTO][${jobId}] Searching Pexels Photos for: "${subject}"`);
+    const res = await axios.get(PEXELS_PHOTO_URL, {
+      params: { query: subject, per_page: 20 },
+      headers: { Authorization: PEXELS_API_KEY }
+    });
+    const photos = (res.data && res.data.photos) ? res.data.photos : [];
+    if (!photos.length) {
+      console.warn(`[10B][PHOTO][${jobId}] No photos found for "${subject}"`);
+      return null;
+    }
+
+    // Build scored candidates, avoid used
+    const candidates = photos.map(photo => ({
+      pexelsId: photo.id,
+      url: photo.src && (photo.src.large2x || photo.src.original || photo.src.large),
+      width: photo.width,
+      height: photo.height,
+      photographer: photo.photographer,
+      subject,
+      isVideo: false,
+      path: null, // Will be filled after download
+    })).filter(photo => photo.url && !usedClips.includes(photo.url));
+
+    candidates.forEach(c => {
+      c.score = scoreSceneCandidate(c, subject, usedClips);
+    });
+
+    candidates.sort((a, b) => b.score - a.score);
+    if (!candidates.length) {
+      console.warn(`[10B][PHOTO][${jobId}] No valid photo candidates to download.`);
+      return null;
+    }
+
+    const best = candidates[0];
+    const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-photo-${best.pexelsId}.jpg`);
+
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
+      console.log(`[10B][PHOTO][${jobId}] Downloading Pexels photo: ${best.url} -> ${outPath}`);
+      const dl = await downloadFile(best.url, outPath, jobId);
+      if (!dl) {
+        console.warn(`[10B][PHOTO][${jobId}] Download failed: ${best.url}`);
+        return null;
       }
     } else {
-      console.log(`[10B][PEXELS_PHOTO][${jobId}] No Pexels photo results found for "${logSubject}"`);
+      console.log(`[10B][PHOTO][${jobId}] Photo already downloaded: ${outPath}`);
     }
-    return null;
+
+    best.path = outPath;
+    usedClips.push(outPath);
+
+    console.log(`[10B][PHOTO][${jobId}] Best Pexels photo selected: ${outPath} | score=${best.score}`);
+    return outPath;
   } catch (err) {
-    if (err.response?.data) {
-      console.error('[10B][PEXELS_PHOTO][ERR]', JSON.stringify(err.response.data));
-    } else {
-      console.error('[10B][PEXELS_PHOTO][ERR]', err);
-    }
+    console.error(`[10B][PHOTO][${jobId}][ERR]`, err);
     return null;
   }
 }
 
-module.exports = { findPexelsClipForScene, findPexelsPhotoForScene };
+module.exports = {
+  findPexelsClipForScene,
+  findPexelsPhotoForScene
+};

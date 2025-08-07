@@ -1,34 +1,26 @@
 // ===========================================================
-// SECTION 11: GPT VISUAL SUBJECT EXTRACTOR (PROD VERSION)
+// SECTION 11: GPT VISUAL SUBJECT EXTRACTOR (BULLETPROOF V2)
 // Returns the top 4 visual subject candidates for any script line.
 // Order: Exact > Contextual > Symbolic > General Fallback
 // Bulletproof: Handles blank, weird, or failed GPT cases.
-// Super max logging, deterministic, no silent failures.
-// ============================================================
+// Filters generics, always returns strong non-generic visuals.
+// MAX LOGGING, deterministic, crash-proof, never silent-fails.
+// ===========================================================
 
-const { ChatGPTAPI } = require('chatgpt'); // You can swap this to your preferred OpenAI SDK
-const path = require('path');
-const fs = require('fs');
+const axios = require('axios');
 
-const apiKey = process.env.OPENAI_API_KEY;
-if (!apiKey) throw new Error('[11][FATAL] OPENAI_API_KEY not set in env!');
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+if (!OPENAI_API_KEY) throw new Error('[11][FATAL] OPENAI_API_KEY not set in env!');
 
-const gpt = new ChatGPTAPI({ apiKey });
+const GENERIC_SUBJECTS = [
+  'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes',
+  'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text',
+  'view', 'image', 'photo', 'background', 'object'
+];
 
 console.log('[11][INIT] Visual Subject Extractor module loaded');
 
-async function extractVisualSubjects(line, mainTopic) {
-  try {
-    console.log(`[11][INPUT] Script line: "${line}"`);
-    console.log(`[11][INPUT] Main topic: "${mainTopic}"`);
-
-    if (!line || typeof line !== 'string' || !line.trim()) {
-      console.warn('[11][WARN] Blank/invalid line. Returning main topic as fallback.');
-      return [mainTopic, mainTopic, mainTopic, mainTopic];
-    }
-
-    // === The prompt ===
-    const prompt = `
+const SYSTEM_PROMPT = `
 You are a world-class viral video editor for TikTok, Reels, and Shorts. For each line of a script, your ONLY job is to pick the 4 best possible VISUAL subjects to show in that scene.
 
 RULES:
@@ -37,7 +29,9 @@ RULES:
 - If a line is not visually showable, use the main topic as fallback.
 - Each answer should be concrete, visual, and unambiguous.
 - No duplicate items, no vague generalities.
-
+- Never return: person, people, scene, thing, face, eyes, body, it, something, someone, view, image, photo, background, object.
+- Prefer viral, famous, or highly clickable visuals.
+- If the line includes multiple strong subjects, combine them in one (e.g., "cat and dog together").
 Return **EXACTLY** 4, in order: primary, context, fallback, general.
 Output ONLY a numbered list. No intro, no explanation, no extra info.
 
@@ -64,96 +58,12 @@ Main topic: "Cooking"
 3. Chef chopping vegetables
 4. Cutting board with vegetables
 
-Line: "Now sauté everything until golden brown."
-Main topic: "Cooking"
-1. Sauté pan on stove
-2. Onions and garlic in pan
-3. Wooden spatula stirring food
-4. Pan with golden-brown food
-
-Line: "Steph Curry pulls up from deep."
-Main topic: "NBA basketball"
-1. Steph Curry shooting a 3-pointer
-2. Golden State Warriors court
-3. Crowd watching basketball game
-4. Basketball in mid-air
-
-Line: "Check your credit card statement for these charges."
-Main topic: "Personal finance"
-1. Credit card statement paper
-2. Hand holding credit card
-3. Online banking screen
-4. Calculator and bills on table
-
-Line: "Always wear sunscreen, even on cloudy days."
-Main topic: "Skin care"
-1. Person applying sunscreen to face
-2. Sunscreen bottle
-3. Sun shining behind clouds
-4. Close-up of skin
-
-Line: "Let's hike to the top of Angel's Landing."
-Main topic: "Travel"
-1. Angel's Landing mountain
-2. People hiking on a trail
-3. Panoramic view from summit
-4. National park landscape
-
-Line: "Tie the scarf with a simple knot for a classic look."
-Main topic: "Fashion"
-1. Person tying a scarf
-2. Close-up of scarf knot
-3. Scarf draped on mannequin
-4. Various scarf styles
-
-Line: "Plug the HDMI cable into your laptop and TV."
-Main topic: "Tech tutorial"
-1. HDMI cable
-2. Hand plugging cable into laptop
-3. Laptop and TV side-by-side
-4. HDMI ports on devices
-
-Line: "Fold the paper in half and crease firmly."
-Main topic: "DIY crafts"
-1. Hands folding paper
-2. Paper being creased
-3. Close-up of origami fold
-4. Stack of folded papers
-
-Line: "Whisk the eggs and sugar until fluffy."
-Main topic: "Baking"
-1. Whisk in bowl with eggs and sugar
-2. Fluffy egg mixture
-3. Hand whisking ingredients
-4. Baking setup on kitchen counter
-
-Line: "Decorate the Christmas tree with lights."
-Main topic: "Christmas"
-1. Christmas tree with lights
-2. Person hanging ornaments
-3. Box of decorations
-4. Living room decorated for holidays
-
-Line: "Do 10 pushups to finish strong."
-Main topic: "Home workout"
-1. Person doing pushups
-2. Fitness mat on floor
-3. Trainer demonstrating exercise
-4. Close-up of hands on mat
-
 Line: "Pour the coffee and enjoy your morning."
 Main topic: "Morning routine"
 1. Coffee being poured into mug
 2. Steaming cup of coffee
 3. Breakfast table setup
 4. Sunlight through kitchen window
-
-Line: "Click the subscribe button to stay updated."
-Main topic: "YouTube channel"
-1. Mouse cursor on subscribe button
-2. YouTube page on laptop
-3. Notification bell icon
-4. Person watching video on phone
 
 Line: "Slice the avocado and remove the pit."
 Main topic: "Healthy eating"
@@ -162,78 +72,96 @@ Main topic: "Healthy eating"
 3. Cutting board with avocado halves
 4. Bowl of fresh avocado slices
 
-Line: "The puppy wags its tail when it sees you."
-Main topic: "Cute animals"
-1. Puppy wagging tail
-2. Dog looking up at person
-3. Owner petting puppy
-4. Dog park scene
-
-Line: "Pour the cement and smooth it out."
-Main topic: "Home improvement"
-1. Wet cement being poured
-2. Worker smoothing cement with trowel
-3. Construction site foundation
-4. Finished smooth cement floor
-
-Line: "Scan the QR code to join."
-Main topic: "Event sign-up"
-1. QR code on screen
-2. Person scanning with phone
-3. Event invitation flyer
-4. Group of people at event
-
-Line: "Add chili flakes for a spicy kick."
-Main topic: "Cooking"
-1. Chili flakes being sprinkled
-2. Spicy dish in bowl
-3. Red chili peppers
-4. Close-up of food with spices
-
 NOW RETURN:
-Line: "${line}"
-Main topic: "${mainTopic}"
+Line: "{{LINE}}"
+Main topic: "{{TOPIC}}"
 `;
 
-    // ========== MAIN GPT CALL ==========
-    const res = await gpt.sendMessage(prompt);
+function isGeneric(phrase) {
+  return GENERIC_SUBJECTS.some(g =>
+    (phrase || '').toLowerCase().replace(/[^a-z0-9]+/g, '').includes(g.replace(/[^a-z0-9]+/g, ''))
+  );
+}
 
-    // ========== Parse GPT response (numbered list) ==========
-    let list = [];
-    if (res && typeof res.text === 'string') {
-      list = res.text
-        .trim()
-        .split('\n')
-        .map(l => l.replace(/^\d+[\.\)]\s*/, '').replace(/^- /, '').trim())
-        .map(l => l.replace(/[^A-Za-z0-9,\-\'\"\.\!\(\)\:\&\s\/]/g, '')) // strip any emoji or GPT weirdness
-        .filter(Boolean);
+async function extractVisualSubjects(line, mainTopic) {
+  try {
+    console.log(`[11][INPUT] Script line: "${line}"`);
+    console.log(`[11][INPUT] Main topic: "${mainTopic}"`);
+
+    if (!line || typeof line !== 'string' || !line.trim()) {
+      console.warn('[11][WARN] Blank/invalid line. Returning main topic as fallback.');
+      return [mainTopic, mainTopic, mainTopic, mainTopic];
     }
 
-    // ========== Deduplicate, validate, enforce exactly 4 ==========
+    const prompt = SYSTEM_PROMPT
+      .replace('{{LINE}}', line)
+      .replace('{{TOPIC}}', mainTopic);
+
+    // GPT CALL (OpenAI v1/chat/completions endpoint)
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: `
+Line: "${line}"
+Main topic: "${mainTopic}"
+Return a numbered list of exactly 4. No generics, no explanations.
+` }
+        ],
+        max_tokens: 70,
+        temperature: 0.40,
+        n: 1,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 18000,
+      }
+    );
+
+    let raw = response.data?.choices?.[0]?.message?.content?.trim() || '';
+    // LOG raw GPT output
+    console.log('[11][RAW GPT OUTPUT]', JSON.stringify(raw));
+
+    // Parse: number list, strip generics
+    let list = raw
+      .split('\n')
+      .map(l => l.replace(/^\d+[\.\)]\s*/, '').replace(/^- /, '').trim())
+      .filter(l => l && !isGeneric(l) && l.length > 2);
+
+    // Deduplicate, enforce 4 only
     const seen = new Set();
     let finalList = [];
     for (let item of list) {
-      if (item && !seen.has(item.toLowerCase()) && item.length > 2) {
-        seen.add(item.toLowerCase());
+      const clean = (item || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      if (item && !seen.has(clean)) {
+        seen.add(clean);
         finalList.push(item);
       }
       if (finalList.length === 4) break;
     }
-    // Always return 4 items, padding with mainTopic if needed
-    while (finalList.length < 4) finalList.push(mainTopic);
+
+    // Always pad to 4, no generics, no blanks
+    while (finalList.length < 4) {
+      if (!finalList.includes(mainTopic)) finalList.push(mainTopic);
+      else finalList.push(mainTopic + ' scene');
+    }
     if (finalList.length > 4) finalList = finalList.slice(0, 4);
 
     console.log('[11][RESULT] Visual subjects:', finalList);
     return finalList;
   } catch (err) {
-    console.error('[11][ERROR] GPT visual extraction failed:', err);
-    return [mainTopic, mainTopic, mainTopic, mainTopic]; // Ultimate fallback
+    console.error('[11][ERROR] GPT visual extraction failed:', err?.response?.data || err);
+    return [mainTopic, mainTopic, mainTopic, mainTopic]; // Fallback: always 4
   }
 }
 
-// === UTILITY: Test single line from CLI ===
+// === CLI Test Utility ===
 if (require.main === module) {
-  // Allow quick CLI testing for debugging
   const testLine = process.argv[2] || 'The pyramids were built over 20 years.';
   const mainTopic = process.argv[3] || 'Egypt';
   extractVisualSubjects(testLine, mainTopic)

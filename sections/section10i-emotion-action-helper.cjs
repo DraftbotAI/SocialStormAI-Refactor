@@ -1,9 +1,10 @@
 // ===========================================================
-// SECTION 10I: EMOTION/ACTION/TRANSITION HELPER (GPT-powered)
+// SECTION 10I: EMOTION/ACTION/TRANSITION HELPER (GPT-powered, Bulletproof)
 // Detects if a line is about an emotion, action cue, or transition.
-// Returns a literal visual subject (face/action/scene/transition visual).
+// Returns a *literal* visual subject (face/action/scene/transition visual).
 // Used as a plug-in fallback or enhancer in scene matching.
-// MAX LOGGING every step, never blocks, always returns something.
+// MAX LOGGING every step, never blocks, never returns a generic.
+// Never silent-fails. Returns null if no match (for fallback logic).
 // ===========================================================
 
 const axios = require('axios');
@@ -14,18 +15,24 @@ if (!OPENAI_API_KEY) {
 }
 
 const SYSTEM_PROMPT = `
-You are an expert viral video editor.
-Given a script line, do these in order:
-1. If it expresses an EMOTION, return a specific, literal, visual of a person showing that emotion (e.g. "worried man biting nails", "happy woman smiling", "child jumping for joy").
-2. If it's an ACTION CUE or TRANSITION (e.g. "Let's get started", "Meanwhile", "Later that day"), return a literal visual scene or transition (e.g. "scene change animation", "clock spinning", "city time-lapse", "fast moving clouds").
+You are an expert viral video editor and AI visual subject picker.
+Given a script line from a video, follow these strict rules:
+1. If the line expresses an EMOTION, return a *specific*, literal, visual of a person showing that emotion (e.g. "worried man biting nails", "happy woman smiling", "child jumping for joy").
+2. If it's an ACTION CUE or TRANSITION (e.g. "Let's get started", "Meanwhile", "Later that day", "Moving on"), return a literal visual scene or transition (e.g. "scene change animation", "clock spinning", "city time-lapse", "fast moving clouds").
 3. Otherwise, say "NO_MATCH".
-Always output ONLY the visual subject (not a sentence or explanation), 5-10 words max. No generics or metaphors.
+- Never return a metaphor, generic, or abstract answer.
+- Always output ONLY the best visual subject or action, never a sentence or explanation, 5-10 words max.
+- Never output: "person", "people", "man", "woman", "something", "someone", "thing", "scene".
+- If nothing matches, strictly reply "NO_MATCH".
+
 Examples:
 Input: "Feeling anxious?" Output: "worried woman biting nails"
 Input: "Let's get started!" Output: "scene change animation"
 Input: "Meanwhile, across town..." Output: "city time-lapse"
 Input: "Later that day" Output: "clock spinning"
 Input: "He's overjoyed" Output: "man jumping for joy"
+Input: "Now for the real secret" Output: "hand pulling cloth to reveal"
+Input: "What a plot twist!" Output: "face with shocked expression"
 `;
 
 async function extractEmotionActionVisual(sceneLine, mainTopic = '') {
@@ -36,8 +43,8 @@ async function extractEmotionActionVisual(sceneLine, mainTopic = '') {
     const prompt = `
 Script line: "${sceneLine}"
 Main topic: "${mainTopic || ''}"
-If emotion/action/transition, return ONLY a literal visual subject or action (never a full sentence).
-If not, reply "NO_MATCH".
+If this is emotion/action/transition, return ONLY a literal visual subject or action (never a full sentence).
+If not, strictly reply "NO_MATCH".
     `.trim();
 
     console.log(`[10I][PROMPT] ${prompt}`);
@@ -50,8 +57,8 @@ If not, reply "NO_MATCH".
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: prompt }
         ],
-        max_tokens: 25,
-        temperature: 0.5,
+        max_tokens: 24,
+        temperature: 0.4,
         n: 1,
       },
       {
@@ -68,20 +75,21 @@ If not, reply "NO_MATCH".
 
     let visual = raw;
 
-    // If no match, return null (so other extractors can try)
+    // Block all generics, abstract, empty, or NO_MATCH responses.
     if (
       !visual ||
-      visual.toUpperCase() === "NO_MATCH" ||
       visual.length < 3 ||
+      visual.toUpperCase() === "NO_MATCH" ||
       [
-        'something', 'someone', 'person', 'people', 'scene', 'man', 'woman', 
-        'it', 'thing', 'they', 'we', 'body', 'face', 'eyes'
+        'something','someone','person','people','scene','man','woman','it','thing',
+        'they','we','body','face','eyes','child','children'
       ].includes(visual.toLowerCase())
     ) {
-      console.warn('[10I][NO_MATCH] No emotion/action/transition visual:', visual);
+      console.warn('[10I][NO_MATCH] No valid emotion/action/transition visual:', visual, '| Input:', sceneLine);
       return null;
     }
 
+    // Log output and return best match.
     console.log(`[10I][RESULT] "${sceneLine}" => "${visual}"`);
     return visual;
   } catch (err) {

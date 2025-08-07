@@ -14,15 +14,21 @@ if (!OPENAI_API_KEY) {
 }
 
 const SYSTEM_PROMPT = `
-You are an expert short-form video editor.
-Given a script line with multiple subjects or items (e.g., "Cats and dogs are both popular pets"), return the SINGLE best viral visual subject that combines them, if possible (e.g., "cute cat and dog together").
-If a true combo is not possible, return the MOST viral or visually strong subject from the line.
-Never output a sentence or explanation, only the core visual subject or action (max 10 words).
+You are a viral video editor and expert visual scene picker.
+Given a script line with multiple real, visual subjects or items (e.g. "Cats and dogs are both popular pets."), do the following:
+- Return the SINGLE BEST viral, literal, visually clickable combination if possible (e.g. "cute cat and dog playing together").
+- If no combo is possible, return the single most viral or visually strong subject from the line.
+Strict rules:
+- NEVER output a full sentence, explanation, metaphor, or generic ("someone", "person", "question mark", "thing", "it", etc).
+- Always use the shortest, most visual phrasing (max 10 words).
+- Return only the subject/action/scene, not a caption.
 Examples:
 Input: "Cats and dogs are both popular pets." Output: "cute cat and dog together"
 Input: "Pizza and burgers are classic foods." Output: "pizza and burger side by side"
 Input: "Sun and rain can happen together." Output: "sun shining with rain"
+Input: "Eiffel Tower and Arc de Triomphe are Paris icons." Output: "eiffel tower and arc de triomphe together"
 If only one strong subject, return just that.
+If not applicable, reply with "NO_MATCH".
 `;
 
 async function extractMultiSubjectVisual(sceneLine, mainTopic = '') {
@@ -33,8 +39,9 @@ async function extractMultiSubjectVisual(sceneLine, mainTopic = '') {
     const prompt = `
 Script line: "${sceneLine}"
 Main topic: "${mainTopic || ''}"
-If the line includes multiple visual subjects, return the best viral COMBO visual.
-If not, return just the top subject. Only the subject, never a sentence.
+If the line includes multiple visual subjects or items, return the best viral COMBO visual (combo or side-by-side, etc).
+If not, return just the single top visual subject (never generic).
+Only output the visual subject, never a sentence or explanation.
 If not applicable, reply "NO_MATCH".
     `.trim();
 
@@ -49,7 +56,7 @@ If not applicable, reply "NO_MATCH".
           { role: 'user', content: prompt }
         ],
         max_tokens: 25,
-        temperature: 0.5,
+        temperature: 0.35,
         n: 1,
       },
       {
@@ -62,20 +69,24 @@ If not applicable, reply "NO_MATCH".
     );
 
     let raw = response.data?.choices?.[0]?.message?.content?.trim() || '';
-    raw = raw.replace(/^output\s*[:\-]\s*/i, '').replace(/["'.]+$/g, '').trim();
+    raw = raw.replace(/^output\s*[:\-]\s*/i, '')
+      .replace(/["'.]+$/g, '')
+      .replace(/^(show|display|combo)[:\-\s]*/i, '')
+      .trim();
 
     let visual = raw;
 
+    // Block generic/abstract outputs
     if (
       !visual ||
       visual.toUpperCase() === "NO_MATCH" ||
       visual.length < 3 ||
       [
         'something', 'someone', 'person', 'people', 'scene', 'man', 'woman',
-        'it', 'thing', 'they', 'we', 'body', 'face', 'eyes'
+        'it', 'thing', 'they', 'we', 'body', 'face', 'eyes', 'animal', 'animals'
       ].includes(visual.toLowerCase())
     ) {
-      console.warn('[10K][NO_MATCH] No strong multi-subject visual:', visual);
+      console.warn('[10K][NO_MATCH] No strong multi-subject visual:', visual, '| Input:', sceneLine);
       return null;
     }
 

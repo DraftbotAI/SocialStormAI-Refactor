@@ -3,6 +3,7 @@
 // For question lines, returns the *single best literal visual subject*
 // (e.g. for "Why do cats purr?" => "cat closeup purring").
 // Never generic/question mark. Max logging, bulletproof, never blocks.
+// Ultra strict, never silent-fails, returns null if no valid match.
 // ===========================================================
 
 const axios = require('axios');
@@ -13,17 +14,22 @@ if (!OPENAI_API_KEY) {
 }
 
 const SYSTEM_PROMPT = `
-You are an expert at making viral video shorts.
-Given a script line that is a QUESTION, do this:
-- Return the SINGLE BEST literal visual subject or action to show for the core topic.
-- Never output a question mark or generic (never "someone thinking", never "question mark").
+You are an expert viral video editor and visual director.
+Given a script line that is a QUESTION, return the SINGLE BEST literal, visual subject or action to show for the core topic.
+Strict rules:
+- NEVER return a question mark, emoji, generic, or abstract visual ("someone thinking", "question mark", "person", "something").
 - Return a concrete visual, e.g. "cat closeup purring", "stormy sky lightning".
-- Never a full sentence or explanation, never a metaphor.
+- Never output a full sentence, explanation, or metaphor.
+- Output must be 5-10 words, single best subject.
+- If not a question, say "NO_MATCH".
+
 Examples:
 Input: "Why do cats purr?" Output: "cat closeup purring"
 Input: "What causes lightning?" Output: "stormy sky lightning"
 Input: "How do you become successful?" Output: "successful businessperson holding trophy"
 Input: "Who built the pyramids?" Output: "ancient Egyptians building pyramids"
+Input: "How can I focus better?" Output: "person studying at desk with books"
+Input: "Is sugar bad for you?" Output: "bowl of sugar cubes on table"
 `;
 
 async function extractQuestionVisual(sceneLine, mainTopic = '') {
@@ -34,8 +40,8 @@ async function extractQuestionVisual(sceneLine, mainTopic = '') {
     const prompt = `
 Script line: "${sceneLine}"
 Main topic: "${mainTopic || ''}"
-If the line is a question, return ONLY the single best literal visual subject or action (5-10 words).
-If not a question, reply "NO_MATCH".
+If this line is a question, return ONLY the best literal visual subject or action (5-10 words, never a sentence).
+If not a question, strictly reply "NO_MATCH".
     `.trim();
 
     console.log(`[10J][PROMPT] ${prompt}`);
@@ -66,16 +72,19 @@ If not a question, reply "NO_MATCH".
 
     let visual = raw;
 
+    // Block all non-matches, generics, and junk
     if (
       !visual ||
-      visual.toUpperCase() === "NO_MATCH" ||
       visual.length < 3 ||
+      visual.toUpperCase() === "NO_MATCH" ||
+      visual.toLowerCase().includes('question mark') ||
+      visual.includes('?') ||
       [
         'something', 'someone', 'person', 'people', 'scene', 'man', 'woman',
         'it', 'thing', 'they', 'we', 'body', 'face', 'eyes'
       ].includes(visual.toLowerCase())
     ) {
-      console.warn('[10J][NO_MATCH] Not a question, or visual too generic:', visual);
+      console.warn('[10J][NO_MATCH] Not a question, or visual too generic:', visual, '| Input:', sceneLine);
       return null;
     }
 
