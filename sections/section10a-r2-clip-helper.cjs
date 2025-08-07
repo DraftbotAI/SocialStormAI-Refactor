@@ -86,7 +86,7 @@ function isValidClip(filePath, jobId) {
  * Finds the *best-scoring* video in R2 for the subject, using universal scorer (Section 10G)
  * NEVER returns a dupe; NEVER picks generic/irrelevant if a real match exists.
  * If nothing, returns null (upstream fallback handles images, etc)
- * @param {object} scene  // { subject, matchPhrases, ... }
+ * @param {object|string} scene  // { subject, matchPhrases, ... } OR subject string
  * @param {string} workDir
  * @param {number} sceneIdx
  * @param {string} jobId
@@ -94,12 +94,15 @@ function isValidClip(filePath, jobId) {
  * @returns {Promise<string|null>} Local video path (or null if not found)
  */
 async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
-  console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${scene?.subject}" | sceneIdx=${sceneIdx} | workDir="${workDir}" | usedClips=${JSON.stringify(usedClips)}`);
-
-  if (!scene?.subject || typeof scene.subject !== 'string') {
-    console.error(`[10A][R2][${jobId}] No valid subject in scene!`);
+  // --- Accept plain string for backward compatibility ---
+  let subject = (typeof scene === 'string') ? scene : scene?.subject || '';
+  let matchPhrases = (typeof scene === 'object' && scene.matchPhrases) ? scene.matchPhrases : [];
+  if (!subject || typeof subject !== 'string') {
+    console.error(`[10A][R2][${jobId}] No valid subject for R2 lookup! Input:`, scene);
     return null;
   }
+
+  console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${subject}" | sceneIdx=${sceneIdx} | workDir="${workDir}" | usedClips=${JSON.stringify(usedClips)}`);
 
   try {
     const files = await listAllFilesInR2('', jobId);
@@ -110,7 +113,8 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
 
     // Only .mp4s, never a usedClip (basename or full R2 key)
     const mp4Files = files.filter(f =>
-      f.endsWith('.mp4') && !usedClips.some(u => f.endsWith(u) || f === u || path.basename(f) === u)
+      f.endsWith('.mp4') &&
+      !usedClips.some(u => f.endsWith(u) || f === u || path.basename(f) === u)
     );
     if (!mp4Files.length) {
       console.warn(`[10A][R2][${jobId}] No .mp4 files found in R2 bucket!`);
@@ -123,22 +127,26 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       source: 'r2',
       file: f,
       filename: path.basename(f),
-      subject: scene.subject,
-      matchPhrases: scene.matchPhrases || [],
-      scene, // Pass full scene object for richer scoring if needed
+      subject,
+      matchPhrases,
+      scene: (typeof scene === 'object') ? scene : { subject, matchPhrases },
     }));
 
     // Score with universal helper (Section 10G)
     const scored = candidates.map(candidate => ({
       ...candidate,
-      score: scoreSceneCandidate(candidate, scene)
+      score: scoreSceneCandidate(candidate, candidate.scene)
     }));
 
-    // Log top candidates
-    scored
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 10)
-      .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.file} | score=${s.score}`));
+    // Log all candidates (even if zero strong matches)
+    if (scored.length === 0) {
+      console.log(`[10A][R2][${jobId}][CANDIDATE] No .mp4 candidates to score.`);
+    } else {
+      scored
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10)
+        .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.file} | score=${s.score}`));
+    }
 
     // Filter out true irrelevants (score <20) IF a strong match exists (score >=80)
     const maxScore = Math.max(...scored.map(s => s.score));
@@ -151,12 +159,11 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       }
     }
 
-    // Sort by score descending, take first
     eligible.sort((a, b) => b.score - a.score);
     const best = eligible[0];
 
     if (!best || typeof best.file !== 'string') {
-      console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No suitable candidates for subject "${scene.subject}". Aborting.`);
+      console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No suitable candidates for subject "${subject}". Aborting.`);
       return null;
     }
 
@@ -179,6 +186,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] No strong match, using best available: ${best.file} | score=${best.score}`);
     }
 
+    // Download logic (always download to local workDir, uniquely named for dedupe)
     const unique = uuidv4();
     const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2-${unique}.mp4`);
     if (fs.existsSync(outPath) && isValidClip(outPath, jobId)) {
