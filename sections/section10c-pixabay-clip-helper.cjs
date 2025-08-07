@@ -1,6 +1,6 @@
 // ===========================================================
-// SECTION 10C: PIXABAY CLIP HELPER
-// Finds and downloads best-matching video from Pixabay API
+// SECTION 10C: PIXABAY CLIP HELPER (VIDEOS + PHOTOS)
+// Finds and downloads best-matching video or photo from Pixabay API
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Bulletproof: unique files, dedupe, valid output, crash-proof
 // 2024-08: Scoring with strict/fuzzy/partial keyword filter, no skips
@@ -263,5 +263,44 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
   }
 }
 
-module.exports = { findPixabayClipForScene };
+// --- FIND PIXABAY PHOTO FOR SCENE (THE REQUIRED FUNCTION) ---
+async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
+  if (!PIXABAY_API_KEY) {
+    console.warn('[10C][PIXABAY-PHOTO][ERR] No Pixabay API key set!');
+    return null;
+  }
+  try {
+    // Pixabay API q param max 100 chars
+    const safeSubject = String(subject).slice(0, 90); // leave room for encoding
+    const query = encodeURIComponent(safeSubject);
+    const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=12&orientation=vertical`;
+    console.log(`[10C][PIXABAY-PHOTO][${jobId}] Request: ${url}`);
+    const resp = await axios.get(url, { timeout: 12000 });
+    if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
+      for (const hit of resp.data.hits) {
+        // Dedup by URL or basename
+        if (isDupePixabay(hit.largeImageURL, usedClips)) {
+          console.log(`[10C][PIXABAY-PHOTO][${jobId}] Skipping duplicate photo: ${hit.largeImageURL}`);
+          continue;
+        }
+        // Optionally: download image, but fallbackKenBurns will handle it.
+        console.log(`[10C][PIXABAY-PHOTO][${jobId}] Picked: ${hit.largeImageURL}`);
+        return hit.largeImageURL;
+      }
+    }
+    console.log(`[10C][PIXABAY-PHOTO][${jobId}] No Pixabay photos found for "${subject}"`);
+    return null;
+  } catch (err) {
+    if (err.response?.data) {
+      console.error('[10C][PIXABAY-PHOTO][ERR]', JSON.stringify(err.response.data));
+    } else {
+      console.error('[10C][PIXABAY-PHOTO][ERR]', err);
+    }
+    return null;
+  }
+}
 
+module.exports = {
+  findPixabayClipForScene,
+  findPixabayPhotoForScene
+};
