@@ -273,8 +273,9 @@ async function findClipForScene({
   const contextOverride = await tryContextualLandmarkOverride(finalSubjects[0], mainTopic, usedClips, jobId);
   if (contextOverride) return contextOverride;
 
-  // === [C] Gather ALL candidates (video + images) ===
-  let candidates = [];
+  // === [C] Gather ALL candidates (video then photo, separate selection) ===
+  let videoCandidates = [];
+  let imageCandidates = [];
   for (const subjectOption of finalSubjects) {
     // --- R2 videos ---
     if (findR2ClipForScene.getAllFiles) {
@@ -285,7 +286,7 @@ async function findClipForScene({
           (strictSubjectMatch(fname, subjectOption) || looseSubjectMatch(fname, subjectOption)) &&
           assertFileExists(fname, 'R2_RESULT')
         ) {
-          candidates.push({ path: fname, source: 'R2', isVideo: true, subject: subjectOption, used: false });
+          videoCandidates.push({ path: fname, source: 'R2', isVideo: true, subject: subjectOption, used: false });
         }
       }
     }
@@ -294,7 +295,7 @@ async function findClipForScene({
       let pexelsResult = await findPexelsClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       let candidatePath = (pexelsResult && pexelsResult.path) ? pexelsResult.path : pexelsResult;
       if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, 'PEXELS_RESULT')) {
-        candidates.push({ path: candidatePath, source: 'PEXELS_VIDEO', isVideo: true, subject: subjectOption, used: false });
+        videoCandidates.push({ path: candidatePath, source: 'PEXELS_VIDEO', isVideo: true, subject: subjectOption, used: false });
       }
     } catch (e) { console.error(`[5D][PEXELS][${jobId}][ERR]`, e); }
     // --- Pixabay video ---
@@ -302,7 +303,7 @@ async function findClipForScene({
       let pixabayResult = await findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       let candidatePath = (pixabayResult && pixabayResult.path) ? pixabayResult.path : pixabayResult;
       if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, 'PIXABAY_RESULT')) {
-        candidates.push({ path: candidatePath, source: 'PIXABAY_VIDEO', isVideo: true, subject: subjectOption, used: false });
+        videoCandidates.push({ path: candidatePath, source: 'PIXABAY_VIDEO', isVideo: true, subject: subjectOption, used: false });
       }
     } catch (e) { console.error(`[5D][PIXABAY][${jobId}][ERR]`, e); }
     // === PHOTOS (with fallback) ===
@@ -310,54 +311,68 @@ async function findClipForScene({
     try {
       let pexelsPhoto = await findPexelsPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (pexelsPhoto && !usedClips.includes(pexelsPhoto) && assertFileExists(pexelsPhoto, 'PEXELS_PHOTO')) {
-        candidates.push({ path: pexelsPhoto, source: 'PEXELS_PHOTO', isVideo: false, subject: subjectOption, used: false });
+        imageCandidates.push({ path: pexelsPhoto, source: 'PEXELS_PHOTO', isVideo: false, subject: subjectOption, used: false });
       }
     } catch (e) { console.error(`[5D][PEXELS_PHOTO][${jobId}][ERR]`, e); }
     // --- Pixabay photo ---
     try {
       let pixabayPhoto = await findPixabayPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (pixabayPhoto && !usedClips.includes(pixabayPhoto) && assertFileExists(pixabayPhoto, 'PIXABAY_PHOTO')) {
-        candidates.push({ path: pixabayPhoto, source: 'PIXABAY_PHOTO', isVideo: false, subject: subjectOption, used: false });
+        imageCandidates.push({ path: pixabayPhoto, source: 'PIXABAY_PHOTO', isVideo: false, subject: subjectOption, used: false });
       }
     } catch (e) { console.error(`[5D][PIXABAY_PHOTO][${jobId}][ERR]`, e); }
     // --- Unsplash photo ---
     try {
       let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
       if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
-        candidates.push({ path: unsplashResult, source: 'UNSPLASH', isVideo: false, subject: subjectOption, used: false });
+        imageCandidates.push({ path: unsplashResult, source: 'UNSPLASH', isVideo: false, subject: subjectOption, used: false });
       }
     } catch (e) { console.error(`[5D][UNSPLASH][${jobId}][ERR]`, e); }
   }
 
-  // --- Score all candidates ---
-  let realMatchExists = candidates.some(c => c.isVideo);
-  for (let candidate of candidates) {
-    candidate.score = scoreCandidate(candidate, candidate.subject, candidate.isVideo, realMatchExists);
+  // --- Score and sort videos ---
+  let realVideoExists = videoCandidates.length > 0;
+  for (let candidate of videoCandidates) {
+    candidate.score = scoreCandidate(candidate, candidate.subject, true, realVideoExists);
   }
-  candidates.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    if (b.isVideo !== a.isVideo) return b.isVideo ? 1 : -1; // prefer video on tie
-    return 0;
-  });
+  videoCandidates.sort((a, b) => b.score - a.score);
+
+  // --- Score and sort images (only if no video is available) ---
+  let realPhotoExists = imageCandidates.length > 0;
+  for (let candidate of imageCandidates) {
+    candidate.score = scoreCandidate(candidate, candidate.subject, false, realVideoExists);
+  }
+  imageCandidates.sort((a, b) => b.score - a.score);
 
   // --- Log all candidates for debug ---
-  candidates.forEach((c, i) => {
-    console.log(`[5D][CANDIDATE][${jobId}][#${i+1}] ${c.source} | ${c.path} | Score: ${c.score} | Video: ${c.isVideo ? 'Y' : 'N'}`);
+  videoCandidates.forEach((c, i) => {
+    console.log(`[5D][CANDIDATE][VIDEO][${jobId}][#${i + 1}] ${c.source} | ${c.path} | Score: ${c.score}`);
+  });
+  imageCandidates.forEach((c, i) => {
+    console.log(`[5D][CANDIDATE][IMAGE][${jobId}][#${i + 1}] ${c.source} | ${c.path} | Score: ${c.score}`);
   });
 
-  // --- Pick best, mark as used, Ken Burns if needed ---
-  let best = candidates.length ? candidates[0] : null;
-  if (best) {
-    usedClips.push(best.path); // Deduplicate only the one you used!
-    if (!best.isVideo) {
-      let kenBurnsResult = await fallbackKenBurnsVideo(best.path, workDir, sceneIdx, jobId, usedClips);
-      if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
-        usedClips.push(kenBurnsResult);
-        console.log(`[5D][KENBURNS][${jobId}] Ken Burns created: ${kenBurnsResult}`);
-        return kenBurnsResult;
-      }
+  // --- Pick best video if available ---
+  if (videoCandidates.length > 0) {
+    let bestVideo = videoCandidates[0];
+    usedClips.push(bestVideo.path); // Mark as used!
+    console.log(`[5D][RESULT][VIDEO][${jobId}] Best video selected: ${bestVideo.path}`);
+    return bestVideo.path;
+  }
+
+  // --- If no videos, fallback to best image (Ken Burns) ---
+  if (imageCandidates.length > 0) {
+    let bestImage = imageCandidates[0];
+    usedClips.push(bestImage.path);
+    let kenBurnsResult = await fallbackKenBurnsVideo(bestImage.path, workDir, sceneIdx, jobId, usedClips);
+    if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+      usedClips.push(kenBurnsResult);
+      console.log(`[5D][RESULT][KENBURNS][${jobId}] Ken Burns created from image: ${kenBurnsResult}`);
+      return kenBurnsResult;
     }
-    return best.path;
+    // If Ken Burns fails, return the static image as last resort
+    console.log(`[5D][RESULT][IMAGE_STATIC][${jobId}] Fallback to static image: ${bestImage.path}`);
+    return bestImage.path;
   }
 
   // --- Final R2 fallback ---
@@ -366,14 +381,16 @@ async function findClipForScene({
     for (const fname of r2Files) {
       if (!usedClips.includes(fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
         usedClips.push(fname);
+        console.log(`[5D][RESULT][R2_ANYFALLBACK][${jobId}] Fallback video: ${fname}`);
         return fname;
       }
     }
   }
-  // --- Final Ken Burns fallback ---
+  // --- Final Ken Burns fallback (generic landmark image if nothing else) ---
   let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
   if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
     usedClips.push(kenBurnsResult);
+    console.log(`[5D][RESULT][KENBURNS_LANDMARK][${jobId}] Final fallback Ken Burns: ${kenBurnsResult}`);
     return kenBurnsResult;
   }
   console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
