@@ -264,3 +264,4 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
 }
 
 module.exports = { findPixabayClipForScene };
+

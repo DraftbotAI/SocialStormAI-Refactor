@@ -1,38 +1,39 @@
 // ===========================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Bulletproof, Anti-Dupe)
-// Always returns something: R2, Pexels, Pixabay, Unsplash image, or Ken Burns.
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Bulletproof, Anti-Dupe, Pro Helper Integration)
+// Always returns something: R2, Pexels Video, Pixabay Video, Pexels Photo, Pixabay Photo, Unsplash image, or Ken Burns.
 // Never repeats a clip/image in the same video unless absolutely unavoidable.
-// MAX LOGS at every step. No endless loops. No generic dupe fallback.
+// MAX LOGS at every step. Handles edge cases: emotion, question, multi-subject, symbolic, repetition.
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
-const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
-const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
+const { findPexelsClipForScene, findPexelsPhotoForScene } = require('./section10b-pexels-clip-helper.cjs');
+const { findPixabayClipForScene, findPixabayPhotoForScene } = require('./section10c-pixabay-clip-helper.cjs');
 const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
+const { extractSymbolicVisualSubject } = require('./section10h-symbolic-matcher.cjs');
+const { extractEmotionActionVisual } = require('./section10i-emotion-action-helper.cjs');
+const { extractQuestionVisual } = require('./section10j-question-fallback-helper.cjs');
+const { extractMultiSubjectVisual } = require('./section10k-multi-subject-handler.cjs');
+const { breakRepetition } = require('./section10l-repetition-blocker.cjs');
 const fs = require('fs');
 const path = require('path');
 
-console.log('[5D][INIT] Clip matcher orchestrator (BEST-VISUAL, NO-GENERIC-DUPES) loaded.');
+console.log('[5D][INIT] Clip matcher orchestrator (ALL-HELPERS, PHOTOS FALLBACK, ANTI-DUPE, EDGE CASES) loaded.');
 
 const GENERIC_SUBJECTS = [
   'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children', 'sign', 'logo', 'text', 'skyline', 'dubai'
 ];
 
-// --- Helper functions ---
-function normalize(str) {
-  return (str || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
-}
-
+// --- Helper functions (same as before) ---
+function normalize(str) { return (str || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 function getMajorWords(subject) {
   return (subject || '')
     .split(/\s+/)
     .map(w => w.toLowerCase())
     .filter(w => w.length > 2 && !['the', 'of', 'and', 'in', 'on', 'with', 'to', 'is', 'for', 'at', 'by', 'as', 'a', 'an'].includes(w));
 }
-
 function looseSubjectMatch(filename, subject) {
   if (!filename || !subject) return false;
   const safeFile = cleanForFilename(filename).toLowerCase();
@@ -42,14 +43,12 @@ function looseSubjectMatch(filename, subject) {
   }
   return safeFile.includes(normalize(subject));
 }
-
 function strictSubjectMatch(filename, subject) {
   if (!filename || !subject) return false;
   const safeSubject = cleanForFilename(subject);
   const re = new RegExp(`(^|_|-)${safeSubject}(_|-|\\.|$)`, 'i');
   return re.test(cleanForFilename(filename));
 }
-
 function assertFileExists(file, label = 'FILE', minSize = 10240) {
   try {
     if (!file || !fs.existsSync(file)) {
@@ -67,37 +66,24 @@ function assertFileExists(file, label = 'FILE', minSize = 10240) {
     return false;
   }
 }
-
-// --- Scoring (massive penalty for generic/irrelevant if real match exists) ---
 function scoreCandidate(candidate, subject, isVideo = false, realMatchExists = false) {
   let score = 0;
   const cleanedSubject = normalize(subject);
   const words = getMajorWords(subject);
-
   if (!candidate || !candidate.path) return -9999;
   const basename = path.basename(candidate.path).toLowerCase();
-
   if (strictSubjectMatch(basename, subject)) score += 120;
   if (words.every(w => basename.includes(w))) score += 40;
   words.forEach(word => { if (basename.includes(word)) score += 8; });
   if (basename.includes(cleanedSubject)) score += 15;
-
-  // Prefer HD and video
   if (isVideo) score += 20;
-
-  // Massive penalty if generic/irrelevant (unless nothing better)
   if (GENERIC_SUBJECTS.some(g => basename.includes(g))) score -= (realMatchExists ? 2000 : 200);
-
-  // Penalty for "sign", "logo", "text"
   if (/\b(sign|logo|text)\b/.test(basename)) score -= (realMatchExists ? 2000 : 200);
-
-  // Lower if file was used
   if (candidate.used) score -= 5000;
-
   return score;
 }
 
-// --- Landmark context override (strict R2) ---
+// --- Landmark context override (unchanged) ---
 async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobId) {
   if (!findR2ClipForScene.getAllFiles) return null;
   const LANDMARK_WORDS = [
@@ -155,11 +141,12 @@ async function findClipForScene({
   megaSubject = null,
   forceClipPath = null,
   jobContext = {},
-  categoryFolder
+  categoryFolder,
+  prevVisualSubjects = [],
 }) {
   let searchSubject = subject;
 
-  // --- Anchor subject logic (first scene, mega-scene, etc.) ---
+  // --- Anchor subject logic ---
   if (isMegaScene || sceneIdx === 0) {
     if (
       megaSubject &&
@@ -205,31 +192,105 @@ async function findClipForScene({
     !findPexelsClipForScene ||
     !findPixabayClipForScene ||
     !findUnsplashImageForScene ||
+    !findPexelsPhotoForScene ||
+    !findPixabayPhotoForScene ||
     !fallbackKenBurnsVideo
   ) {
     console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
     return null;
   }
 
-  let prioritizedSubjects = [];
+  // === [A] MULTI-STRATEGY SUBJECT EXTRACTION ===
+
+  // 1. Multi-Subject handler
+  let extractedSubjects = [];
   try {
-    prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
-    console.log(`[5D][GPT][${jobId}] Prioritized visual subjects for scene ${sceneIdx + 1}:`, prioritizedSubjects);
+    const multiVisual = await extractMultiSubjectVisual(searchSubject, mainTopic);
+    if (multiVisual && !GENERIC_SUBJECTS.includes(multiVisual.toLowerCase())) {
+      extractedSubjects.push(multiVisual);
+      console.log(`[5D][SUBJECT][MULTI] ${multiVisual}`);
+    }
   } catch (err) {
-    console.error(`[5D][GPT][${jobId}][ERR] Error extracting prioritized subjects:`, err);
-    prioritizedSubjects = [searchSubject, mainTopic];
+    console.error(`[5D][MULTI][${jobId}][ERR]`, err);
   }
 
+  // 2. Question fallback
+  try {
+    const questionVisual = await extractQuestionVisual(searchSubject, mainTopic);
+    if (questionVisual && !GENERIC_SUBJECTS.includes(questionVisual.toLowerCase())) {
+      extractedSubjects.push(questionVisual);
+      console.log(`[5D][SUBJECT][QUESTION] ${questionVisual}`);
+    }
+  } catch (err) {
+    console.error(`[5D][QUESTION][${jobId}][ERR]`, err);
+  }
+
+  // 3. Symbolic/Abstract matcher
+  try {
+    const symbolicVisual = await extractSymbolicVisualSubject(searchSubject, mainTopic);
+    if (symbolicVisual && !GENERIC_SUBJECTS.includes(symbolicVisual.toLowerCase())) {
+      extractedSubjects.push(symbolicVisual);
+      console.log(`[5D][SUBJECT][SYMBOLIC] ${symbolicVisual}`);
+    }
+  } catch (err) {
+    console.error(`[5D][SYMBOLIC][${jobId}][ERR]`, err);
+  }
+
+  // 4. Emotion/action/transition
+  try {
+    const emotionVisual = await extractEmotionActionVisual(searchSubject, mainTopic);
+    if (emotionVisual && !GENERIC_SUBJECTS.includes(emotionVisual.toLowerCase())) {
+      extractedSubjects.push(emotionVisual);
+      console.log(`[5D][SUBJECT][EMOTION] ${emotionVisual}`);
+    }
+  } catch (err) {
+    console.error(`[5D][EMOTION][${jobId}][ERR]`, err);
+  }
+
+  // 5. Literal extractor (always last, most literal)
+  try {
+    const prioritized = await extractVisualSubjects(searchSubject, mainTopic);
+    if (prioritized && prioritized.length) {
+      prioritized.forEach(s => {
+        if (s && !GENERIC_SUBJECTS.includes(s.toLowerCase())) extractedSubjects.push(s);
+      });
+      console.log(`[5D][SUBJECT][PRIORITIZED]`, prioritized);
+    }
+  } catch (err) {
+    console.error(`[5D][LITERAL][${jobId}][ERR]`, err);
+  }
+
+  // Fallback to original subject if nothing left
+  if (!extractedSubjects.length) extractedSubjects.push(searchSubject);
+
+  // Dedup (keep order)
+  extractedSubjects = [...new Set(extractedSubjects)];
+
+  // === [B] REPETITION/VARIETY BLOCKER ===
+  let finalSubjects = [];
+  for (let sub of extractedSubjects) {
+    try {
+      const varied = await breakRepetition(sub, prevVisualSubjects || [], { maxRepeats: 2 });
+      if (varied && !finalSubjects.includes(varied)) finalSubjects.push(varied);
+    } catch (err) {
+      finalSubjects.push(sub);
+      console.error(`[5D][REPEAT][${jobId}][ERR]`, err);
+    }
+  }
+
+  // Fallback if nothing passed
+  if (!finalSubjects.length) finalSubjects = [searchSubject];
+
   // === 0. Contextual strict R2 match (landmark override) ===
-  const contextOverride = await tryContextualLandmarkOverride(searchSubject, mainTopic, usedClips, jobId);
+  const contextOverride = await tryContextualLandmarkOverride(finalSubjects[0], mainTopic, usedClips, jobId);
   if (contextOverride) return contextOverride;
 
-  // === 1. Aggregate all candidates ===
+  // === 1. Aggregate all candidates, VIDEO and IMAGE, in bulletproof order ===
   let bestCandidate = null;
   let allCandidates = [];
   let realMatchExists = false;
 
-  for (const subjectOption of prioritizedSubjects) {
+  for (const subjectOption of finalSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
     // --- R2 strict ---
@@ -245,7 +306,6 @@ async function findClipForScene({
         }
       }
     }
-
     // --- R2 loose ---
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
@@ -259,29 +319,47 @@ async function findClipForScene({
         }
       }
     }
-
     // --- Pexels video ---
     try {
       let pexelsResult = await findPexelsClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       let candidatePath = (pexelsResult && pexelsResult.path) ? pexelsResult.path : pexelsResult;
       if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, 'PEXELS_RESULT')) {
-        allCandidates.push({ path: candidatePath, source: 'PEXELS', isVideo: true, subject: subjectOption, used: false });
+        allCandidates.push({ path: candidatePath, source: 'PEXELS_VIDEO', isVideo: true, subject: subjectOption, used: false });
       }
     } catch (e) {
       console.error(`[5D][PEXELS][ERR][${jobId}]`, e);
     }
-
     // --- Pixabay video ---
     try {
       let pixabayResult = await findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       let candidatePath = (pixabayResult && pixabayResult.path) ? pixabayResult.path : pixabayResult;
       if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, 'PIXABAY_RESULT')) {
-        allCandidates.push({ path: candidatePath, source: 'PIXABAY', isVideo: true, subject: subjectOption, used: false });
+        allCandidates.push({ path: candidatePath, source: 'PIXABAY_VIDEO', isVideo: true, subject: subjectOption, used: false });
       }
     } catch (e) {
       console.error(`[5D][PIXABAY][ERR][${jobId}]`, e);
     }
-
+    // === PHOTO FALLBACK CHAIN ===
+    // --- Pexels photo ---
+    try {
+      let pexelsPhoto = await findPexelsPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
+      if (pexelsPhoto && !usedClips.includes(pexelsPhoto) && assertFileExists(pexelsPhoto, 'PEXELS_PHOTO')) {
+        allCandidates.push({ path: pexelsPhoto, source: 'PEXELS_PHOTO', isVideo: false, subject: subjectOption, used: false });
+        console.log(`[5D][PEXELS_PHOTO][${jobId}] Found fallback photo: ${pexelsPhoto}`);
+      }
+    } catch (e) {
+      console.error(`[5D][PEXELS_PHOTO][ERR][${jobId}]`, e);
+    }
+    // --- Pixabay photo ---
+    try {
+      let pixabayPhoto = await findPixabayPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
+      if (pixabayPhoto && !usedClips.includes(pixabayPhoto) && assertFileExists(pixabayPhoto, 'PIXABAY_PHOTO')) {
+        allCandidates.push({ path: pixabayPhoto, source: 'PIXABAY_PHOTO', isVideo: false, subject: subjectOption, used: false });
+        console.log(`[5D][PIXABAY_PHOTO][${jobId}] Found fallback photo: ${pixabayPhoto}`);
+      }
+    } catch (e) {
+      console.error(`[5D][PIXABAY_PHOTO][ERR][${jobId}]`, e);
+    }
     // --- Unsplash photo ---
     try {
       let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
@@ -295,7 +373,6 @@ async function findClipForScene({
 
   // --- Remove used clips (dedupe) ---
   allCandidates = allCandidates.filter(c => !usedClips.includes(c.path));
-
   // --- Detect real (non-generic) matches ---
   for (const c of allCandidates) {
     const basename = path.basename(c.path).toLowerCase();
@@ -307,23 +384,19 @@ async function findClipForScene({
       break;
     }
   }
-
   // --- Score all candidates ---
   for (let candidate of allCandidates) {
     candidate.score = scoreCandidate(candidate, candidate.subject, candidate.isVideo, realMatchExists);
   }
-
   allCandidates.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     if (b.isVideo !== a.isVideo) return b.isVideo ? 1 : -1;
     return 0;
   });
-
   // --- Log candidates for debug ---
   allCandidates.forEach((c, i) => {
     console.log(`[5D][CANDIDATE][${jobId}][#${i+1}] ${c.source} | ${c.path} | Score: ${c.score} | Video: ${c.isVideo ? 'Y' : 'N'}`);
   });
-
   // --- Pick best candidate ---
   bestCandidate = allCandidates.length ? allCandidates[0] : null;
 
@@ -354,7 +427,7 @@ async function findClipForScene({
           return kenBurnsResult;
         }
       } catch (e) {
-        console.error(`[5D][KENBURNS][ERR][${jobId}] Error running Ken Burns for Unsplash image:`, e);
+        console.error(`[5D][KENBURNS][ERR][${jobId}] Error running Ken Burns for fallback image:`, e);
         return bestCandidate.path;
       }
     } else {
@@ -377,7 +450,6 @@ async function findClipForScene({
   } catch (e) {
     console.error(`[5D][FINALFALLBACK][${jobId}] Error during final R2 fallback:`, e);
   }
-
   try {
     let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
@@ -388,7 +460,6 @@ async function findClipForScene({
   } catch (e) {
     console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}] Error during generic KenBurns fallback:`, e);
   }
-
   console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
   return null;
 }
