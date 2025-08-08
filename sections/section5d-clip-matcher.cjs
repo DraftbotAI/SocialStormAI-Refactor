@@ -14,18 +14,19 @@
 // - Cache key contains scene index to avoid cross-scene churn.
 // - Optional landmark-mode relaxation on last pass (env-controlled).
 //
-// GOAL: "Best scene matcher on the planet."
+// *** 2025-08 Progress Hooks ***
+// - 5D will call jobContext progress callbacks if present:
+//   jobContext.progress?.set(stage, percent)
+//   jobContext.progress?.tick(delta, stage)
+//   jobContext.updateProgress?.(percent, stage)
+//   jobContext.emit?.('progress', { percent, stage, sceneIdx })
+//   (No-ops if not provided; safe to ignore.)
 //
-// NOTES / GUARANTEES:
-// - We DO NOT assert local existence for R2 keys (5B downloads them).
-// - When an image wins, we build a local Ken Burns VIDEO so 5B always
-//   receives a real video path (unless extreme edge-case).
-// - Video is always preferred; photos are fallback only.
-// - Hard reject animal/person clips when subject is a landmark (unless
-//   ceremonial/guard context is explicit).
-// - Works whether usedClips is an Array or a Set (keys normalized).
-// - Global hard floors: video ≥ 70, image ≥ 75. Below that → Ken Burns.
-// - Max logging everywhere; no silent failures.
+// *** 2025-08 Video-Only Guarantee (unless opted out) ***
+// - By default, 5D will NEVER return a bare image path.
+// - If no provider video is found, it builds a local video from the image
+//   (Ken Burns or still-to-video). Only if MATCHER_ALLOW_RAW_IMAGE=true
+//   will it return a raw image path.
 // ===========================================================
 
 const path = require('path');
@@ -119,7 +120,7 @@ const REFORMULATION_MODEL = process.env.REFORMULATION_MODEL || 'gpt-4.1';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
-console.log('[5D][INIT] Smart Clip Matcher loaded (video-first, scoring floor, landmark-mode, loop-guarded).');
+console.log('[5D][INIT] Smart Clip Matcher loaded (video-first, scoring floor, landmark-mode, loop-guarded, progress-aware).');
 
 // ===========================================================
 // Constants / Utilities
@@ -127,13 +128,16 @@ console.log('[5D][INIT] Smart Clip Matcher loaded (video-first, scoring floor, l
 
 const HARD_FLOOR_VIDEO = Number(process.env.MATCHER_FLOOR_VIDEO || 70);
 const HARD_FLOOR_IMAGE = Number(process.env.MATCHER_FLOOR_IMAGE || 75);
-const PROVIDER_TIMEOUT_MS = Number(process.env.MATCHER_PROVIDER_TIMEOUT_MS || 12000);
+const PROVIDER_TIMEOUT_MS = Number(process.env.MATCHER_PROVIDER_TIMEOUT_MS || 10000); // shaved to speed up stalls
 
 // LOOP GUARDS
 const ATTEMPT_LIMIT = Math.max(1, Number(process.env.MATCHER_ATTEMPT_LIMIT || 2)); // literal + reformulated
-const TIME_BUDGET_MS = Math.max(4000, Number(process.env.MATCHER_TIME_BUDGET_MS || 20000)); // per scene
+const TIME_BUDGET_MS = Math.max(4000, Number(process.env.MATCHER_TIME_BUDGET_MS || 16000)); // slightly tighter for snappier jobs
 const MAX_SUBJECT_OPTIONS = Math.max(1, Number(process.env.MATCHER_MAX_SUBJECT_OPTIONS || 5));
 const RELAX_LANDMARK_ON_LAST_ATTEMPT = String(process.env.MATCHER_RELAX_LANDMARK_ON_LAST_ATTEMPT || 'true').toLowerCase() !== 'false';
+
+// VIDEO-ONLY behavior (unless explicitly allowed)
+const ALLOW_RAW_IMAGE = String(process.env.MATCHER_ALLOW_RAW_IMAGE || 'false').toLowerCase() === 'true';
 
 const GENERIC_SUBJECTS = [
   'face','person','man','woman','it','thing','someone','something','body','eyes',
@@ -379,6 +383,19 @@ function dedupeByPath(arr) {
   return out;
 }
 
+// ---------- Progress helpers (best-effort, no-op if not wired) ----------
+function progress(jobContext, sceneIdx, percent, stage, extra = {}) {
+  try {
+    if (!jobContext) return;
+    if (jobContext.progress?.set) jobContext.progress.set(stage, percent, { sceneIdx, ...extra });
+    if (jobContext.progress?.tick && typeof percent === 'number') jobContext.progress.tick(0, stage); // just stage ping
+    if (jobContext.updateProgress) jobContext.updateProgress(percent, stage, { sceneIdx, ...extra });
+    if (jobContext.emit) jobContext.emit('progress', { percent, stage, sceneIdx, ...extra });
+  } catch (e) {
+    // swallow
+  }
+}
+
 // ===========================================================
 // MAIN
 // ===========================================================
@@ -409,6 +426,7 @@ async function findClipForScene({
   console.log('\n===================================================');
   console.log(`[5D][START][${jobId}][S${sceneIdx}] Subject="${subject}" Mega=${isMegaScene}`);
   console.log(`[5D][CTX][S${sceneIdx}]`, allSceneTexts?.[sceneIdx] || '(no scene text)');
+  progress(jobContext, sceneIdx, 70, 'matcher:start'); // typical pipelines hit ~70-75% before clip match
 
   // Ensure job-scoped caches
   if (!jobContext._matcherCache) jobContext._matcherCache = new Map();           // positive cache
@@ -444,16 +462,21 @@ async function findClipForScene({
 
   if (forceClipPath) {
     console.log(`[5D][FORCE][${jobId}] Forced clip: ${forceClipPath}`);
+    progress(jobContext, sceneIdx, 92, 'matcher:forced');
     return forceClipPath;
   }
 
   // Quick R2 override for ultra-famous landmarks
   const contextOverride = await tryContextualLandmarkOverride(searchSubject, mainTopic, usedClips, jobId);
-  if (contextOverride) return contextOverride;
+  if (contextOverride) {
+    progress(jobContext, sceneIdx, 92, 'matcher:r2-landmark');
+    return contextOverride;
+  }
 
   // =========================================================
   // Prepare subject variations (no more than MAX_SUBJECT_OPTIONS)
   // =========================================================
+  progress(jobContext, sceneIdx, 74, 'matcher:subjects');
   let baseSubjects = [];
   const subjectExtractors = [
     ['MULTI', extractMultiSubjectVisual],
@@ -515,6 +538,7 @@ async function findClipForScene({
     console.log(`[5D][CACHE][HIT][${jobId}] key=${cacheKey} → ${cached?.path || '(no path)'}`);
     if (cached && cached.path && !usedHas(usedClips, cached.path)) {
       usedAdd(usedClips, cached.path);
+      progress(jobContext, sceneIdx, 93, 'matcher:cache-hit');
       return cached.path;
     }
   }
@@ -565,6 +589,8 @@ async function findClipForScene({
     let videoCandidates = [];
     let imageCandidates = [];
 
+    progress(jobContext, sceneIdx, 78, 'matcher:search-start', { attempt, subjects: subjectsThisAttempt });
+
     for (const subjectOption of subjectsThisAttempt) {
       if ((now() - sceneStart) > TIME_BUDGET_MS) {
         console.warn(`[5D][TIME][${jobId}][S${sceneIdx}] Budget hit mid-collection. Stopping searches.`);
@@ -581,6 +607,7 @@ async function findClipForScene({
       }
 
       // ---- Video lookups in parallel with timeouts ----
+      progress(jobContext, sceneIdx, 80, 'matcher:video-lookups');
       await Promise.allSettled([
         (async () => {
           try {
@@ -644,6 +671,7 @@ async function findClipForScene({
       ]);
 
       // ---- Photo lookups in parallel (fallback tier) with timeouts ----
+      progress(jobContext, sceneIdx, 84, 'matcher:image-lookups');
       await Promise.allSettled([
         (async () => {
           try {
@@ -713,6 +741,7 @@ async function findClipForScene({
     // =========================================================
     // Score candidates (strict thresholds, video preferred)
     // =========================================================
+    progress(jobContext, sceneIdx, 88, 'matcher:scoring');
     videoCandidates.forEach(c => { c.score = scoreSceneCandidate(c, c.subject || subject || searchSubject, usedClips, true); });
     imageCandidates.forEach(c => { c.score = scoreSceneCandidate(c, c.subject || subject || searchSubject, usedClips, false); });
 
@@ -730,6 +759,7 @@ async function findClipForScene({
       usedAdd(usedClips, best.path);
       jobContext._matcherCache.set(cacheKey, { path: best.path, type: 'video', score: best.score });
       console.log(`[5D][RESULT][VIDEO][${jobId}]`, { path: best.path, source: best.source, score: best.score, subj: best.subject });
+      progress(jobContext, sceneIdx, 92, 'matcher:video-selected', { source: best.source });
       lastResultPath = best.path;
       break;
     }
@@ -739,19 +769,48 @@ async function findClipForScene({
       const bestImg = imageCandidates[0];
       console.log(`[5D][RESULT][IMAGE->KB][${jobId}]`, { path: bestImg.path, source: bestImg.source, score: bestImg.score, subj: bestImg.subject });
 
+      progress(jobContext, sceneIdx, 90, 'matcher:kb-build');
       const kbVid = await kenBurnsVideoFromImagePath(bestImg.path, workDir, sceneIdx, jobId);
       if (kbVid && assertLocalFileExists(kbVid, 'KB_OUT', 2048)) {
         usedAdd(usedClips, bestImg.path); // mark image used to avoid repetition
         jobContext._matcherCache.set(cacheKey, { path: kbVid, type: 'kb', score: bestImg.score });
         lastResultPath = kbVid; // local video path
+        progress(jobContext, sceneIdx, 92, 'matcher:kb-ok');
         break;
       }
 
-      // Should be rare; last-ditch: return image path (5B may struggle)
-      console.warn(`[5D][IMAGE_FALLBACK][${jobId}] Ken Burns build failed; returning image path.`);
-      jobContext._matcherCache.set(cacheKey, { path: bestImg.path, type: 'image', score: bestImg.score });
-      lastResultPath = bestImg.path;
-      break;
+      // If KB failed, try still-to-video again explicitly (in case KB partially failed)
+      if (makeKenBurnsVideoFromImage && staticImageToVideo && preprocessImageToJpeg) {
+        try {
+          const safeDir = workDir || path.join(__dirname, '..', 'jobs', `kb-${jobId || 'job'}`);
+          if (!fs.existsSync(safeDir)) fs.mkdirSync(safeDir, { recursive: true });
+          const prepped = path.join(safeDir, `kb-prepped-${uuidv4()}.jpg`);
+          await preprocessImageToJpeg(bestImg.path, prepped, jobId);
+          const outVid = path.join(safeDir, `stillvid-${uuidv4()}.mp4`);
+          await staticImageToVideo(prepped, outVid, 5, jobId);
+          if (assertLocalFileExists(outVid, 'STILL_OUT', 2048)) {
+            usedAdd(usedClips, bestImg.path);
+            jobContext._matcherCache.set(cacheKey, { path: outVid, type: 'kb-still', score: bestImg.score });
+            lastResultPath = outVid;
+            progress(jobContext, sceneIdx, 92, 'matcher:still-ok');
+            break;
+          }
+        } catch (e) {
+          console.error('[5D][STILL][ERR]', e);
+        }
+      }
+
+      // Only return a raw image if explicitly allowed
+      if (ALLOW_RAW_IMAGE) {
+        console.warn(`[5D][IMAGE_FALLBACK][${jobId}] Returning raw image path (ALLOW_RAW_IMAGE=true).`);
+        jobContext._matcherCache.set(cacheKey, { path: bestImg.path, type: 'image', score: bestImg.score });
+        lastResultPath = bestImg.path;
+        progress(jobContext, sceneIdx, 92, 'matcher:image-fallback');
+        break;
+      } else {
+        console.warn(`[5D][IMAGE_FALLBACK][${jobId}] Suppressing raw image return (ALLOW_RAW_IMAGE=false).`);
+        // continue loop to allow reformulation/last attempt or fallbacks below
+      }
     }
 
     // If we got here with nothing and it's the last attempt, mark negative cache
@@ -765,6 +824,7 @@ async function findClipForScene({
   // =========================================================
   // Total miss → pick any R2 clip not yet used (no local assert)
   // =========================================================
+  progress(jobContext, sceneIdx, 92, 'matcher:r2-any-fallback');
   if (typeof findR2ClipForScene.getAllFiles === 'function') {
     try {
       const r2Files = await findR2ClipForScene.getAllFiles();
@@ -782,6 +842,7 @@ async function findClipForScene({
 
   // Nothing left
   console.error(`[5D][NO_MATCH][${jobId}] No match found for scene ${sceneIdx + 1}`);
+  progress(jobContext, sceneIdx, 92, 'matcher:none');
   return null;
 }
 
