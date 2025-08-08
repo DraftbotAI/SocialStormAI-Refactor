@@ -35,8 +35,8 @@ const {
   getDuration,
   trimForNarration,
   muxVideoWithNarration,
-  getVideoInfo,
-  standardizeVideo,
+  getVideoInfo: getVideoInfoLocal, // may be missing in older 5F — we guard below
+  standardizeVideo: standardizeVideoLocal,
 } = require('./section5f-video-processing.cjs');
 
 const { findClipForScene } = require('./section5d-clip-matcher.cjs');
@@ -322,11 +322,41 @@ function registerGenerateVideoEndpoint(app, deps) {
     POLLY_VOICE_IDS,
   } = deps;
 
+  // Prefer DI, else local imports, else no-op guard (we still continue safely)
+  const getVideoInfo = typeof depGetVideoInfo === 'function'
+    ? depGetVideoInfo
+    : (typeof getVideoInfoLocal === 'function' ? getVideoInfoLocal : null);
+
+  const standardizeVideo = typeof depStandardizeVideo === 'function'
+    ? depStandardizeVideo
+    : (typeof standardizeVideoLocal === 'function' ? standardizeVideoLocal : null);
+
+  console.log(`[5B][CAPS] getVideoInfo: ${getVideoInfo ? 'OK' : 'MISSING'} | standardizeVideo: ${standardizeVideo ? 'OK' : 'MISSING'}`);
+
   if (typeof createSceneAudio !== 'function' || typeof createMegaSceneAudio !== 'function') {
     throw new Error('[5B][FATAL] Audio generation helpers missing!');
   }
   if (typeof depSplitScriptToScenes !== 'function') {
     throw new Error('[5B][FATAL] splitScriptToScenes missing from deps!');
+  }
+
+  // Safe wrapper: never throws, always returns structure
+  async function getVideoInfoSafe(filePath) {
+    try {
+      if (!getVideoInfo) {
+        console.warn('[5B][FFPROBE][WARN] getVideoInfo not available; returning null info');
+        return { width: null, height: null, duration: null, fps: null, codec: null, hasAudio: null };
+      }
+      const info = await getVideoInfo(filePath);
+      if (!info || typeof info !== 'object') {
+        console.warn('[5B][FFPROBE][WARN] getVideoInfo returned invalid payload; normalizing');
+        return { width: null, height: null, duration: null, fps: null, codec: null, hasAudio: null };
+      }
+      return info;
+    } catch (e) {
+      console.error('[5B][FFPROBE][ERR]', e);
+      return { width: null, height: null, duration: null, fps: null, codec: null, hasAudio: null };
+    }
   }
 
   console.log('[5B][INFO] Registering POST /api/generate-video route...');
@@ -711,15 +741,19 @@ function registerGenerateVideoEndpoint(app, deps) {
         // CONCAT, AUDIO FIX, MUSIC, OUTRO, UPLOADS
         // ===========================================
         progress[jobId] = { percent: 60, status: 'Stitching your video together...' };
-        let refInfo = null;
+
+        progress[jobId] = { percent: 64, status: 'Checking video quality...' };
+        const refInfo = await getVideoInfoSafe(sceneFiles[0]);
+        console.log(`[5B][FFPROBE][REF] ${JSON.stringify(refInfo)}`);
+
         try {
-          progress[jobId] = { percent: 64, status: 'Checking video quality...' };
-          refInfo = await getVideoInfo(sceneFiles[0]);
-        } catch (e) {
-          throw new Error(`[5B][BULLETPROOF][ERR][${jobId}] Failed to get video info: ${e}`);
-        }
-        try {
-          await bulletproofScenes(sceneFiles, refInfo, getVideoInfo, standardizeVideo);
+          await bulletproofScenes(
+            sceneFiles,
+            refInfo,
+            // pass safe adapters so bulletproofScenes can use them
+            async (p) => await getVideoInfoSafe(p),
+            standardizeVideo || (async (a,b,c) => { console.warn('[5B][STD][WARN] standardizeVideo missing, skipping'); return a; })
+          );
           progress[jobId] = { percent: 68, status: 'Perfecting your video quality...' };
         } catch (e) {
           throw new Error(`[5B][BULLETPROOF][ERR][${jobId}] bulletproofScenes failed: ${e}`);
