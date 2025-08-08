@@ -8,7 +8,7 @@
 //          local downloads for both (so 5D can assertFileExists),
 //          strong anti-dupe across URL + local path, timeouts,
 //          landmark-mode culling (no random animals/people for landmarks),
-//          query variants + retries, and robust logging.
+//          query variants + single retry, and robust logging.
 // Exports:
 //   - findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
 //   - findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips)
@@ -74,6 +74,12 @@ const STRICT_LANDMARK_MODE = String(process.env.PIXABAY_STRICT_LANDMARK_MODE || 
 // ===========================================================
 // Small Utils
 // ===========================================================
+function ensureDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (_) {}
+}
+
 function alnumLower(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
@@ -139,6 +145,7 @@ function isValidLocal(filePath, minBytes) {
 
 async function streamDownload(url, outPath, jobId, minBytes) {
   try {
+    ensureDir(path.dirname(outPath));
     const response = await axios({
       url,
       method: 'GET',
@@ -193,7 +200,7 @@ function makeQueryVariants(subject, maxVariants) {
   variants.add(q);                 // base
   variants.add(q.replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim()); // cleaned
 
-  // quoted exact (Pixabay ignores quotes but we keep the version for logging/consistency)
+  // quoted exact (Pixabay ignores quotes but we keep for parity/logging)
   variants.add(`"${q}"`);
 
   // synonym expansion (light)
@@ -202,13 +209,13 @@ function makeQueryVariants(subject, maxVariants) {
     const syns = SYNONYMS[tok.toLowerCase()] || [];
     syns.slice(0, 2).forEach(s => {
       variants.add(s);
-      variants.add(`${s} ${words.filter(w => w.toLowerCase() !== tok.toLowerCase()).join(' ')}`.trim());
+      const rest = words.filter(w => w.toLowerCase() !== tok.toLowerCase()).join(' ');
+      if (rest) variants.add(`${s} ${rest}`);
     });
   });
 
-  // remove pure generics and trim size
   const out = Array.from(variants)
-    .map(v => v.length > 80 ? v.slice(0, 80) : v)
+    .map(v => (v.length > 80 ? v.slice(0, 80) : v))
     .filter(v => !GENERIC_SUBJECTS.includes(alnumLower(v)));
 
   return out.slice(0, Math.max(1, maxVariants || 1));
@@ -403,7 +410,7 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
   // Build & score variants
   let candidates = [];
   for (const hit of allHits) {
-    const sceneText = q; // we treat subject as the scene focus here
+    const sceneText = q; // subject as scene focus
     const cs = buildVideoCandidatesFromHit(hit, q, usedClips, sceneText);
     for (const c of cs) {
       if (landmarkMode && !landmarkCullCandidate(c)) {

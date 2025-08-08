@@ -5,8 +5,9 @@
 //   - findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips, bestVideoScore?)
 // Video-first: photos are used ONLY if they beat the best video by margin.
 // Max logs, landmark-mode filters, anti-dupe, vertical-preferred, strict sizing.
-// Ready for universal scoring (10G) + strict provider timeouts + retries.
-// Returns rich objects { filePath, title, description, tags, provider, isVideo }.
+// Ready for universal scoring (10G) + strict provider timeouts + single retry.
+// Returns rich objects { filePath, title, description, tags, provider, isVideo, score }.
+// No open-ended loops. Hard caps everywhere.
 // ===========================================================
 
 const axios = require('axios');
@@ -41,7 +42,7 @@ const MAX_PER_PAGE = Math.min(Number(process.env.PEXELS_PER_PAGE || 40), 80); //
 const PAGES = Math.min(Number(process.env.PEXELS_PAGES || 2), 5);
 
 const VERTICAL_ASPECT_TARGET = 9 / 16;
-const VERTICAL_TOLERANCE = 0.20; // allow 20% aspect wiggle (portrait-ish)
+const VERTICAL_TOLERANCE = 0.20; // 20% wiggle (portrait-ish)
 
 // Strict floors & knobs (kept in sync with 5D)
 const HARD_FLOOR_VIDEO = Number(process.env.MATCHER_FLOOR_VIDEO || 70);
@@ -91,10 +92,10 @@ function makeQueryVariants(subject) {
 
   // Proper noun bias + quoted exact search first
   const variants = new Set();
-  variants.add(`"${q}"`);             // quoted exact
-  variants.add(q);                     // plain
+  variants.add(`"${q}"`);   // quoted exact
+  variants.add(q);          // plain
 
-  // Split on common connectors and add conjunction combos
+  // Split & conjunction combos
   const words = q.split(/\s+/).filter(Boolean);
   if (words.length >= 2) {
     variants.add(words.join(' '));
@@ -108,20 +109,20 @@ function makeQueryVariants(subject) {
     syns.slice(0, 3).forEach(s => {
       variants.add(`"${s}"`);
       variants.add(`${s}`);
-      variants.add(`${s} ${words.filter(w => w.toLowerCase() !== tok).join(' ')}`.trim());
+      const rest = words.filter(w => w.toLowerCase() !== tok).join(' ');
+      if (rest) variants.add(`${s} ${rest}`);
     });
   });
 
   // Remove pure generics
   const out = Array.from(variants).filter(v => !GENERIC_SUBJECTS.includes(alnumLower(v)));
-  // Truncate overly long queries (Pexels tends to perform worse with long sentences)
-  return out.map(v => v.length > 80 ? v.slice(0, 80) : v);
+  // Truncate overly long queries
+  return out.map(v => (v.length > 80 ? v.slice(0, 80) : v));
 }
 
 function isLikelyPortrait(w, h) {
   if (!w || !h) return false;
-  const ratio = w / h;
-  // Portrait if ratio is within tolerance around 9:16 (0.5625)
+  const ratio = w / h; // < 1 => portrait
   return Math.abs(ratio - VERTICAL_ASPECT_TARGET) <= VERTICAL_TOLERANCE || ratio < 0.8;
 }
 
@@ -170,10 +171,9 @@ async function downloadFile(url, outPath, jobId, addAuthHeader = false) {
       responseType: 'stream',
       headers: addAuthHeader ? { Authorization: PEXELS_API_KEY } : undefined,
       timeout: PROVIDER_TIMEOUT_MS,
-      // Note: Pexels file CDN URLs generally don't require auth
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
-      validateStatus: s => (s >= 200 && s < 300),
+      validateStatus: s => s >= 200 && s < 300,
     });
 
     await new Promise((resolve, reject) => {
@@ -200,14 +200,13 @@ async function downloadFile(url, outPath, jobId, addAuthHeader = false) {
 function pickBestVideoFile(videoFiles = []) {
   if (!Array.isArray(videoFiles) || !videoFiles.length) return null;
 
-  // Prefer portrait-ish & highest height; else fall back to overall largest resolution
+  // Prefer portrait & highest height; else largest pixels
   const portrait = videoFiles
     .filter(v => v && v.width && v.height && isLikelyPortrait(v.width, v.height))
     .sort((a, b) => (b.height || 0) - (a.height || 0));
 
   if (portrait.length) return portrait[0];
 
-  // Fallback: pick highest resolution total pixels
   return videoFiles
     .filter(v => v && v.width && v.height)
     .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0] || null;
@@ -242,7 +241,7 @@ function landmarkCullCandidate(candidate) {
   return landmarkCullFromText(text);
 }
 
-// ==== PAGED SEARCH HELPERS (with retry) ====
+// ==== PAGED SEARCH HELPERS (with single retry) ====
 async function pexelsSearchPaged(url, paramsBase, label, jobId) {
   let out = [];
   for (let page = 1; page <= PAGES; page++) {
@@ -252,16 +251,16 @@ async function pexelsSearchPaged(url, paramsBase, label, jobId) {
         params,
         headers: { Authorization: PEXELS_API_KEY },
         timeout: PROVIDER_TIMEOUT_MS,
-        validateStatus: s => (s >= 200 && s < 300),
+        validateStatus: s => s >= 200 && s < 300,
       });
       const items = (res.data && (label === 'video' ? res.data.videos : res.data.photos)) || [];
       console.log(`[10B][${label.toUpperCase()}][${jobId}] page=${page} got=${items.length}`);
       out.push(...items);
-      if (!items.length) break; // no need to continue if empty page
+      if (!items.length) break; // stop if empty page
     } catch (err) {
       const status = err?.response?.status;
       console.error(`[10B][${label.toUpperCase()}][${jobId}][ERR] page=${page}`, status, err?.message);
-      // lightweight retry once on 429/5xx
+      // Lightweight single retry on 429/5xx
       if (status === 429 || (status >= 500 && status <= 599)) {
         try {
           console.log(`[10B][${label.toUpperCase()}][${jobId}] retrying page=${page} after backoff...`);
@@ -271,7 +270,7 @@ async function pexelsSearchPaged(url, paramsBase, label, jobId) {
             params,
             headers: { Authorization: PEXELS_API_KEY },
             timeout: PROVIDER_TIMEOUT_MS,
-            validateStatus: s => (s >= 200 && s < 300),
+            validateStatus: s => s >= 200 && s < 300,
           });
           const items2 = (res2.data && (label === 'video' ? res2.data.videos : res2.data.photos)) || [];
           console.log(`[10B][${label.toUpperCase()}][${jobId}] (retry) page=${page} got=${items2.length}`);
@@ -282,9 +281,10 @@ async function pexelsSearchPaged(url, paramsBase, label, jobId) {
           break;
         }
       } else {
-        break; // don't loop forever on repeated errors
+        break; // avoid any loop
       }
     }
+    if (out.length >= MAX_RESULTS_RETURN) break; // global cap
   }
   return out;
 }
@@ -307,9 +307,8 @@ async function collectPexelsVideos(subject, jobId) {
 
   let all = [];
   for (const v of variants) {
-    const rows = await pexelsSearchPaged(PEXELS_VIDEO_URL, { query: v }, 'video', jobId);
+    const rows = await pexelsSearchPaged(PEXELS_VIDEO_URL, { query: v, orientation: 'portrait' }, 'video', jobId);
     if (rows?.length) {
-      // tag items with variant used (helps future debugging)
       rows.forEach(r => (r.__variant = v));
       all.push(...rows);
     }
@@ -317,9 +316,7 @@ async function collectPexelsVideos(subject, jobId) {
   }
   // de-dupe by id
   const map = new Map();
-  for (const vid of all) {
-    map.set(String(vid.id), vid);
-  }
+  for (const vid of all) map.set(String(vid.id), vid);
   return Array.from(map.values());
 }
 
@@ -329,7 +326,7 @@ async function collectPexelsPhotos(subject, jobId) {
 
   let all = [];
   for (const v of variants) {
-    const rows = await pexelsSearchPaged(PEXELS_PHOTO_URL, { query: v }, 'photo', jobId);
+    const rows = await pexelsSearchPaged(PEXELS_PHOTO_URL, { query: v, orientation: 'portrait' }, 'photo', jobId);
     if (rows?.length) {
       rows.forEach(r => (r.__variant = v));
       all.push(...rows);
@@ -338,15 +335,13 @@ async function collectPexelsPhotos(subject, jobId) {
   }
   // de-dupe by id
   const map = new Map();
-  for (const p of all) {
-    map.set(String(p.id), p);
-  }
+  for (const p of all) map.set(String(p.id), p);
   return Array.from(map.values());
 }
 
 // ===========================================================
 // MAIN VIDEO FINDER (VIDEO-FIRST)
-// Returns { filePath, title, description, tags, provider:'pexels', isVideo:true } or null
+// Returns { filePath, title, description, tags, provider:'pexels', isVideo:true, score } or null
 // ===========================================================
 async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
   if (!PEXELS_API_KEY) {
@@ -381,11 +376,10 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
     const h = bestFile.height || video.height;
     const dur = video.duration;
 
-    // reject if already used (by URL or id)
     if (usedHas(usedClips, url) || usedHas(usedClips, String(video.id))) continue;
 
     const titleLike = video.url || `pexels-${video.id}`;
-    const tags = Array.isArray(video.tags) ? video.tags : []; // Pexels video rarely returns tags; keep placeholder
+    const tags = Array.isArray(video.tags) ? video.tags : [];
 
     const item = {
       pexelsId: video.id,
@@ -402,9 +396,9 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
       provider: 'pexels',
       path: null,
       filename: `pexels_${video.id}.mp4`,
+      source: 'pexels'
     };
 
-    // Landmark cull (drop animals/people unless guard context)
     if (landmarkMode && !landmarkCullCandidate(item)) {
       console.log(`[10B][VIDEO][${jobId}][CULL][LANDMARK] drop id=${video.id} due to animal/person noise`);
       continue;
@@ -419,7 +413,7 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
     return null;
   }
 
-  // Prefer portrait, then score (desc)
+  // Prefer portrait, then score
   candidates.sort((a, b) => {
     const pa = isLikelyPortrait(a.width, a.height) ? 1 : 0;
     const pb = isLikelyPortrait(b.width, b.height) ? 1 : 0;
@@ -450,7 +444,7 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
   // 3) Download (don’t re-download if valid)
   if (!fileOk(outPath, MIN_BYTES_VIDEO)) {
     console.log(`[10B][VIDEO][${jobId}] Downloading Pexels video → ${outPath}`);
-    const dl = await downloadFile(best.url, outPath, jobId /* direct CDN; no auth for file URL */);
+    const dl = await downloadFile(best.url, outPath, jobId /* CDN; no auth for file URL */);
     if (!dl || !fileOk(outPath, MIN_BYTES_VIDEO)) {
       console.warn(`[10B][VIDEO][${jobId}] Download failed/invalid for ${best.url}`);
       return null;
@@ -474,12 +468,13 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
     tags: best.tags,
     provider: 'pexels',
     isVideo: true,
+    score: best.score,
   };
 }
 
 // ===========================================================
 // PHOTO FINDER (ONLY IF STRICTLY BETTER THAN VIDEO)
-// Returns { filePath, title, description, tags, provider:'pexels', isVideo:false } or null
+// Returns { filePath, title, description, tags, provider:'pexels', isVideo:false, score } or null
 // ===========================================================
 async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips = [], bestVideoScore = 0) {
   if (!PEXELS_API_KEY) {
@@ -513,7 +508,6 @@ async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedCl
     const w = photo.width;
     const h = photo.height;
 
-    // reject if clearly already used
     if (usedHas(usedClips, url) || usedHas(usedClips, String(photo.id))) continue;
 
     const item = {
@@ -524,11 +518,12 @@ async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedCl
       photographer: photo.photographer,
       title: photo.url || `pexels-photo-${photo.id}`,
       description: `Pexels photo ${photo.id} (${photo.__variant || 'base'})`,
-      tags: [], // Pexels photos do not ship tags; reserved for downstream enrichment
+      tags: [], // reserved for downstream enrichment
       subject: q,
       isVideo: false,
       provider: 'pexels',
-      path: null
+      path: null,
+      source: 'pexels'
     };
 
     if (landmarkMode && !landmarkCullCandidate(item)) {
@@ -572,8 +567,8 @@ async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedCl
 
   // 3) Enforce "photo only if better than video" policy
   const photoBeatsVideo =
-    (best.score >= bestVideoScore + PHOTO_BEATS_VIDEO_MARGIN) ||
-    (best.score >= STRICT_PHOTO_THRESHOLD && bestVideoScore < Math.max(80, HARD_FLOOR_VIDEO));
+    (best.score >= (bestVideoScore || 0) + PHOTO_BEATS_VIDEO_MARGIN) ||
+    (best.score >= STRICT_PHOTO_THRESHOLD && (bestVideoScore || 0) < Math.max(80, HARD_FLOOR_VIDEO));
 
   if (!photoBeatsVideo) {
     console.log(
@@ -588,7 +583,7 @@ async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedCl
 
   if (!fileOk(outPath, MIN_BYTES_PHOTO)) {
     console.log(`[10B][PHOTO][${jobId}] Downloading Pexels photo → ${outPath}`);
-    const dl = await downloadFile(best.url, outPath, jobId /* direct CDN; no auth for file URL */);
+    const dl = await downloadFile(best.url, outPath, jobId /* CDN; no auth for file URL */);
     if (!dl || !fileOk(outPath, MIN_BYTES_PHOTO)) {
       console.warn(`[10B][PHOTO][${jobId}] Download failed/invalid for ${best.url}`);
       return null;
@@ -610,6 +605,7 @@ async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedCl
     tags: best.tags,
     provider: 'pexels',
     isVideo: false,
+    score: best.score,
   };
 }
 
