@@ -76,42 +76,63 @@ function assertFileExists(file, label) {
   }
 }
 
+// Normalize a clip source into {type,keyOrPath}
+// - http(s) → remote URL (we'll download via axios in 10D if needed; here we just treat as remote and copy via ffmpeg if already downloaded by 10D)
+// - absolute/local path → local
+// - anything else → r2 key
+function classifyClipSrc(srcPath) {
+  const s = String(srcPath || '');
+  if (/^https?:\/\//i.test(s)) return { type: 'url', value: s };
+  if (path.isAbsolute(s) || s.startsWith('./') || s.startsWith('../')) return { type: 'local', value: s };
+  return { type: 'r2', value: s.replace(/^\/+/, '') };
+}
+
 // INTEL download/copy: R2 object, local file, or already-local job artifact.
+// If src is already local and exists → copy into localPath (so later cleanup is easy).
+// If src is an R2 key → download from R2 videos bucket.
+// If src is a URL → we *assume* the origin fetch happened upstream (10B/10C/10D) and fail back to Ken Burns if missing.
 async function ensureLocalClipExists(srcPath, localPath) {
+  const kind = classifyClipSrc(srcPath);
+
   try {
-    // Local absolute/relative path present → copy if different location
-    if (srcPath && fs.existsSync(srcPath) && fs.statSync(srcPath).isFile()) {
-      if (path.resolve(srcPath) !== path.resolve(localPath)) {
-        fs.copyFileSync(srcPath, localPath);
-        console.log(`[5B][LOCAL][COPY] Copied local clip → ${localPath}`);
+    if (kind.type === 'local') {
+      if (fs.existsSync(kind.value) && fs.statSync(kind.value).isFile()) {
+        if (path.resolve(kind.value) !== path.resolve(localPath)) {
+          fs.copyFileSync(kind.value, localPath);
+          console.log(`[5B][LOCAL][COPY] Copied local clip → ${localPath}`);
+        } else {
+          console.log(`[5B][LOCAL][SKIP] Clip already at local target: ${localPath}`);
+        }
+        return localPath;
       } else {
-        console.log(`[5B][LOCAL][SKIP] Clip already at local target: ${localPath}`);
+        console.warn(`[5B][LOCAL][MISS] Local file not found, will not be able to use: ${kind.value}`);
+        throw new Error('Local clip missing');
       }
+    }
+
+    if (kind.type === 'r2') {
+      const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
+      const key = kind.value;
+      console.log(`[5B][R2][DOWNLOAD] Fetching from R2: bucket=${bucket} key=${key} → ${localPath}`);
+      const { GetObjectCommand } = require('@aws-sdk/client-s3');
+      const data = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      const fileStream = fs.createWriteStream(localPath);
+      await new Promise((resolve, reject) => {
+        data.Body.pipe(fileStream);
+        data.Body.on('error', reject);
+        fileStream.on('finish', resolve);
+      });
+      console.log(`[5B][R2][DOWNLOAD][OK] Downloaded to: ${localPath}`);
       return localPath;
     }
-  } catch (e) {
-    console.warn('[5B][LOCAL][WARN] Local path check/copy failed, will try R2 logic.', e);
-  }
 
-  // Otherwise assume R2 key path (folder/key)
-  const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  const key = String(srcPath || '')
-    .replace(/^(\.\/)+/, '')
-    .replace(/^\/+/, '');
-  console.log(`[5B][R2][DOWNLOAD] Fetching from R2: bucket=${bucket} key=${key} → ${localPath}`);
-  try {
-    const { GetObjectCommand } = require('@aws-sdk/client-s3');
-    const data = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-    const fileStream = fs.createWriteStream(localPath);
-    await new Promise((resolve, reject) => {
-      data.Body.pipe(fileStream);
-      data.Body.on('error', reject);
-      fileStream.on('finish', resolve);
-    });
-    console.log(`[5B][R2][DOWNLOAD][OK] Downloaded to: ${localPath}`);
-    return localPath;
+    // URL (http/https) → we expect 10B/10C downloader to have cached a file
+    // Since we don't have a guaranteed local path, just fail and let fallback handle.
+    console.warn(`[5B][URL][WARN] Got a URL for clip, but no local downloader here: ${srcPath}`);
+    throw new Error('URL clip not locally available');
+
   } catch (err) {
-    console.error(`[5B][R2][DOWNLOAD][FAIL] Could not download R2 file:`, err);
+    console.error(`[5B][CLIP_FETCH][FAIL] Could not materialize clip locally for src=${srcPath}`, err);
     throw err;
   }
 }
@@ -262,11 +283,11 @@ function pLimit(max) {
 function registerGenerateVideoEndpoint(app, deps) {
   console.log('[5B][BOOT] Called registerGenerateVideoEndpoint...');
   if (!app) throw new Error('[5B][FATAL] No app passed in!');
-  if (!deps) throw new Error('[5B][FATAL] No dependencies passed in!');
+  if (!deps) throw new Error('[5B][FATAL] No dependencies passed in!]');
 
   const {
     splitScriptToScenes: depSplitScriptToScenes,
-    findClipForScene: depFindClipForScene,
+    findClipForScene: depFindClipForScene, // not used directly; we use top-level findClipForScene
     createSceneAudio,
     createMegaSceneAudio,
     getAudioDuration, getVideoInfo, standardizeVideo,
@@ -732,3 +753,4 @@ async function uploadFinalToVideosBucket(finalPath, finalName, jobId, categoryFo
   console.log(`[5B][R2][UPLOAD][OK] Final uploaded: ${url}`);
   return url;
 }
+
