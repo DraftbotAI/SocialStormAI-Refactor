@@ -12,13 +12,17 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { exec } = require('child_process');
 const { s3Client, PutObjectCommand } = require('./section1-setup.cjs');
+
 const {
   bulletproofScenes,
   splitScriptToScenes,
   extractVisualSubject
 } = require('./section5c-script-scene-utils.cjs');
+
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
+
 const {
   concatScenes,
   ensureAudioStream,
@@ -27,14 +31,30 @@ const {
   getUniqueFinalName,
   pickMusicForMood
 } = require('./section5g-concat-and-music.cjs');
+
 const {
   getDuration,
   trimForNarration,
   muxVideoWithNarration,
 } = require('./section5f-video-processing.cjs');
+
 const { findClipForScene } = require('./section5d-clip-matcher.cjs');
 const { cleanupJob } = require('./section5h-job-cleanup.cjs');
 const { uploadSceneClipToR2, cleanForFilename } = require('./section10e-upload-to-r2.cjs');
+
+// Ken Burns helpers (10D). generatePlaceholderKenBurns may not exist yet;
+// we soft-require and fall back to an internal ffmpeg placeholder if missing.
+let fallbackKenBurnsVideo = null;
+let generatePlaceholderKenBurns = null;
+try {
+  const kb = require('./section10d-kenburns-image-helper.cjs');
+  fallbackKenBurnsVideo = kb.fallbackKenBurnsVideo || null;
+  generatePlaceholderKenBurns = kb.generatePlaceholderKenBurns || null;
+  console.log('[5B][INIT] 10D Ken Burns helpers loaded.');
+} catch (e) {
+  console.warn('[5B][INIT][WARN] 10D Ken Burns helper not found. Will synthesize placeholder if needed.');
+}
+
 const OpenAI = require('openai');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
@@ -42,8 +62,8 @@ console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
 // === CACHES ===
 const audioCacheDir = path.resolve(__dirname, '..', 'audio_cache');
 const videoCacheDir = path.resolve(__dirname, '..', 'video_cache');
-if (!fs.existsSync(audioCacheDir)) fs.mkdirSync(audioCacheDir);
-if (!fs.existsSync(videoCacheDir)) fs.mkdirSync(videoCacheDir);
+if (!fs.existsSync(audioCacheDir)) fs.mkdirSync(audioCacheDir, { recursive: true });
+if (!fs.existsSync(videoCacheDir)) fs.mkdirSync(videoCacheDir, { recursive: true });
 
 // === HELPERS ===
 function hashForCache(str) {
@@ -56,10 +76,28 @@ function assertFileExists(file, label) {
   }
 }
 
-async function ensureLocalClipExists(r2Path, localPath) {
-  if (fs.existsSync(localPath) && fs.statSync(localPath).size > 10240) return localPath;
+// INTEL download/copy: R2 object, local file, or already-local job artifact.
+async function ensureLocalClipExists(srcPath, localPath) {
+  try {
+    // Local absolute/relative path present → copy if different location
+    if (srcPath && fs.existsSync(srcPath) && fs.statSync(srcPath).isFile()) {
+      if (path.resolve(srcPath) !== path.resolve(localPath)) {
+        fs.copyFileSync(srcPath, localPath);
+        console.log(`[5B][LOCAL][COPY] Copied local clip → ${localPath}`);
+      } else {
+        console.log(`[5B][LOCAL][SKIP] Clip already at local target: ${localPath}`);
+      }
+      return localPath;
+    }
+  } catch (e) {
+    console.warn('[5B][LOCAL][WARN] Local path check/copy failed, will try R2 logic.', e);
+  }
+
+  // Otherwise assume R2 key path (folder/key)
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
-  const key = r2Path.replace(/^(\.\/)+/, '').replace(/^\/+/, '');
+  const key = String(srcPath || '')
+    .replace(/^(\.\/)+/, '')
+    .replace(/^\/+/, '');
   console.log(`[5B][R2][DOWNLOAD] Fetching from R2: bucket=${bucket} key=${key} → ${localPath}`);
   try {
     const { GetObjectCommand } = require('@aws-sdk/client-s3');
@@ -76,6 +114,48 @@ async function ensureLocalClipExists(r2Path, localPath) {
     console.error(`[5B][R2][DOWNLOAD][FAIL] Could not download R2 file:`, err);
     throw err;
   }
+}
+
+// Emergency placeholder generator if 10D.generatePlaceholderKenBurns is unavailable.
+// Creates a 3s 1080x1920 MP4 with black background and centered subject text.
+async function synthesizePlaceholderKenBurns(subject, workDir, sceneIdx, jobId) {
+  const safeIdx = String(sceneIdx).padStart(2, '0');
+  const outPath = path.join(workDir, `kb_placeholder_${safeIdx}.mp4`);
+  const text = (subject || 'No Visual').replace(/:/g, '\\:').slice(0, 64);
+  return new Promise((resolve, reject) => {
+    const cmd =
+      `ffmpeg -y -f lavfi -i color=c=black:s=1080x1920:d=3 ` +
+      `-vf "drawtext=text='${text}':fontcolor=white:fontsize=64:x=(w-text_w)/2:y=(h-text_h)/2,` +
+      `zoompan=z='min(zoom+0.0015,1.1)':d=90:fps=30" ` +
+      `-pix_fmt yuv420p -r 30 -c:v libx264 "${outPath}"`;
+    console.log(`[5B][KB_PLACEHOLDER][${jobId}] ${cmd}`);
+    exec(cmd, (err, stdout, stderr) => {
+      if (err) {
+        console.error('[5B][KB_PLACEHOLDER][ERR]', err, stderr);
+        return reject(err);
+      }
+      console.log('[5B][KB_PLACEHOLDER][OK]', outPath);
+      resolve(outPath);
+    });
+  });
+}
+
+async function ensureKenBurnsClip(subject, workDir, sceneIdx, jobId, usedClips) {
+  // Try 10D fallback first (if available)
+  if (typeof fallbackKenBurnsVideo === 'function') {
+    try {
+      const p = await fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClips);
+      if (p) return p;
+      console.warn(`[5B][KB][${jobId}] 10D fallback returned null, generating placeholder...`);
+    } catch (e) {
+      console.warn(`[5B][KB][${jobId}] 10D fallback threw, generating placeholder...`, e);
+    }
+  }
+  // If 10D has generatePlaceholderKenBurns, use it; else synthesize internally.
+  if (typeof generatePlaceholderKenBurns === 'function') {
+    return await generatePlaceholderKenBurns(subject, workDir, sceneIdx, jobId);
+  }
+  return await synthesizePlaceholderKenBurns(subject, workDir, sceneIdx, jobId);
 }
 
 // === GPT CLIENT (for category fallback) ===
@@ -280,12 +360,11 @@ function registerGenerateVideoEndpoint(app, deps) {
             categoryFolder
           });
         } catch (e) {
-          console.warn(`[5B][HOOK][CLIP][WARN][${jobId}] No clip found for hook, using fallback:`, e);
+          console.warn(`[5B][HOOK][CLIP][WARN][${jobId}] No clip found for hook, trying Ken Burns fallback:`, e);
         }
         if (!hookClipPath) {
-          const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
-          hookClipPath = await fallbackKenBurnsVideo(scenes[0].visualSubject || hookText || mainTopic, workDir, 0, jobId, usedClips);
-          if (!hookClipPath) throw new Error(`[5B][HOOK][ERR][${jobId}] No fallback Ken Burns visual for HOOK!`);
+          console.warn(`[5B][HOOK][FALLBACK][${jobId}] Using Ken Burns fallback for HOOK`);
+          hookClipPath = await ensureKenBurnsClip(scenes[0].visualSubject || hookText || mainTopic, workDir, 0, jobId, usedClips);
         }
 
         const localHookClipPath = path.join(workDir, path.basename(hookClipPath));
@@ -354,9 +433,8 @@ function registerGenerateVideoEndpoint(app, deps) {
           if (megaClipPath) break;
         }
         if (!megaClipPath) {
-          const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
-          megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
-          if (!megaClipPath) throw new Error(`[5B][MEGA][ERR][${jobId}] No fallback Ken Burns visual for MEGA!`);
+          console.warn(`[5B][MEGA][FALLBACK][${jobId}] Using Ken Burns fallback for MEGA`);
+          megaClipPath = await ensureKenBurnsClip(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
         }
 
         const localMegaClipPath = path.join(workDir, path.basename(megaClipPath));
@@ -387,7 +465,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         const totalScenes = scenes.length;
         const remainingCount = Math.max(totalScenes - 2, 0);
         const pctBase = 22;                 // after mega scene, we were ~20; we start remaining at ~22
-        const pctSpan = 35;                 // same as your original math: 35% reserved for remaining scenes
+        const pctSpan = 35;                 // reserve ~35% for remaining scenes
         const pctPerScene = remainingCount > 0 ? (pctSpan / remainingCount) : 0;
         let completedScenes = 0;
 
@@ -423,9 +501,8 @@ function registerGenerateVideoEndpoint(app, deps) {
             }
 
             if (!clipPath) {
-              const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
-              clipPath = await fallbackKenBurnsVideo(sceneSubject || mainTopic, workDir, sceneIdx, jobId, usedClips);
-              if (!clipPath) throw new Error(`[5B][ERR][NO_MATCH][${jobId}] No fallback Ken Burns visual for scene ${sceneIdx + 1}!`);
+              console.warn(`[5B][FALLBACK][${jobId}] Using Ken Burns fallback for scene ${sceneIdx + 1}`);
+              clipPath = await ensureKenBurnsClip(sceneSubject || mainTopic, workDir, sceneIdx, jobId, usedClips);
             }
 
             const localClipPath = path.join(workDir, path.basename(clipPath));
@@ -593,7 +670,8 @@ function registerGenerateVideoEndpoint(app, deps) {
           r2VideoUrl = await uploadFinalToVideosBucket(finalPath, finalName, jobId, categoryFolder);
           progress[jobId] = { percent: 99, status: 'Video uploaded to player bucket. Archiving to library...' };
         } catch (uploadErr) {
-          progress[jobId] = { percent: 100, status: 'Video ready locally (Cloudflare upload failed).', output: finalPath };
+          // Do not lie about success — surface failure but keep local path visible
+          progress[jobId] = { percent: -1, status: 'FAILED: Upload to player bucket', error: String(uploadErr), output: finalPath };
           throw uploadErr;
         }
 
@@ -617,7 +695,8 @@ function registerGenerateVideoEndpoint(app, deps) {
 
       } catch (err) {
         console.error(`[5B][FATAL][JOB][${jobId}] Video job failed:`, err, err && err.stack ? err.stack : '');
-        progress[jobId] = { percent: 100, status: 'Something went wrong. Please try again or contact support.', error: err.message || err.toString() };
+        // IMPORTANT: set failure clearly for Section 2 progress endpoint
+        progress[jobId] = { percent: -1, status: `FAILED: ${err.message || err}`, error: err.message || err.toString() };
       } finally {
         if (cleanupJob) {
           try {

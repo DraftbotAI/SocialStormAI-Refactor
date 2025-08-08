@@ -3,7 +3,7 @@
 // Finds fallback still images from Unsplash, Pexels, Pixabay.
 // Downloads, scores, creates slow-pan video with FFmpeg.
 // MAX LOGGING EVERY STEP, Modular, Deduped, Never dies
-// NO ZOOM, only slow pan! Always returns a video if at all possible.
+// PAN-ONLY (NO ZOOM). Always returns a video if at all possible.
 // ============================================================
 
 const axios = require('axios');
@@ -13,13 +13,40 @@ const { exec } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const sharp = require('sharp');
 
+// === ENV KEYS ===
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
 const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
+// Optional: custom UA for APIs that throttle generic clients
+const USER_AGENT = process.env.HTTP_USER_AGENT || 'SocialStormAI/10D (+https://socialstormai.com)';
+
 console.log('[10D][INIT] Ken Burns image video helper loaded.');
 
-// --- Validate output file ---
+// ------------------------------------------------------------
+// Utility: ensure dir exists
+// ------------------------------------------------------------
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+// ------------------------------------------------------------
+// Utility: safe filename
+// ------------------------------------------------------------
+function safeName(s) {
+  return String(s || '')
+    .replace(/[^\w\s.-]/g, '')
+    .replace(/\s+/g, '-')
+    .toLowerCase()
+    .slice(0, 80);
+}
+
+// ------------------------------------------------------------
+// Validate output file
+// ------------------------------------------------------------
 function isValidFile(fp, jobId) {
   try {
     if (!fs.existsSync(fp)) {
@@ -38,13 +65,18 @@ function isValidFile(fp, jobId) {
   }
 }
 
-// --- Clean/score helpers ---
+// ------------------------------------------------------------
+// Clean/score helpers
+// ------------------------------------------------------------
 function cleanQuery(str) {
   if (!str) return '';
   return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
 }
 function getKeywords(str) {
-  return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
+  return String(str).toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .split(/[\s\-]+/)
+    .filter(w => w.length > 2);
 }
 function strictSubjectPresent(fields, subject) {
   const subjectWords = getKeywords(subject);
@@ -52,7 +84,9 @@ function strictSubjectPresent(fields, subject) {
   return subjectWords.every(w => fields.includes(w));
 }
 
-// --- SCORING: Scores images for fallback Ken Burns ---
+// ------------------------------------------------------------
+// Scoring: rank images for fallback Ken Burns
+// ------------------------------------------------------------
 function scoreImage(candidate, subject, usedClips = []) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
@@ -65,7 +99,8 @@ function scoreImage(candidate, subject, usedClips = []) {
       candidate.description || '',
       (candidate.tags || []).map(t => (t.title || t)).join(' '),
       candidate.user?.name || '',
-      candidate.urls?.full || ''
+      candidate.urls?.full || '',
+      candidate.urls?.raw || ''
     ].join(' ').toLowerCase();
   } else if (candidate.api === 'pexels') {
     fields = [
@@ -90,26 +125,30 @@ function scoreImage(candidate, subject, usedClips = []) {
 
   if (candidate.width && candidate.width >= 1000) score += 7;
   if (candidate.height && candidate.height >= 1000) score += 7;
-  if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8;
+  if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8; // portrait
 
+  // penalize if appears in usedClips
   if (
     usedClips &&
     candidate.url &&
     usedClips.some(u =>
       typeof u === 'string' && (
         u.includes(candidate.url) ||
-        (candidate.id && u.includes(candidate.id)) ||
-        (u.endsWith('.jpg') && path.basename(u).includes(candidate.id || ''))
+        (candidate.id && u.includes(String(candidate.id))) ||
+        (u.endsWith('.jpg') && path.basename(u).includes(String(candidate.id || '')))
       )
     )
   ) score -= 60;
 
   if (candidate.downloads && candidate.downloads > 10000) score += 4;
   if (candidate.id && Number(candidate.id) > 1000000) score += 1;
+
   return score;
 }
 
-// --- Unsplash image search ---
+// ------------------------------------------------------------
+// Unsplash image search
+// ------------------------------------------------------------
 async function findImageInUnsplash(subject, usedClips = []) {
   if (!UNSPLASH_ACCESS_KEY) {
     console.warn('[10D][UNSPLASH] No access key set.');
@@ -119,7 +158,10 @@ async function findImageInUnsplash(subject, usedClips = []) {
     const query = encodeURIComponent(subject);
     const url = `https://api.unsplash.com/search/photos?query=${query}&per_page=15&orientation=portrait&client_id=${UNSPLASH_ACCESS_KEY}`;
     console.log(`[10D][UNSPLASH] Request: ${url}`);
-    const resp = await axios.get(url, { timeout: 12000 });
+    const resp = await axios.get(url, {
+      timeout: 12000,
+      headers: { 'User-Agent': USER_AGENT }
+    });
     if (resp.data && resp.data.results && resp.data.results.length > 0) {
       let candidates = resp.data.results.map(item => ({
         ...item,
@@ -133,8 +175,8 @@ async function findImageInUnsplash(subject, usedClips = []) {
         !usedClips.some(u =>
           typeof u === 'string' && (
             u.includes(c.url) ||
-            (c.id && u.includes(c.id)) ||
-            (u.endsWith('.jpg') && path.basename(u).includes(c.id || ''))
+            (c.id && u.includes(String(c.id))) ||
+            (u.endsWith('.jpg') && path.basename(u).includes(String(c.id || '')))
           )
         )
       );
@@ -157,7 +199,9 @@ async function findImageInUnsplash(subject, usedClips = []) {
   }
 }
 
-// --- Pexels image search ---
+// ------------------------------------------------------------
+// Pexels image search
+// ------------------------------------------------------------
 async function findImageInPexels(subject, usedClips = []) {
   if (!PEXELS_API_KEY) {
     console.warn('[10D][PEXELS-IMG] No API key set.');
@@ -167,7 +211,10 @@ async function findImageInPexels(subject, usedClips = []) {
     const query = encodeURIComponent(subject);
     const url = `https://api.pexels.com/v1/search?query=${query}&per_page=12&orientation=portrait`;
     console.log(`[10D][PEXELS-IMG] Request: ${url}`);
-    const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY }, timeout: 12000 });
+    const resp = await axios.get(url, {
+      headers: { Authorization: PEXELS_API_KEY, 'User-Agent': USER_AGENT },
+      timeout: 12000
+    });
     if (resp.data && resp.data.photos && resp.data.photos.length > 0) {
       let candidates = resp.data.photos.map(item => ({
         ...item,
@@ -181,8 +228,8 @@ async function findImageInPexels(subject, usedClips = []) {
         !usedClips.some(u =>
           typeof u === 'string' && (
             u.includes(c.url) ||
-            (c.id && u.includes(c.id)) ||
-            (u.endsWith('.jpg') && path.basename(u).includes(c.id || ''))
+            (c.id && u.includes(String(c.id))) ||
+            (u.endsWith('.jpg') && path.basename(u).includes(String(c.id || '')))
           )
         )
       );
@@ -205,7 +252,9 @@ async function findImageInPexels(subject, usedClips = []) {
   }
 }
 
-// --- Pixabay image search ---
+// ------------------------------------------------------------
+// Pixabay image search
+// ------------------------------------------------------------
 async function findImageInPixabay(subject, usedClips = []) {
   if (!PIXABAY_API_KEY) {
     console.warn('[10D][PIXABAY-IMG] No API key set.');
@@ -215,7 +264,10 @@ async function findImageInPixabay(subject, usedClips = []) {
     const query = encodeURIComponent(subject);
     const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=12&orientation=vertical`;
     console.log(`[10D][PIXABAY-IMG] Request: ${url}`);
-    const resp = await axios.get(url, { timeout: 12000 });
+    const resp = await axios.get(url, {
+      timeout: 12000,
+      headers: { 'User-Agent': USER_AGENT }
+    });
     if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
       let candidates = resp.data.hits.map(item => ({
         ...item,
@@ -229,8 +281,8 @@ async function findImageInPixabay(subject, usedClips = []) {
         !usedClips.some(u =>
           typeof u === 'string' && (
             u.includes(c.url) ||
-            (c.id && u.includes(c.id)) ||
-            (u.endsWith('.jpg') && path.basename(u).includes(c.id || ''))
+            (c.id && u.includes(String(c.id))) ||
+            (u.endsWith('.jpg') && path.basename(u).includes(String(c.id || '')))
           )
         )
       );
@@ -253,7 +305,9 @@ async function findImageInPixabay(subject, usedClips = []) {
   }
 }
 
-// --- Download remote image to local disk ---
+// ------------------------------------------------------------
+// Download remote image to local disk
+// ------------------------------------------------------------
 async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
   console.log(`[10D][DL][${jobId}] Downloading | url="${url}" | outPath="${outPath}"`);
   try {
@@ -267,7 +321,8 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
       url,
       method: 'GET',
       responseType: 'stream',
-      timeout: 60000
+      timeout: 60000,
+      headers: { 'User-Agent': USER_AGENT }
     });
 
     await new Promise((resolve, reject) => {
@@ -296,7 +351,9 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
   }
 }
 
-// --- Preprocess: always scale to 1080x1920 (portrait), pad, and JPEG output ---
+// ------------------------------------------------------------
+// Preprocess: always scale to 1080x1920 portrait, pad, JPEG output
+// ------------------------------------------------------------
 async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
   try {
     console.log(`[10D][PREPROCESS][${jobId}] Preprocessing image: ${inPath} → ${outPath}`);
@@ -315,7 +372,44 @@ async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
   }
 }
 
-// --- Make Ken Burns video from local image (PAN ONLY, NO ZOOM) ---
+// ------------------------------------------------------------
+// Build a text image (placeholder) 1080x1920 using sharp
+// ------------------------------------------------------------
+async function buildTextImage(subject, outPng, jobId = '') {
+  const width = 1080, height = 1920;
+  const text = (String(subject || 'No Visual')).slice(0, 120);
+  const svg = `
+  <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#1f2937"/>
+        <stop offset="100%" stop-color="#111827"/>
+      </linearGradient>
+    </defs>
+    <rect width="100%" height="100%" fill="url(#g)"/>
+    <text x="50%" y="50%" font-family="Helvetica, Arial, sans-serif" font-size="52" fill="#ffffff" text-anchor="middle">
+      ${escapeXml(text)}
+    </text>
+  </svg>
+  `;
+  console.log(`[10D][TEXTIMG][${jobId}] Creating placeholder PNG: ${outPng}`);
+  const buffer = Buffer.from(svg);
+  await sharp(buffer).png().toFile(outPng);
+  if (!isValidFile(outPng, jobId)) {
+    throw new Error('[10D][TEXTIMG][ERR] Placeholder PNG invalid: ' + outPng);
+  }
+  return outPng;
+}
+function escapeXml(unsafe) {
+  return String(unsafe)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// ------------------------------------------------------------
+// Make Ken Burns video from local image (PAN ONLY, NO ZOOM)
+// ------------------------------------------------------------
 async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId = '') {
   const direction = Math.random() > 0.5 ? 'ltr' : 'rtl';
   console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}, NO ZOOM) | ${imgPath} → ${outPath} (${duration}s)`);
@@ -329,17 +423,25 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
     ? `crop=${width}:${height}:x='(iw-${width})*t/${duration}':y='(ih-${height})/2'`
     : `crop=${width}:${height}:x='(iw-${width})-(iw-${width})*t/${duration}':y='(ih-${height})/2'`;
 
-  const filter = `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,${panExpr},setpts=PTS-STARTPTS[v]`.replace(/\s+/g, '');
+  const filter = [
+    `scale=${width}:${height}:force_original_aspect_ratio=decrease`,
+    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
+    `setsar=1`,
+    `${panExpr}`,
+    `setpts=PTS-STARTPTS`
+  ].join(',');
 
-  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" -map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
+  const ffmpegCmd =
+    `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" ` +
+    `-map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
 
   console.log(`[10D][KENBURNS][${jobId}] Running FFmpeg: ${ffmpegCmd}`);
 
   return new Promise((resolve, reject) => {
-    const child = exec(ffmpegCmd, { timeout: 12000 }, (error, stdout, stderr) => {
+    const child = exec(ffmpegCmd, { timeout: 20000 }, (error, stdout, stderr) => {
       if (error) {
         if (error.killed) {
-          console.error(`[10D][KENBURNS][TIMEOUT][${jobId}] FFmpeg Ken Burns command timed out after 12s!`, error);
+          console.error(`[10D][KENBURNS][TIMEOUT][${jobId}] FFmpeg timed out after 20s!`, error);
         } else {
           console.error('[10D][KENBURNS][ERR]', error, stderr);
         }
@@ -359,13 +461,19 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
   });
 }
 
-// --- Emergency fallback: static image video (never fails!) ---
+// ------------------------------------------------------------
+// Emergency fallback: static image → video (never fails if ffmpeg ok)
+// ------------------------------------------------------------
 async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
   const width = 1080, height = 1920;
-  const ffmpegCmd = `ffmpeg -y -loop 1 -i "${imgPath}" -vf "scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
+  const ffmpegCmd =
+    `ffmpeg -y -loop 1 -i "${imgPath}" ` +
+    `-vf "scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1" ` +
+    `-t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
   console.log(`[10D][STATICIMG][${jobId}] Running fallback FFmpeg: ${ffmpegCmd}`);
   return new Promise((resolve, reject) => {
-    exec(ffmpegCmd, { timeout: 8000 }, (error, stdout, stderr) => {
+    exec(ffmpegCmd, { timeout: 12000 }, (error, stdout, stderr) => {
       if (error) {
         console.error(`[10D][STATICIMG][ERR][${jobId}] Fallback static image to video failed.`, error, stderr);
         return reject(error);
@@ -379,86 +487,119 @@ async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
   });
 }
 
-// --- Main entry: fallback to Ken Burns if no video found ---
-async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClips = []) {
+// ------------------------------------------------------------
+// Generate a placeholder Ken Burns clip (no external APIs)
+// ------------------------------------------------------------
+async function generatePlaceholderKenBurns(subject, workDir, sceneIdx, jobId) {
   try {
-    // Accept subject as object/array/string
-    let logSubject = (typeof subject === 'object' && subject.subject) ? subject.subject : subject;
-    console.log(`[10D][FALLBACK][${jobId}] Attempting Ken Burns fallback video for "${logSubject}" | workDir="${workDir}" | sceneIdx=${sceneIdx}`);
+    const dir = ensureDir(workDir || path.join(__dirname, 'tmp'));
+    const safe = safeName(subject || 'no-visual');
+    const png = path.join(dir, `kb_placeholder_${safe}_${String(sceneIdx).padStart(2, '0')}.png`);
+    const mp4 = path.join(dir, `kb_placeholder_${safe}_${String(sceneIdx).padStart(2, '0')}.mp4`);
 
-    let candidates = [];
-
-    if (UNSPLASH_ACCESS_KEY) {
-      const url = await findImageInUnsplash(logSubject, usedClips);
-      if (url) candidates.push({ url, api: 'unsplash', score: 100 });
-    }
-    if (PEXELS_API_KEY) {
-      const url = await findImageInPexels(logSubject, usedClips);
-      if (url) candidates.push({ url, api: 'pexels', score: 100 });
-    }
-    if (PIXABAY_API_KEY) {
-      const url = await findImageInPixabay(logSubject, usedClips);
-      if (url) candidates.push({ url, api: 'pixabay', score: 100 });
-    }
-
-    candidates = candidates.filter(c =>
-      c.url &&
-      !usedClips.some(u =>
-        typeof u === 'string' && (
-          u.includes(c.url) ||
-          (c.id && u.includes(c.id)) ||
-          (u.endsWith('.jpg') && path.basename(u).includes(c.id || ''))
-        )
-      )
-    );
-    for (let c of candidates) {
-      c.score = scoreImage({ ...c, url: c.url }, logSubject, usedClips);
-    }
-    candidates.sort((a, b) => b.score - a.score);
-
-    if (!candidates.length) {
-      console.warn(`[10D][FALLBACK][${jobId}] No fallback image found for "${logSubject}"`);
-      return null;
-    }
-
-    const best = candidates[0];
-    console.log(`[10D][FALLBACK][${jobId}] Using fallback image: ${best.url} (api: ${best.api}, score: ${best.score})`);
-
-    const realTmpDir = workDir || path.join(__dirname, 'tmp');
-    if (!fs.existsSync(realTmpDir)) fs.mkdirSync(realTmpDir, { recursive: true });
-
-    const rawImgPath = path.join(realTmpDir, `kenburns-raw-${uuidv4()}.jpg`);
-    await downloadRemoteFileToLocal(best.url, rawImgPath, jobId);
-
-    const jpegImgPath = path.join(realTmpDir, `kenburns-prepped-${uuidv4()}.jpg`);
-    await preprocessImageToJpeg(rawImgPath, jpegImgPath, jobId);
-
-    const outVidName = `kenburns-${uuidv4()}.mp4`;
-    const outVidPath = path.join(realTmpDir, outVidName);
-
+    await buildTextImage(subject, png, jobId);
+    // Try pan video; if it fails, fall back to static
     try {
-      await makeKenBurnsVideoFromImage(jpegImgPath, outVidPath, 5, jobId);
-      console.log(`[10D][FALLBACK][${jobId}] Ken Burns fallback video created: ${outVidPath}`);
-      return outVidPath;
-    } catch (err) {
-      console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns video creation failed, using static image video fallback.`, err);
-      try {
-        await staticImageToVideo(jpegImgPath, outVidPath, 5, jobId);
-        console.log(`[10D][FALLBACK][${jobId}] Static image fallback video created: ${outVidPath}`);
-        return outVidPath;
-      } catch (staticErr) {
-        console.error(`[10D][FALLBACK][ERR][${jobId}] Static image video fallback failed, giving up.`, staticErr);
-        return null;
-      }
+      await makeKenBurnsVideoFromImage(png, mp4, 5, jobId);
+      console.log(`[10D][PLACEHOLDER][${jobId}] Placeholder Ken Burns created: ${mp4}`);
+      return mp4;
+    } catch (e) {
+      console.warn(`[10D][PLACEHOLDER][WARN][${jobId}] Pan failed, using static image video.`, e);
+      await staticImageToVideo(png, mp4, 5, jobId);
+      console.log(`[10D][PLACEHOLDER][${jobId}] Placeholder static video created: ${mp4}`);
+      return mp4;
     }
   } catch (err) {
-    console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns fallback totally failed:`, err);
+    console.error(`[10D][PLACEHOLDER][ERR][${jobId}] Could not create placeholder video`, err);
     return null;
   }
 }
 
+// ------------------------------------------------------------
+// Main entry: fallback to Ken Burns if no video found
+// Always tries sources; if none work, builds placeholder.
+// Returns a valid local MP4 path or null (only on catastrophic failure).
+// ------------------------------------------------------------
+async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClips = []) {
+  try {
+    // Accept subject as object/array/string
+    const logSubject = (typeof subject === 'object' && subject?.subject) ? subject.subject : subject;
+    console.log(`[10D][FALLBACK][${jobId}] Attempting Ken Burns fallback for "${logSubject}" | workDir="${workDir}" | sceneIdx=${sceneIdx}`);
+
+    const tmpDir = ensureDir(workDir || path.join(__dirname, 'tmp'));
+    const candidates = [];
+
+    // Search order: Unsplash → Pexels → Pixabay
+    if (UNSPLASH_ACCESS_KEY) {
+      const url = await findImageInUnsplash(logSubject, usedClips);
+      if (url) candidates.push({ api: 'unsplash', url });
+    }
+    if (PEXELS_API_KEY) {
+      const url = await findImageInPexels(logSubject, usedClips);
+      if (url) candidates.push({ api: 'pexels', url });
+    }
+    if (PIXABAY_API_KEY) {
+      const url = await findImageInPixabay(logSubject, usedClips);
+      if (url) candidates.push({ api: 'pixabay', url });
+    }
+
+    // If we have at least one image, build pan video from the best
+    if (candidates.length) {
+      // score with minimal fields (only url+api here), still ok due to subject features
+      for (const c of candidates) {
+        c.score = scoreImage({ ...c }, logSubject, usedClips);
+      }
+      candidates.sort((a, b) => b.score - a.score);
+      const best = candidates[0];
+      console.log(`[10D][FALLBACK][${jobId}] Using image: ${best.url} (api: ${best.api}, score: ${best.score})`);
+
+      const rawImg = path.join(tmpDir, `kb_raw_${uuidv4()}.jpg`);
+      await downloadRemoteFileToLocal(best.url, rawImg, jobId);
+
+      const prepped = path.join(tmpDir, `kb_pre_${uuidv4()}.jpg`);
+      await preprocessImageToJpeg(rawImg, prepped, jobId);
+
+      const outVid = path.join(tmpDir, `kb_${uuidv4()}.mp4`);
+      try {
+        await makeKenBurnsVideoFromImage(prepped, outVid, 5, jobId);
+        console.log(`[10D][FALLBACK][${jobId}] Ken Burns fallback video created: ${outVid}`);
+        return outVid;
+      } catch (err) {
+        console.error(`[10D][FALLBACK][ERR][${jobId}] Ken Burns pan failed, trying static image video.`, err);
+        try {
+          await staticImageToVideo(prepped, outVid, 5, jobId);
+          console.log(`[10D][FALLBACK][${jobId}] Static image fallback video created: ${outVid}`);
+          return outVid;
+        } catch (staticErr) {
+          console.error(`[10D][FALLBACK][ERR][${jobId}] Static image video failed as well.`, staticErr);
+          // Fall through to placeholder
+        }
+      }
+    }
+
+    // No candidates or all processing failed → generate placeholder
+    console.warn(`[10D][FALLBACK][${jobId}] No suitable images. Generating placeholder for "${logSubject}"`);
+    const placeholder = await generatePlaceholderKenBurns(logSubject, tmpDir, sceneIdx, jobId);
+    if (placeholder && isValidFile(placeholder, jobId)) return placeholder;
+
+    // Catastrophic fail (should be extremely rare)
+    console.error(`[10D][FALLBACK][FATAL][${jobId}] Could not create any fallback video for "${logSubject}".`);
+    return null;
+  } catch (err) {
+    console.error(`[10D][FALLBACK][ERR][${jobId}] Unexpected failure`, err);
+    return null;
+  }
+}
+
+// ------------------------------------------------------------
+// Exports
+// ------------------------------------------------------------
 module.exports = {
+  // Main
   fallbackKenBurnsVideo,
+  generatePlaceholderKenBurns,
+
+  // Building blocks (used elsewhere / tests)
   findImageInPexels,
   findImageInPixabay,
   findImageInUnsplash,
@@ -466,4 +607,5 @@ module.exports = {
   makeKenBurnsVideoFromImage,
   staticImageToVideo,
   preprocessImageToJpeg,
+  buildTextImage,
 };
