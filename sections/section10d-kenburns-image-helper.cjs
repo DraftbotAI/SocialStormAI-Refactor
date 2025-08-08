@@ -75,7 +75,7 @@ function cleanQuery(str) {
 function getKeywords(str) {
   return String(str).toLowerCase()
     .replace(/[^a-z0-9\s-]/g, '')
-    .split(/[\s\-]+/)
+    .split(/[\s\-]+/g)
     .filter(w => w.length > 2);
 }
 function strictSubjectPresent(fields, subject) {
@@ -83,6 +83,19 @@ function strictSubjectPresent(fields, subject) {
   if (!subjectWords.length) return false;
   return subjectWords.every(w => fields.includes(w));
 }
+
+// Known landmarks — used to disambiguate “statue” vs. “Statue of Liberty”, etc.
+const LANDMARK_MAP = [
+  { key: 'statue of liberty', hints: ['liberty', 'new york', 'nyc', 'ellis island', 'torch'] },
+  { key: 'eiffel tower', hints: ['paris', 'france', 'tour eiffel', 'champ de mars'] },
+  { key: 'big ben', hints: ['elizabeth tower', 'london', 'uk', 'westminster'] },
+  { key: 'golden gate bridge', hints: ['san francisco', 'sf', 'marin', 'suspension'] },
+  { key: 'colosseum', hints: ['rome', 'italy', 'roman amphitheatre'] },
+  { key: 'taj mahal', hints: ['agra', 'india', 'mausoleum'] },
+  { key: 'sphinx', hints: ['giza', 'egypt', 'pyramids'] },
+  { key: 'machu picchu', hints: ['peru', 'andes', 'inca'] },
+  { key: 'great wall', hints: ['china', 'beijing'] },
+];
 
 // ------------------------------------------------------------
 // Scoring: rank images for fallback Ken Burns
@@ -116,18 +129,41 @@ function scoreImage(candidate, subject, usedClips = []) {
       candidate.pageURL || '',
       candidate.largeImageURL || ''
     ].join(' ').toLowerCase();
+  } else if (candidate.api === 'minimal') {
+    // minimal candidate with only url/api during fallback selection
+    fields = (candidate.url || '').toLowerCase();
   }
 
+  // Base subject matching
   if (strictSubjectPresent(fields, subject)) score += 100;
   if (subjectWords.every(w => fields.includes(w))) score += 35;
   subjectWords.forEach(word => { if (fields.includes(word)) score += 6; });
   if (fields.includes(cleanedSubject)) score += 18;
 
-  if (candidate.width && candidate.width >= 1000) score += 7;
-  if (candidate.height && candidate.height >= 1000) score += 7;
-  if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8; // portrait
+  // Landmark disambiguation: strongly reward full landmark phrase + hints
+  const subjLower = cleanedSubject;
+  for (const lm of LANDMARK_MAP) {
+    if (subjLower.includes(lm.key)) {
+      if (fields.includes(lm.key)) score += 70;
+      let hintHits = 0;
+      lm.hints.forEach(h => { if (fields.includes(h)) hintHits++; });
+      score += Math.min(hintHits * 10, 30); // up to +30 for strong context
+      // Penalize “generic statue” if landmark expected but “liberty” not present
+      if (lm.key === 'statue of liberty') {
+        if (fields.includes('statue') && !fields.includes('liberty')) score -= 30;
+      }
+      break;
+    }
+  }
 
-  // penalize if appears in usedClips
+  // Resolution / orientation
+  const w = candidate.width || candidate.imageWidth;
+  const h = candidate.height || candidate.imageHeight;
+  if (w && w >= 1000) score += 7;
+  if (h && h >= 1000) score += 7;
+  if (w && h && h / w > 1.3) score += 8; // portrait bias
+
+  // Penalize if appears in usedClips
   if (
     usedClips &&
     candidate.url &&
@@ -135,11 +171,12 @@ function scoreImage(candidate, subject, usedClips = []) {
       typeof u === 'string' && (
         u.includes(candidate.url) ||
         (candidate.id && u.includes(String(candidate.id))) ||
-        (u.endsWith('.jpg') && path.basename(u).includes(String(candidate.id || '')))
+        (u.endsWith?.('.jpg') && path.basename(u).includes(String(candidate.id || '')))
       )
     )
   ) score -= 60;
 
+  // Popularity proxies
   if (candidate.downloads && candidate.downloads > 10000) score += 4;
   if (candidate.id && Number(candidate.id) > 1000000) score += 1;
 
@@ -162,7 +199,7 @@ async function findImageInUnsplash(subject, usedClips = []) {
       timeout: 12000,
       headers: { 'User-Agent': USER_AGENT }
     });
-    if (resp.data && resp.data.results && resp.data.results.length > 0) {
+    if (resp.data?.results?.length > 0) {
       let candidates = resp.data.results.map(item => ({
         ...item,
         api: 'unsplash',
@@ -176,7 +213,7 @@ async function findImageInUnsplash(subject, usedClips = []) {
           typeof u === 'string' && (
             u.includes(c.url) ||
             (c.id && u.includes(String(c.id))) ||
-            (u.endsWith('.jpg') && path.basename(u).includes(String(c.id || '')))
+            (u.endsWith?.('.jpg') && path.basename(u).includes(String(c.id || '')))
           )
         )
       );
@@ -213,9 +250,10 @@ async function findImageInPexels(subject, usedClips = []) {
     console.log(`[10D][PEXELS-IMG] Request: ${url}`);
     const resp = await axios.get(url, {
       headers: { Authorization: PEXELS_API_KEY, 'User-Agent': USER_AGENT },
-      timeout: 12000
+      timeout: 12000,
+      maxRedirects: 3,
     });
-    if (resp.data && resp.data.photos && resp.data.photos.length > 0) {
+    if (resp.data?.photos?.length > 0) {
       let candidates = resp.data.photos.map(item => ({
         ...item,
         api: 'pexels',
@@ -229,7 +267,7 @@ async function findImageInPexels(subject, usedClips = []) {
           typeof u === 'string' && (
             u.includes(c.url) ||
             (c.id && u.includes(String(c.id))) ||
-            (u.endsWith('.jpg') && path.basename(u).includes(String(c.id || '')))
+            (u.endsWith?.('.jpg') && path.basename(u).includes(String(c.id || '')))
           )
         )
       );
@@ -268,7 +306,7 @@ async function findImageInPixabay(subject, usedClips = []) {
       timeout: 12000,
       headers: { 'User-Agent': USER_AGENT }
     });
-    if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
+    if (resp.data?.hits?.length > 0) {
       let candidates = resp.data.hits.map(item => ({
         ...item,
         api: 'pixabay',
@@ -282,7 +320,7 @@ async function findImageInPixabay(subject, usedClips = []) {
           typeof u === 'string' && (
             u.includes(c.url) ||
             (c.id && u.includes(String(c.id))) ||
-            (u.endsWith('.jpg') && path.basename(u).includes(String(c.id || '')))
+            (u.endsWith?.('.jpg') && path.basename(u).includes(String(c.id || '')))
           )
         )
       );
@@ -312,6 +350,7 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
   console.log(`[10D][DL][${jobId}] Downloading | url="${url}" | outPath="${outPath}"`);
   try {
     if (!url) throw new Error('No URL provided to download.');
+    ensureDir(path.dirname(outPath));
     if (fs.existsSync(outPath)) {
       console.log(`[10D][DL][${jobId}] File already exists, skipping download: ${outPath}`);
       return;
@@ -322,6 +361,7 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
       method: 'GET',
       responseType: 'stream',
       timeout: 60000,
+      maxRedirects: 4,
       headers: { 'User-Agent': USER_AGENT }
     });
 
@@ -357,6 +397,7 @@ async function downloadRemoteFileToLocal(url, outPath, jobId = '') {
 async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
   try {
     console.log(`[10D][PREPROCESS][${jobId}] Preprocessing image: ${inPath} → ${outPath}`);
+    ensureDir(path.dirname(outPath));
     await sharp(inPath)
       .resize(1080, 1920, { fit: 'contain', background: { r: 0, g: 0, b: 0 } })
       .jpeg({ quality: 88, chromaSubsampling: '4:4:4' })
@@ -378,22 +419,22 @@ async function preprocessImageToJpeg(inPath, outPath, jobId = '') {
 async function buildTextImage(subject, outPng, jobId = '') {
   const width = 1080, height = 1920;
   const text = (String(subject || 'No Visual')).slice(0, 120);
-  const svg = `
-  <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-      <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#1f2937"/>
-        <stop offset="100%" stop-color="#111827"/>
-      </linearGradient>
-    </defs>
-    <rect width="100%" height="100%" fill="url(#g)"/>
-    <text x="50%" y="50%" font-family="Helvetica, Arial, sans-serif" font-size="52" fill="#ffffff" text-anchor="middle">
-      ${escapeXml(text)}
-    </text>
-  </svg>
-  `;
+  const svg =
+`<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1f2937"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#g)"/>
+  <text x="50%" y="50%" font-family="Helvetica, Arial, sans-serif" font-size="52" fill="#ffffff" text-anchor="middle">
+    ${escapeXml(text)}
+  </text>
+</svg>`;
   console.log(`[10D][TEXTIMG][${jobId}] Creating placeholder PNG: ${outPng}`);
   const buffer = Buffer.from(svg);
+  ensureDir(path.dirname(outPng));
   await sharp(buffer).png().toFile(outPng);
   if (!isValidFile(outPng, jobId)) {
     throw new Error('[10D][TEXTIMG][ERR] Placeholder PNG invalid: ' + outPng);
@@ -415,14 +456,16 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
   console.log(`[10D][KENBURNS][${jobId}] Creating pan video (${direction}, NO ZOOM) | ${imgPath} → ${outPath} (${duration}s)`);
 
   if (!fs.existsSync(imgPath)) throw new Error('[10D][KENBURNS][ERR] Image does not exist: ' + imgPath);
+  ensureDir(path.dirname(outPath));
 
   const width = 1080, height = 1920;
 
-  // Pan only (NO ZOOM)
+  // Pan only (NO ZOOM) — use crop after pad, with time-based x movement
   const panExpr = direction === 'ltr'
-    ? `crop=${width}:${height}:x='(iw-${width})*t/${duration}':y='(ih-${height})/2'`
-    : `crop=${width}:${height}:x='(iw-${width})-(iw-${width})*t/${duration}':y='(ih-${height})/2'`;
+    ? `crop=${width}:${height}:x='(iw-${width})*t/${Math.max(duration, 0.001)}':y='(ih-${height})/2'`
+    : `crop=${width}:${height}:x='(iw-${width})-(iw-${width})*t/${Math.max(duration, 0.001)}':y='(ih-${height})/2'`;
 
+  // Single stream chain → use -vf (NOT -filter_complex) so we don’t need -map
   const filter = [
     `scale=${width}:${height}:force_original_aspect_ratio=decrease`,
     `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
@@ -432,16 +475,16 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
   ].join(',');
 
   const ffmpegCmd =
-    `ffmpeg -y -loop 1 -i "${imgPath}" -filter_complex "${filter}" ` +
-    `-map "[v]" -t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
+    `ffmpeg -y -loop 1 -i "${imgPath}" -vf "${filter}" ` +
+    `-t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
 
   console.log(`[10D][KENBURNS][${jobId}] Running FFmpeg: ${ffmpegCmd}`);
 
   return new Promise((resolve, reject) => {
-    const child = exec(ffmpegCmd, { timeout: 20000 }, (error, stdout, stderr) => {
+    const child = exec(ffmpegCmd, { timeout: 25000 }, (error, stdout, stderr) => {
       if (error) {
         if (error.killed) {
-          console.error(`[10D][KENBURNS][TIMEOUT][${jobId}] FFmpeg timed out after 20s!`, error);
+          console.error(`[10D][KENBURNS][TIMEOUT][${jobId}] FFmpeg timed out after 25s!`, error);
         } else {
           console.error('[10D][KENBURNS][ERR]', error, stderr);
         }
@@ -466,14 +509,15 @@ async function makeKenBurnsVideoFromImage(imgPath, outPath, duration = 5, jobId 
 // ------------------------------------------------------------
 async function staticImageToVideo(imgPath, outPath, duration = 5, jobId = '') {
   const width = 1080, height = 1920;
+  ensureDir(path.dirname(outPath));
   const ffmpegCmd =
     `ffmpeg -y -loop 1 -i "${imgPath}" ` +
     `-vf "scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1" ` +
+    `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS" ` +
     `-t ${duration} -r 30 -pix_fmt yuv420p -c:v libx264 -preset ultrafast "${outPath}"`;
   console.log(`[10D][STATICIMG][${jobId}] Running fallback FFmpeg: ${ffmpegCmd}`);
   return new Promise((resolve, reject) => {
-    exec(ffmpegCmd, { timeout: 12000 }, (error, stdout, stderr) => {
+    exec(ffmpegCmd, { timeout: 15000 }, (error, stdout, stderr) => {
       if (error) {
         console.error(`[10D][STATICIMG][ERR][${jobId}] Fallback static image to video failed.`, error, stderr);
         return reject(error);
@@ -532,26 +576,26 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     // Search order: Unsplash → Pexels → Pixabay
     if (UNSPLASH_ACCESS_KEY) {
       const url = await findImageInUnsplash(logSubject, usedClips);
-      if (url) candidates.push({ api: 'unsplash', url });
+      if (url) candidates.push({ api: 'minimal', url });
     }
     if (PEXELS_API_KEY) {
       const url = await findImageInPexels(logSubject, usedClips);
-      if (url) candidates.push({ api: 'pexels', url });
+      if (url) candidates.push({ api: 'minimal', url });
     }
     if (PIXABAY_API_KEY) {
       const url = await findImageInPixabay(logSubject, usedClips);
-      if (url) candidates.push({ api: 'pixabay', url });
+      if (url) candidates.push({ api: 'minimal', url });
     }
 
     // If we have at least one image, build pan video from the best
     if (candidates.length) {
-      // score with minimal fields (only url+api here), still ok due to subject features
       for (const c of candidates) {
-        c.score = scoreImage({ ...c }, logSubject, usedClips);
+        // Minimal scoring pass (url/api only) still benefits from subject landmark boosts
+        c.score = scoreImage({ ...c, api: 'minimal' }, logSubject, usedClips);
       }
       candidates.sort((a, b) => b.score - a.score);
       const best = candidates[0];
-      console.log(`[10D][FALLBACK][${jobId}] Using image: ${best.url} (api: ${best.api}, score: ${best.score})`);
+      console.log(`[10D][FALLBACK][${jobId}] Using image: ${best.url} (score: ${best.score})`);
 
       const rawImg = path.join(tmpDir, `kb_raw_${uuidv4()}.jpg`);
       await downloadRemoteFileToLocal(best.url, rawImg, jobId);
