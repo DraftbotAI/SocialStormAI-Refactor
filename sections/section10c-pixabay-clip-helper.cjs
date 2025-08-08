@@ -65,6 +65,9 @@ const PER_PAGE_PHOTOS = Math.min(Number(process.env.PIXABAY_PER_PAGE_PHOTOS || 3
 const VIDEO_QUERY_VARIANTS = Math.min(Number(process.env.PIXABAY_VIDEO_VARIANTS || 2), 5);
 const PHOTO_QUERY_VARIANTS = Math.min(Number(process.env.PIXABAY_PHOTO_VARIANTS || 2), 5);
 
+// Optional global cap to avoid runaway memory from huge result sets
+const MAX_RESULTS_RETURN = Math.min(Number(process.env.MATCHER_MAX_RESULTS || 35), 100);
+
 // Landmark strict mode: block animals/people unless guard/ceremony context is detected
 const STRICT_LANDMARK_MODE = String(process.env.PIXABAY_STRICT_LANDMARK_MODE || 'true').toLowerCase() !== 'false';
 
@@ -388,6 +391,7 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
     if (rows?.length) {
       rows.forEach(h => (h.__variant = v));
       allHits.push(...rows);
+      if (allHits.length >= MAX_RESULTS_RETURN) break;
     }
   }
 
@@ -407,7 +411,9 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
         continue;
       }
       candidates.push(c);
+      if (candidates.length >= MAX_RESULTS_RETURN) break;
     }
+    if (candidates.length >= MAX_RESULTS_RETURN) break;
   }
 
   if (!candidates.length) {
@@ -492,6 +498,7 @@ async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedC
     if (rows?.length) {
       rows.forEach(h => (h.__variant = v));
       allHits.push(...rows);
+      if (allHits.length >= MAX_RESULTS_RETURN) break;
     }
   }
 
@@ -509,6 +516,7 @@ async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedC
       continue;
     }
     candidates.push(c);
+    if (candidates.length >= MAX_RESULTS_RETURN) break;
   }
 
   if (!candidates.length) {
@@ -537,7 +545,7 @@ async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedC
 
   viable.slice(0, 10).forEach((c, i) => {
     console.log(`[10C][PHOTO][${jobId}][CANDIDATE][${i + 1}] score=${c.score} ${c.width || '?'}x${c.height || '?'} url=${c.url}`);
-    });
+  });
 
   const best = viable[0];
 

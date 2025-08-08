@@ -95,7 +95,7 @@ function looksUsed(key, usedClips = []) {
   if (!key) return false;
   const base = path.basename(key);
   const stem = keyStem(key);
-  return usedClips?.some(u => {
+  return (usedClips || []).some(u => {
     const uStr = String(u || '');
     const uBase = path.basename(uStr);
     const uStem = keyStem(uStr);
@@ -108,6 +108,21 @@ function looksUsed(key, usedClips = []) {
       stem === uStem
     );
   });
+}
+
+function addUsed(usedClips = [], key = '') {
+  if (!key) return;
+  const base = path.basename(key);
+  const stem = keyStem(key);
+  const norm = normalize(key);
+  const pushIfMissing = (val) => {
+    if (!val) return;
+    if (!(usedClips || []).some(u => String(u) === val)) usedClips.push(val);
+  };
+  pushIfMissing(key);
+  pushIfMissing(base);
+  pushIfMissing(stem);
+  pushIfMissing(norm);
 }
 
 function isValidLocalFile(filePath) {
@@ -228,6 +243,8 @@ async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
 
   if (isValidLocalFile(outPath)) {
     console.log(`[10A][R2][${jobId}] File already downloaded: ${outPath}`);
+    addUsed(usedClips, r2Key);
+    addUsed(usedClips, outPath);
     return outPath;
   }
 
@@ -256,7 +273,8 @@ async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
         console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
         continue;
       }
-      usedClips?.push(r2Key);
+      addUsed(usedClips, r2Key);
+      addUsed(usedClips, outPath);
       return outPath;
     } catch (err) {
       console.error(`[10A][R2][${jobId}][ERR] Download attempt ${attempt} failed:`, err?.message || err);
@@ -359,7 +377,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
         const baseTokens = new Set(tokenize(base));
         // keep if any token overlaps OR filename contains normalizedSubject
         const overlap = [...tokenSet].some(t => baseTokens.has(t));
-        const containsSubject = base.includes(normalizedSubject);
+        const containsSubject = base.includes(normalize(subject));
         return overlap || containsSubject;
       });
       console.log(`[10A][R2][${jobId}] Token prefilter: ${prefiltered.length}/${mp4Objs.length} retained (tokens=${[...tokenSet].join(',') || 'none'})`);
@@ -512,7 +530,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
 // Returns an array of mp4 keys (strings), cached for 60s.
 // Accepts optional subject and categoryFolder to prefilter server-side.
 // ===========================================================
-findR2ClipForScene.getAllFiles = async function(subject = null, categoryFolder = null) {
+async function getAllFiles(subject = null, categoryFolder = null) {
   try {
     const objs = await listAllObjectsInR2('', 'STATIC');
     let mp4s = objs
@@ -542,6 +560,6 @@ findR2ClipForScene.getAllFiles = async function(subject = null, categoryFolder =
     console.error('[10A][STATIC][ERR] getAllFiles failed:', err);
     return [];
   }
-};
+}
 
-module.exports = { findR2ClipForScene };
+module.exports = { findR2ClipForScene, getAllFiles };

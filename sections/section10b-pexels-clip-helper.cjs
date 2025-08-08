@@ -12,7 +12,6 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
 
 const {
   scoreSceneCandidate,
@@ -57,6 +56,14 @@ const STRICT_PHOTO_THRESHOLD = Number(process.env.STRICT_PHOTO_THRESHOLD || 90);
 const STRICT_LANDMARK_MODE = String(process.env.PEXELS_STRICT_LANDMARK_MODE || 'true').toLowerCase() !== 'false';
 
 // ==== SMALL UTILS ====
+function ensureDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (e) {
+    // no-op; subsequent writes will error and be logged
+  }
+}
+
 function normalize(str) {
   return String(str || '')
     .toLowerCase()
@@ -71,7 +78,7 @@ function alnumLower(s) {
 
 function containsAny(list, s) {
   const L = String(s || '').toLowerCase();
-  return (list || []).some(w => L.includes(String(w).toLowerCase()));
+  return Array.isArray(list) && list.some(w => L.includes(String(w || '').toLowerCase()));
 }
 
 function isLandmarkSubject(subject) {
@@ -125,7 +132,10 @@ function usedHas(usedClips = [], keyOrPath = '') {
   if (usedClips instanceof Set) {
     return usedClips.has(key) || usedClips.has(base) || usedClips.has(normalize(key));
   }
-  return (usedClips || []).some(u => u === key || u === base || String(key).endsWith(String(u)) || normalize(String(u)) === normalize(key));
+  return (usedClips || []).some(u => {
+    const v = String(u);
+    return v === key || v === base || key.endsWith(v) || normalize(v) === normalize(key);
+  });
 }
 
 function usedAdd(usedClips = [], keyOrPath = '') {
@@ -160,6 +170,10 @@ async function downloadFile(url, outPath, jobId, addAuthHeader = false) {
       responseType: 'stream',
       headers: addAuthHeader ? { Authorization: PEXELS_API_KEY } : undefined,
       timeout: PROVIDER_TIMEOUT_MS,
+      // Note: Pexels file CDN URLs generally don't require auth
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      validateStatus: s => (s >= 200 && s < 300),
     });
 
     await new Promise((resolve, reject) => {
@@ -238,6 +252,7 @@ async function pexelsSearchPaged(url, paramsBase, label, jobId) {
         params,
         headers: { Authorization: PEXELS_API_KEY },
         timeout: PROVIDER_TIMEOUT_MS,
+        validateStatus: s => (s >= 200 && s < 300),
       });
       const items = (res.data && (label === 'video' ? res.data.videos : res.data.photos)) || [];
       console.log(`[10B][${label.toUpperCase()}][${jobId}] page=${page} got=${items.length}`);
@@ -256,6 +271,7 @@ async function pexelsSearchPaged(url, paramsBase, label, jobId) {
             params,
             headers: { Authorization: PEXELS_API_KEY },
             timeout: PROVIDER_TIMEOUT_MS,
+            validateStatus: s => (s >= 200 && s < 300),
           });
           const items2 = (res2.data && (label === 'video' ? res2.data.videos : res2.data.photos)) || [];
           console.log(`[10B][${label.toUpperCase()}][${jobId}] (retry) page=${page} got=${items2.length}`);
@@ -428,6 +444,7 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
 
   const best = viable[0];
   const filename = best.filename || `pexels_${best.pexelsId}.mp4`;
+  ensureDir(workDir);
   const outPath = path.join(workDir, `scene${sceneIdx + 1}-${filename}`);
 
   // 3) Download (don’t re-download if valid)
@@ -566,6 +583,7 @@ async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedCl
     return null;
   }
 
+  ensureDir(workDir);
   const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-photo-${best.pexelsId}.jpg`);
 
   if (!fileOk(outPath, MIN_BYTES_PHOTO)) {
