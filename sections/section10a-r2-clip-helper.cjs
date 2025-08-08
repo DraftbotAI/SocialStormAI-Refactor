@@ -1,9 +1,9 @@
 // ===========================================================
-// SECTION 10A: R2 CLIP HELPER (Cloudflare R2) - UPGRADED 2024-08
-// Exports: findR2ClipForScene (used by 5D) + getAllFiles (for parallel dedupe/scan)
-// MAX LOGGING EVERY STEP, Modular, Video-Preferred, Anti-Dupe, Multi-Angle
-// Uses universal scoreSceneCandidate from 10G (pro match, anti-generic, pro-topic)
-// Never silent fail. Smart fallback if no strong match.
+// SECTION 10A: R2 CLIP HELPER (Cloudflare R2) - UPGRADED 2025-08
+// Exports: findR2ClipForScene (used by 5D) + getAllFiles (for scans)
+// MAX LOGGING EVERY STEP, Video-Preferred, Anti-Dupe, Multi-Angle
+// Uses universal scoreSceneCandidate from 10G (topic-aware scoring)
+// Never silent-fails. Smart filters + caching for speed.
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
@@ -12,15 +12,19 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
-console.log('[10A][INIT] R2 clip helper (video-first, max logs, multi-angle) loaded.');
-
+// --- ENV + Client bootstrap ---
 const R2_LIBRARY_BUCKET = process.env.R2_LIBRARY_BUCKET || 'socialstorm-library';
 const R2_ENDPOINT = process.env.R2_ENDPOINT;
 const R2_KEY = process.env.R2_KEY || process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET = process.env.R2_SECRET || process.env.R2_SECRET_ACCESS_KEY;
 
 if (!R2_LIBRARY_BUCKET || !R2_ENDPOINT || !R2_KEY || !R2_SECRET) {
-  console.error('[10A][FATAL] Missing one or more R2 env variables!');
+  console.error('[10A][FATAL] Missing one or more R2 env variables!', {
+    has_BUCKET: !!R2_LIBRARY_BUCKET,
+    has_ENDPOINT: !!R2_ENDPOINT,
+    has_KEY: !!R2_KEY,
+    has_SECRET: !!R2_SECRET
+  });
   throw new Error('[10A][FATAL] Missing R2 env vars!');
 }
 
@@ -33,63 +37,123 @@ const s3Client = new S3Client({
   }
 });
 
-// ============================
-// FILE UTILITIES
-// ============================
+console.log('[10A][INIT] R2 clip helper (video-first, max logs, multi-angle, cached listing) loaded.');
 
-async function listAllFilesInR2(prefix = '', jobId = '') {
-  let files = [];
+// ===========================================================
+// INTERNAL CONFIG
+// ===========================================================
+const VIDEO_EXTS = new Set(['.mp4']);            // Pipeline expects mp4
+const MIN_BYTES = 2 * 1024;                      // Sanity clip size
+const LIST_CACHE_TTL_MS = 60 * 1000;             // 60s cache for list calls
+const MAX_LIST_KEYS = 50000;                      // Hard cap to prevent runaway scans
+const PREFILTER_LIMIT = 5000;                     // Limit scoring set
+const TOKEN_PREFILTER_MAX = 8000;                 // safety bound for token prefilter
+const PREFER_RECENT = (process.env.R2_PREFER_RECENT || '1') === '1';
+
+// ===========================================================
+// SIMPLE UTILS
+// ===========================================================
+function normalize(str) {
+  return String(str || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+}
+
+function tokenize(str) {
+  return normalize(str).split('_').filter(Boolean);
+}
+
+function isMp4Key(key) {
+  return VIDEO_EXTS.has(path.extname(String(key)).toLowerCase());
+}
+
+function looksUsed(key, usedClips) {
+  if (!key) return false;
+  const base = path.basename(key);
+  return usedClips?.some(u => u === key || u === base || key.endsWith(String(u)));
+}
+
+function isValidLocalFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    const sz = fs.statSync(filePath).size;
+    return sz >= MIN_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+// ===========================================================
+// LISTING WITH CACHING
+// ===========================================================
+let _listCache = {
+  when: 0,
+  keys: /** @type {string[]} */ ([]),
+  objs: /** @type {{Key: string, Size?: number, LastModified?: Date}[]} */ ([])
+};
+
+async function listAllObjectsInR2(prefix = '', jobId = '') {
+  const now = Date.now();
+  if (now - _listCache.when < LIST_CACHE_TTL_MS && _listCache.objs?.length) {
+    console.log(`[10A][R2][${jobId}] Using cached listing: ${_listCache.objs.length} objects.`);
+    return _listCache.objs;
+  }
+
+  let objs = [];
   let continuationToken;
   let round = 0;
+
   try {
     do {
       round++;
-      console.log(`[10A][R2][${jobId}] Listing R2 files, round ${round}...`);
       const cmd = new ListObjectsV2Command({
         Bucket: R2_LIBRARY_BUCKET,
-        Prefix: prefix,
-        ContinuationToken: continuationToken,
+        Prefix: prefix || undefined,
+        ContinuationToken: continuationToken
       });
       const resp = await s3Client.send(cmd);
-      if (resp && resp.Contents) {
-        files.push(...resp.Contents.map(obj => obj.Key));
+      const part = (resp?.Contents || []).map(o => ({
+        Key: o.Key,
+        Size: o.Size,
+        LastModified: o.LastModified
+      })).filter(x => !!x.Key);
+
+      objs.push(...part);
+      if (objs.length > MAX_LIST_KEYS) {
+        console.warn(`[10A][R2][${jobId}] List exceeded MAX_LIST_KEYS=${MAX_LIST_KEYS}, truncating.`);
+        objs = objs.slice(0, MAX_LIST_KEYS);
+        break;
       }
-      continuationToken = resp.NextContinuationToken;
+      continuationToken = resp?.NextContinuationToken;
+      console.log(`[10A][R2][${jobId}] Listing round ${round} — running total: ${objs.length}`);
     } while (continuationToken);
-    console.log(`[10A][R2][${jobId}] Listed ${files.length} files from R2.`);
-    return files;
+
+    _listCache = { when: now, keys: objs.map(o => o.Key), objs };
+    console.log(`[10A][R2][${jobId}] Listed ${objs.length} objects from R2.`);
+    return objs;
   } catch (err) {
     console.error(`[10A][R2][${jobId}][ERR] List error:`, err);
     return [];
   }
 }
 
-// Ensures file exists and is >2kb (not broken)
-function isValidClip(filePath, jobId) {
-  try {
-    if (!fs.existsSync(filePath)) {
-      console.warn(`[10A][R2][${jobId}] File does not exist: ${filePath}`);
-      return false;
-    }
-    const size = fs.statSync(filePath).size;
-    if (size < 2048) {
-      console.warn(`[10A][R2][${jobId}] File too small or broken: ${filePath} (${size} bytes)`);
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.error(`[10A][R2][${jobId}] File validation error:`, err);
-    return false;
-  }
+async function listAllFilesInR2(prefix = '', jobId = '') {
+  const objs = await listAllObjectsInR2(prefix, jobId);
+  const keys = objs.map(o => o.Key).filter(Boolean);
+  return keys;
 }
 
-// ============================
-// SUBJECT AND PHRASE EXTRACTOR
-// ============================
+// ===========================================================
+// SUBJECT / PHRASE EXTRACTION (accepts flexible input shapes)
+// ===========================================================
 function extractSubjectAndPhrases(scene) {
   if (typeof scene === 'string') return { subject: scene, matchPhrases: [] };
   if (Array.isArray(scene)) {
-    const strItems = scene.map(x => typeof x === 'string' ? x : (x.subject || '')).filter(Boolean);
+    const strItems = scene
+      .map(x => typeof x === 'string' ? x : (x?.subject || ''))
+      .filter(Boolean);
     return {
       subject: strItems[0] || '',
       matchPhrases: strItems.slice(1)
@@ -109,124 +173,228 @@ function extractSubjectAndPhrases(scene) {
   return { subject: '', matchPhrases: [] };
 }
 
-// ============================
-// MAIN MATCHER (VIDEO-FIRST)
-// ============================
+// ===========================================================
+// DOWNLOAD + VALIDATE
+// ===========================================================
+async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
+  const unique = uuidv4();
+  const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2-${unique}.mp4`);
 
+  if (isValidLocalFile(outPath)) {
+    console.log(`[10A][R2][${jobId}] File already downloaded: ${outPath}`);
+    return outPath;
+  }
+
+  console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${r2Key} -> ${outPath}`);
+  const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: r2Key });
+  const resp = await s3Client.send(getCmd);
+
+  await new Promise((resolve, reject) => {
+    const stream = resp.Body;
+    const fileStream = fs.createWriteStream(outPath);
+    stream.pipe(fileStream);
+    stream.on('error', (err) => {
+      console.error(`[10A][R2][${jobId}][ERR] Stream error during download:`, err);
+      reject(err);
+    });
+    fileStream.on('finish', resolve);
+    fileStream.on('error', (err) => {
+      console.error(`[10A][R2][${jobId}][ERR] Write error during download:`, err);
+      reject(err);
+    });
+  });
+
+  if (!isValidLocalFile(outPath)) {
+    console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+    return null;
+  }
+
+  usedClips?.push(r2Key);
+  return outPath;
+}
+
+// ===========================================================
+// MAIN MATCHER (VIDEO-FIRST)
+// ===========================================================
 async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
   const { subject, matchPhrases } = extractSubjectAndPhrases(scene);
-
   if (!subject || typeof subject !== 'string' || subject.length < 2) {
     console.error(`[10A][R2][${jobId}] No valid subject for R2 lookup! Input:`, scene);
     return null;
   }
 
-  console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${subject}" | sceneIdx=${sceneIdx} | workDir="${workDir}" | usedClips=${JSON.stringify(usedClips)}`);
+  const normalizedSubject = normalize(subject);
+  console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${subject}" (norm="${normalizedSubject}") | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
 
   try {
-    // === 1. List all mp4 files from R2 (with path info for category logic)
-    const files = await listAllFilesInR2('', jobId);
-    if (!files.length) {
-      console.warn(`[10A][R2][${jobId}][WARN] No files found in R2 bucket!`);
+    // 1) Pull all objects (cached 60s) then keep only mp4 not used
+    const objs = await listAllObjectsInR2('', jobId);
+    if (!objs.length) {
+      console.warn(`[10A][R2][${jobId}][WARN] No objects found in R2 bucket!`);
       return null;
     }
 
-    // === 2. Only .mp4s, never a usedClip (basename or full R2 key)
-    const mp4Files = files.filter(f =>
-      f.endsWith('.mp4') &&
-      !usedClips.some(u => f.endsWith(u) || f === u || path.basename(f) === u)
-    );
-    if (!mp4Files.length) {
-      console.warn(`[10A][R2][${jobId}] No .mp4 files found in R2 bucket!`);
+    let mp4Objs = objs.filter(o => isMp4Key(o.Key));
+    if (!mp4Objs.length) {
+      console.warn(`[10A][R2][${jobId}] No .mp4 objects found in R2 bucket!`);
       return null;
     }
 
-    // === 3. Candidate building with advanced keyword/topic/cat/angle logic
-    const keywords = [subject, ...(matchPhrases || [])].map(k => typeof k === 'string' ? k.toLowerCase().replace(/[^a-z0-9_ ]+/gi, '') : '').filter(Boolean);
-    // Try category prioritization based on folder name
-    const catFolders = ['lore_history_mystery_horror','sports_fitness','cars_vehicles','animals_primates','misc'];
-    let relevantFiles = mp4Files;
+    // Filter out used
+    mp4Objs = mp4Objs.filter(o => !looksUsed(o.Key, usedClips));
 
-    // Optional: prioritize files in topic-aligned folders
-    for (let folder of catFolders) {
-      if (subject.toLowerCase().includes(folder.replace(/_/g, ' '))) {
-        relevantFiles = mp4Files.filter(f => f.includes(folder));
-        if (relevantFiles.length) break;
-      }
+    if (!mp4Objs.length) {
+      console.warn(`[10A][R2][${jobId}] After dedupe, no mp4 candidates remain.`);
+      return null;
     }
 
-    // === 4. Build candidates array
-    const candidates = relevantFiles.map(f => {
-      // Extract "topic" and "angle" from filename
-      const base = path.basename(f, '.mp4');
-      const [topicPart, ...rest] = base.split('_');
+    // 2) Optional recent-first bias to improve perceived freshness
+    if (PREFER_RECENT) {
+      mp4Objs.sort((a, b) => {
+        const ta = new Date(a.LastModified || 0).getTime();
+        const tb = new Date(b.LastModified || 0).getTime();
+        return tb - ta; // newest first
+      });
+    }
+
+    // 3) Token prefilter to reduce heavy scoring load
+    const subjTokens = tokenize(subject);
+    const phraseTokens = (matchPhrases || []).flatMap(tokenize);
+    const allTokens = [...new Set([...subjTokens, ...phraseTokens])];
+
+    let prefiltered = mp4Objs;
+    if (allTokens.length) {
+      const tokenSet = new Set(allTokens);
+      prefiltered = mp4Objs.filter(o => {
+        const base = normalize(path.basename(o.Key, path.extname(o.Key)));
+        const baseTokens = new Set(tokenize(base));
+        // keep if any token overlaps OR filename contains normalizedSubject
+        const overlap = [...tokenSet].some(t => baseTokens.has(t));
+        const containsSubject = base.includes(normalizedSubject);
+        return overlap || containsSubject;
+      });
+      console.log(`[10A][R2][${jobId}] Token prefilter: ${prefiltered.length}/${mp4Objs.length} retained (tokens=${[...tokenSet].join(',') || 'none'})`);
+    }
+
+    // safety bounds
+    if (prefiltered.length > TOKEN_PREFILTER_MAX) {
+      prefiltered = prefiltered.slice(0, TOKEN_PREFILTER_MAX);
+      console.log(`[10A][R2][${jobId}] Prefilter trimmed to ${TOKEN_PREFILTER_MAX} for safety.`);
+    }
+
+    // If prefiltering is too aggressive and we lost everything, fall back to mp4Objs (top N recent)
+    if (!prefiltered.length) {
+      prefiltered = mp4Objs.slice(0, PREFILTER_LIMIT);
+      console.log(`[10A][R2][${jobId}] Prefilter empty — falling back to top ${prefiltered.length} recent mp4s.`);
+    } else if (prefiltered.length > PREFILTER_LIMIT) {
+      prefiltered = prefiltered.slice(0, PREFILTER_LIMIT);
+      console.log(`[10A][R2][${jobId}] Prefilter too large — capped to ${PREFILTER_LIMIT} for scoring.`);
+    }
+
+    // 4) Build candidates + score (use 10G)
+    const keywords = [subject, ...(matchPhrases || [])];
+    const candidates = prefiltered.map(o => {
+      const base = path.basename(o.Key, '.mp4');
+      // topic inferred as first meaningful token, remainder is "angle"
+      const parts = base.split(/[_-]+/).filter(Boolean);
+      const topicPart = parts[0] || '';
+      const angle = parts.slice(1).join('_');
+
       return {
         type: 'video',
         source: 'r2',
-        path: f,
-        filename: path.basename(f),
+        path: o.Key,
+        filename: path.basename(o.Key),
         subject,
-        matchPhrases,
-        category: catFolders.find(cat => f.includes(cat)) || 'misc',
-        topic: topicPart,
-        angle: rest.join('_'),
+        matchPhrases: keywords,
+        category: inferCategoryFromKey(o.Key),
+        topic: normalize(topicPart),
+        angle: normalize(angle),
         scene,
-        isVideo: true
+        isVideo: true,
+        lastModified: o.LastModified ? new Date(o.LastModified).toISOString() : null,
+        size: o.Size || null,
       };
     });
 
-    // === 5. Score with universal helper (Section 10G)
-    const scored = candidates.map(candidate => ({
-      ...candidate,
-      score: scoreSceneCandidate(candidate, candidate.scene, usedClips)
+    let scored = candidates.map(c => ({
+      ...c,
+      score: scoreSceneCandidate(c, c.scene, usedClips, /*realVideoExists=*/true)
     }));
 
-    if (scored.length === 0) {
-      console.log(`[10A][R2][${jobId}][CANDIDATE] No .mp4 candidates to score.`);
-    } else {
-      scored
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 10)
-        .forEach((s, i) => console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.path} | score=${s.score}`));
+    if (!scored.length) {
+      console.log(`[10A][R2][${jobId}][CANDIDATE] No candidates to score.`);
+      return null;
     }
 
-    // === 6. Prefer "multi-angle" / non-duplicate for same topic
-    const multiAngle = scored.filter(s => s.topic === subject.toLowerCase().replace(/ /g, '_'));
+    // Log top 12 scored
+    scored
+      .slice() // copy
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 12)
+      .forEach((s, i) => {
+        console.log(`[10A][R2][${jobId}][CANDIDATE][${i + 1}] ${s.path} | score=${s.score} | topic=${s.topic} | angle=${s.angle} | lm=${s.lastModified}`);
+      });
+
+    // 5) Prefer multi-angle if topic equals normalizedSubject
+    const targetTopic = normalize(subject);
+    const multiAngle = scored.filter(s => s.topic && s.topic === targetTopic);
     if (multiAngle.length) {
       multiAngle.sort((a, b) => b.score - a.score);
       const bestAngle = multiAngle[0];
-      if (bestAngle && bestAngle.score >= 35 && !usedClips.includes(bestAngle.path)) {
+      if (bestAngle && bestAngle.score >= 35 && !looksUsed(bestAngle.path, usedClips)) {
         console.log(`[10A][R2][${jobId}][MULTIANGLE][SELECTED] ${bestAngle.path} | score=${bestAngle.score}`);
-        return await downloadAndValidate(bestAngle.path, workDir, sceneIdx, jobId, usedClips);
+        const out = await downloadAndValidate(bestAngle.path, workDir, sceneIdx, jobId, usedClips);
+        return out || null;
       }
     }
 
-    // === 7. Filter out true irrelevants (score <20) IF a strong match exists (score >=80)
+    // 6) If there is a strong match (>=80) ignore bottom junk (<20)
     const maxScore = Math.max(...scored.map(s => s.score));
-    const hasGoodMatch = maxScore >= 80;
+    const hasGood = maxScore >= 80;
     let eligible = scored;
-    if (hasGoodMatch) {
-      eligible = scored.filter(s => s.score >= 20);
-      if (eligible.length < scored.length) {
-        console.log(`[10A][R2][${jobId}] [FILTER] Blocked ${scored.length - eligible.length} irrelevants — real match exists.`);
+    if (hasGood) {
+      const before = eligible.length;
+      eligible = eligible.filter(s => s.score >= 20);
+      const blocked = before - eligible.length;
+      if (blocked > 0) {
+        console.log(`[10A][R2][${jobId}] [FILTER] Blocked ${blocked} weak candidates (<20) since strong matches exist.`);
       }
     }
 
-    eligible.sort((a, b) => b.score - a.score);
+    // 7) Sort by score (tie-breaker: newer first if available)
+    eligible.sort((a, b) => {
+      const ds = b.score - a.score;
+      if (ds !== 0) return ds;
+      if (PREFER_RECENT) {
+        const ta = new Date(a.lastModified || 0).getTime();
+        const tb = new Date(b.lastModified || 0).getTime();
+        return tb - ta;
+      }
+      return 0;
+    });
+
     const best = eligible[0];
-
-    if (!best || typeof best.path !== 'string') {
-      console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No suitable candidates for subject "${subject}". Aborting.`);
+    if (!best) {
+      console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No suitable candidates for subject "${subject}".`);
       return null;
     }
 
-    // Deduplication log
-    if (usedClips.includes(best.path) || usedClips.includes(path.basename(best.path))) {
-      console.warn(`[10A][R2][${jobId}][DEDUPE_BLOCK] Skipped candidate already used in this video: ${best.path}`);
-      return null;
+    // Dedup guard
+    if (looksUsed(best.path, usedClips)) {
+      console.warn(`[10A][R2][${jobId}][DEDUPE_BLOCK] Top candidate already used: ${best.path}`);
+      // try next eligible
+      const alt = eligible.find(e => !looksUsed(e.path, usedClips));
+      if (!alt) {
+        console.warn(`[10A][R2][${jobId}][DEDUPE_BLOCK] No alternative candidate available after dedupe.`);
+        return null;
+      }
+      console.log(`[10A][R2][${jobId}][DEDUPE_ALT] Switching to alternative: ${alt.path} (score=${alt.score})`);
+      const outAlt = await downloadAndValidate(alt.path, workDir, sceneIdx, jobId, usedClips);
+      return outAlt || null;
     }
 
-    // Log why this candidate was chosen
+    // Decision logs
     if (best.score >= 100) {
       console.log(`[10A][R2][${jobId}][SELECTED][STRICT] ${best.path} | score=${best.score}`);
     } else if (best.score >= 80) {
@@ -236,11 +404,12 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
     } else if (best.score >= 20) {
       console.log(`[10A][R2][${jobId}][SELECTED][PARTIAL] ${best.path} | score=${best.score}`);
     } else {
-      console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] No strong match, using best available: ${best.path} | score=${best.score}`);
+      console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] Using best available: ${best.path} | score=${best.score}`);
     }
 
-    // === 8. Download and return local path
-    return await downloadAndValidate(best.path, workDir, sceneIdx, jobId, usedClips);
+    // 8) Download and return local path
+    const out = await downloadAndValidate(best.path, workDir, sceneIdx, jobId, usedClips);
+    return out || null;
 
   } catch (err) {
     console.error(`[10A][R2][${jobId}][ERR] findR2ClipForScene failed:`, err);
@@ -248,53 +417,44 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
   }
 }
 
-// --- Helper: Download, validate, and return local path
-async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
-  const unique = uuidv4();
-  const outPath = path.join(workDir, `scene${sceneIdx + 1}-r2-${unique}.mp4`);
-  if (fs.existsSync(outPath) && isValidClip(outPath, jobId)) {
-    console.log(`[10A][R2][${jobId}] File already downloaded: ${outPath}`);
-    return outPath;
-  }
-  console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${r2Key} -> ${outPath}`);
-
-  const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: r2Key });
-  const resp = await s3Client.send(getCmd);
-
-  await new Promise((resolve, reject) => {
-    const stream = resp.Body;
-    const fileStream = fs.createWriteStream(outPath);
-    stream.pipe(fileStream);
-    stream.on('end', resolve);
-    stream.on('error', (err) => {
-      console.error(`[10A][R2][${jobId}][ERR] Stream error during download:`, err);
-      reject(err);
-    });
-    fileStream.on('finish', () => {
-      console.log(`[10A][R2][${jobId}] Clip downloaded to: ${outPath}`);
-      resolve();
-    });
-    fileStream.on('error', (err) => {
-      console.error(`[10A][R2][${jobId}][ERR] Write error during download:`, err);
-      reject(err);
-    });
-  });
-
-  if (!isValidClip(outPath, jobId)) {
-    console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
-    return null;
-  }
-
-  usedClips.push(r2Key);
-  return outPath;
+// ===========================================================
+// CATEGORY INFERENCE FROM KEY (folder naming heuristic)
+// ===========================================================
+function inferCategoryFromKey(key = '') {
+  const k = String(key);
+  const cats = [
+    'lore_history_mystery_horror',
+    'sports_fitness',
+    'cars_vehicles',
+    'animals_primates',
+    'food_cooking',
+    'health_wellness',
+    'holidays_events',
+    'human_emotion_social',
+    'kids_family',
+    'love_relationships',
+    'money_business_success',
+    'motivation_success',
+    'music_dance',
+    'science_nature',
+    'technology_innovation',
+    'travel_adventure',
+    'viral_trendy_content',
+    'misc'
+  ];
+  const found = cats.find(c => k.includes(`/${c}/`) || k.startsWith(`${c}/`) || k.includes(`/${c}/jobs/`));
+  return found || 'misc';
 }
 
-// === Static export for advanced dedupe (used by 5D) ===
+// ===========================================================
+// STATIC EXPORT: getAllFiles (used by 5D for scans)
+// Returns an array of mp4 keys (strings), cached for 60s.
+// ===========================================================
 findR2ClipForScene.getAllFiles = async function() {
   try {
-    const files = await listAllFilesInR2('', 'STATIC');
-    const mp4s = files.filter(f => f.endsWith('.mp4'));
-    console.log(`[10A][STATIC] getAllFiles: Found ${mp4s.length} mp4s in R2.`);
+    const objs = await listAllObjectsInR2('', 'STATIC');
+    const mp4s = objs.map(o => o.Key).filter(k => isMp4Key(k));
+    console.log(`[10A][STATIC] getAllFiles: Found ${mp4s.length} mp4s in R2 (cached=${Date.now() - _listCache.when < LIST_CACHE_TTL_MS}).`);
     return mp4s;
   } catch (err) {
     console.error('[10A][STATIC][ERR] getAllFiles failed:', err);

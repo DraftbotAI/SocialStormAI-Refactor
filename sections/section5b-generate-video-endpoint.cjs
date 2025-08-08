@@ -35,14 +35,17 @@ const {
 const { findClipForScene } = require('./section5d-clip-matcher.cjs');
 const { cleanupJob } = require('./section5h-job-cleanup.cjs');
 const { uploadSceneClipToR2, cleanForFilename } = require('./section10e-upload-to-r2.cjs');
+const OpenAI = require('openai');
 
 console.log('[5B][INIT] section5b-generate-video-endpoint.cjs loaded');
 
+// === CACHES ===
 const audioCacheDir = path.resolve(__dirname, '..', 'audio_cache');
 const videoCacheDir = path.resolve(__dirname, '..', 'video_cache');
 if (!fs.existsSync(audioCacheDir)) fs.mkdirSync(audioCacheDir);
 if (!fs.existsSync(videoCacheDir)) fs.mkdirSync(videoCacheDir);
 
+// === HELPERS ===
 function hashForCache(str) {
   return crypto.createHash('sha1').update(str).digest('hex');
 }
@@ -51,29 +54,6 @@ function assertFileExists(file, label) {
   if (!fs.existsSync(file) || fs.statSync(file).size < 10240) {
     throw new Error(`[5B][${label}][ERR] File does not exist or is too small: ${file}`);
   }
-}
-
-function getCategoryFolder(mainTopic) {
-  const lower = (mainTopic || '').toLowerCase();
-  if (/haunt|castle|ghost|lore|myth|mystery|history|horror/.test(lower)) return 'lore_history_mystery_horror';
-  if (/basketball|soccer|sports|lebron|fitness|exercise|workout|football/.test(lower)) return 'sports_fitness';
-  if (/car|truck|tesla|vehicle|drive|race/.test(lower)) return 'cars_vehicles';
-  if (/chimp|chimpanzee|ape|gorilla|orangutan|primate/.test(lower)) return 'animals_primates';
-  if (/food|cook|recipe|kitchen|ziti|meatball|bake|meal/.test(lower)) return 'food_cooking';
-  if (/wellness|health|medical|doctor|treatment/.test(lower)) return 'health_wellness';
-  if (/holiday|christmas|halloween|birthday|celebrate/.test(lower)) return 'holidays_events';
-  if (/emotion|feel|sad|happy|angry|love|cry|smile/.test(lower)) return 'human_emotion_social';
-  if (/kid|child|baby|family|parent/.test(lower)) return 'kids_family';
-  if (/love|relationship|date|couple|romance/.test(lower)) return 'love_relationships';
-  if (/money|business|success|profit|finance|stock/.test(lower)) return 'money_business_success';
-  if (/motivate|inspire|success|goal|achievement/.test(lower)) return 'motivation_success';
-  if (/music|dance|sing|band|song/.test(lower)) return 'music_dance';
-  if (/science|nature|animal|earth|planet|tree/.test(lower)) return 'science_nature';
-  if (/sport|fitness|workout|exercise/.test(lower)) return 'sports_fitness';
-  if (/tech|innovation|gadget|app|robot/.test(lower)) return 'technology_innovation';
-  if (/travel|adventure|trip|journey|tourist|vacation/.test(lower)) return 'travel_adventure';
-  if (/viral|trend|tiktok|reels|shorts/.test(lower)) return 'viral_trendy_content';
-  return 'misc';
 }
 
 async function ensureLocalClipExists(r2Path, localPath) {
@@ -96,6 +76,104 @@ async function ensureLocalClipExists(r2Path, localPath) {
     console.error(`[5B][R2][DOWNLOAD][FAIL] Could not download R2 file:`, err);
     throw err;
   }
+}
+
+// === GPT CLIENT (for category fallback) ===
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
+
+// === CATEGORY DETECTION (regex first, GPT fallback, then misc) ===
+async function getCategoryFolder(mainTopic) {
+  const lower = (mainTopic || '').toLowerCase();
+  const regexCategories = [
+    { re: /haunt|castle|ghost|lore|myth|mystery|history|horror/, cat: 'lore_history_mystery_horror' },
+    { re: /basketball|soccer|sports|lebron|fitness|exercise|workout|football/, cat: 'sports_fitness' },
+    { re: /car|truck|tesla|vehicle|drive|race/, cat: 'cars_vehicles' },
+    { re: /chimp|chimpanzee|ape|gorilla|orangutan|primate/, cat: 'animals_primates' },
+    { re: /food|cook|recipe|kitchen|ziti|meatball|bake|meal/, cat: 'food_cooking' },
+    { re: /wellness|health|medical|doctor|treatment/, cat: 'health_wellness' },
+    { re: /holiday|christmas|halloween|birthday|celebrate/, cat: 'holidays_events' },
+    { re: /emotion|feel|sad|happy|angry|love|cry|smile/, cat: 'human_emotion_social' },
+    { re: /kid|child|baby|family|parent/, cat: 'kids_family' },
+    { re: /love|relationship|date|couple|romance/, cat: 'love_relationships' },
+    { re: /money|business|success|profit|finance|stock/, cat: 'money_business_success' },
+    { re: /motivate|inspire|success|goal|achievement/, cat: 'motivation_success' },
+    { re: /music|dance|sing|band|song/, cat: 'music_dance' },
+    { re: /science|nature|animal|earth|planet|tree/, cat: 'science_nature' },
+    { re: /sport|fitness|workout|exercise/, cat: 'sports_fitness' },
+    { re: /tech|innovation|gadget|app|robot/, cat: 'technology_innovation' },
+    { re: /travel|adventure|trip|journey|tourist|vacation/, cat: 'travel_adventure' },
+    { re: /viral|trend|tiktok|reels|shorts/, cat: 'viral_trendy_content' }
+  ];
+
+  for (const { re, cat } of regexCategories) {
+    if (re.test(lower)) {
+      console.log(`[5B][CATEGORY][REGEX] Matched → ${cat}`);
+      return cat;
+    }
+  }
+
+  console.log('[5B][CATEGORY][REGEX] No match. Trying GPT fallback...');
+  if (!openai) {
+    console.warn('[5B][CATEGORY][GPT][SKIP] OPENAI_API_KEY missing. Using misc.');
+    return 'misc';
+  }
+  try {
+    const gptResp = await openai.chat.completions.create({
+      model: process.env.CATEGORY_MODEL || 'gpt-4.1-mini',
+      messages: [
+        {
+          role: 'system',
+          content: 'Classify the topic into one of these categories: ' +
+            regexCategories.map(c => c.cat).join(', ') +
+            '. Respond with only the category id, nothing else.'
+        },
+        { role: 'user', content: String(mainTopic || '').slice(0, 200) }
+      ],
+      max_tokens: 10,
+      temperature: 0
+    });
+
+    const category = (gptResp.choices?.[0]?.message?.content || '').trim();
+    if (regexCategories.find(c => c.cat === category)) {
+      console.log(`[5B][CATEGORY][GPT] Classified as → ${category}`);
+      return category;
+    } else {
+      console.warn(`[5B][CATEGORY][GPT] Invalid GPT category "${category}". Falling back to misc.`);
+    }
+  } catch (err) {
+    console.error('[5B][CATEGORY][GPT][ERR]', err);
+  }
+
+  return 'misc';
+}
+
+// === Simple concurrency limiter (no external deps) ===
+function pLimit(max) {
+  const queue = [];
+  let activeCount = 0;
+
+  const next = () => {
+    activeCount--;
+    if (queue.length > 0) {
+      const fn = queue.shift();
+      fn();
+    }
+  };
+
+  const run = (fn, resolve, reject) => {
+    activeCount++;
+    fn().then(
+      (val) => { resolve(val); next(); },
+      (err) => { reject(err); next(); }
+    );
+  };
+
+  return (fn) =>
+    new Promise((resolve, reject) => {
+      const task = () => run(fn, resolve, reject);
+      if (activeCount < max) task();
+      else queue.push(task);
+    });
 }
 
 // ===========================================================
@@ -144,9 +222,9 @@ function registerGenerateVideoEndpoint(app, deps) {
 
         const { script = '', voice = '', music = true, outro = true, provider = 'polly' } = req.body || {};
         if (!script || !voice) throw new Error('Missing script or voice');
-        let scenes = depSplitScriptToScenes(script);
 
-        // === BULLETPROOF SCENE NORMALIZATION ===
+        // Split and normalize scenes
+        let scenes = depSplitScriptToScenes(script);
         scenes = Array.isArray(scenes) ? scenes : [];
         scenes = scenes.map((scene, idx) => {
           if (typeof scene === 'string') {
@@ -165,16 +243,20 @@ function registerGenerateVideoEndpoint(app, deps) {
         );
         if (!scenes.length) throw new Error('[5B][FATAL] No valid scenes found after filter!');
 
+        // Main topic & category
         const allSceneTexts = scenes.flatMap(s => Array.isArray(s.texts) ? s.texts : []);
         const mainTopic = allSceneTexts[0] || 'misc';
-        const categoryFolder = getCategoryFolder(mainTopic);
+        const categoryFolder = await getCategoryFolder(mainTopic);
         jobContext.categoryFolder = categoryFolder;
 
-        // === ABSOLUTE BULLETPROOF USEDCLIPS DEDUPE ===
-        const usedClips = []; // Global, never reset, mutated by ref for the whole job
+        // Global de-duplication state shared across all scenes
+        const usedClips = [];
         const sceneFiles = [];
+        const sceneMeta = []; // track to resolve post-hoc dupes if any
 
-        // === HOOK SCENE (scene 0) ===
+        // ===========================================
+        // SCENE 0: HOOK (serial)
+        // ===========================================
         progress[jobId] = { percent: 10, status: 'Generating intro audio and finding first visual...' };
         const hookText = scenes[0].texts[0];
         const audioHashHook = hashForCache(JSON.stringify({ text: hookText, voice, provider }));
@@ -219,6 +301,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         assertFileExists(hookMuxed, `HOOK_MUXED`);
 
         sceneFiles[0] = hookMuxed;
+        sceneMeta[0] = { sourceClipPath: hookClipPath, subject: scenes[0].visualSubject || hookText || mainTopic };
         jobContext.sceneClipMetaList.push({
           localFilePath: hookMuxed,
           subject: scenes[0].visualSubject || hookText || mainTopic,
@@ -227,7 +310,9 @@ function registerGenerateVideoEndpoint(app, deps) {
           category: categoryFolder
         });
 
-        // === MEGA SCENE (scene 1) ===
+        // ===========================================
+        // SCENE 1: MEGA (serial)
+        // ===========================================
         progress[jobId] = { percent: 20, status: 'Building mega scene...' };
         const scene2 = scenes[1];
         if (!scene2) throw new Error('[5B][FATAL] Mega scene missing!');
@@ -287,6 +372,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         assertFileExists(megaMuxed, `MEGA_MUXED`);
 
         sceneFiles[1] = megaMuxed;
+        sceneMeta[1] = { sourceClipPath: megaClipPath, subject: candidateSubjects[0] || mainTopic };
         jobContext.sceneClipMetaList.push({
           localFilePath: megaMuxed,
           subject: candidateSubjects[0] || mainTopic,
@@ -295,82 +381,135 @@ function registerGenerateVideoEndpoint(app, deps) {
           category: categoryFolder
         });
 
-        // === ALL REMAINING SCENES (SERIALIZED, not parallel for accurate progress) ===
-        let curPct = 22;
-        const pctPerScene = 35 / (scenes.length - 2);
+        // ===========================================
+        // SCENES 2+ : PARALLEL with concurrency cap + bulletproof fallback
+        // ===========================================
+        const totalScenes = scenes.length;
+        const remainingCount = Math.max(totalScenes - 2, 0);
+        const pctBase = 22;                 // after mega scene, we were ~20; we start remaining at ~22
+        const pctSpan = 35;                 // same as your original math: 35% reserved for remaining scenes
+        const pctPerScene = remainingCount > 0 ? (pctSpan / remainingCount) : 0;
+        let completedScenes = 0;
 
-        for (let i = 2; i < scenes.length; i++) {
-          progress[jobId] = { percent: curPct, status: `Processing scene ${i + 1} of ${scenes.length}...` };
-          const scene = scenes[i];
-          let sceneIdx = i;
+        const maxConc = Math.max(1, parseInt(process.env.MAX_CONCURRENT_SCENES || '3', 10));
+        const limit = pLimit(maxConc);
+        console.log(`[5B][PARALLEL] Processing ${remainingCount} scenes with concurrency=${maxConc}`);
+
+        async function processOneScene(sceneIdx) {
+          const scene = scenes[sceneIdx];
           let sceneSubject = scene.visualSubject || (Array.isArray(scene.texts) && scene.texts[0]) || allSceneTexts[sceneIdx];
           const GENERIC_SUBJECTS = ['face','person','man','woman','it','thing','someone','something','body','eyes'];
           if (GENERIC_SUBJECTS.includes((sceneSubject || '').toLowerCase())) {
             sceneSubject = mainTopic;
           }
-          let clipPath = null;
-          try {
-            clipPath = await findClipForScene({
+
+          const doWork = async () => {
+            let clipPath = null;
+            try {
+              clipPath = await findClipForScene({
+                subject: sceneSubject,
+                sceneIdx,
+                allSceneTexts,
+                mainTopic,
+                isMegaScene: false,
+                usedClips,
+                workDir,
+                jobId,
+                jobContext,
+                categoryFolder
+              });
+            } catch (e) {
+              console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for scene ${sceneIdx + 1}:`, e);
+            }
+
+            if (!clipPath) {
+              const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
+              clipPath = await fallbackKenBurnsVideo(sceneSubject || mainTopic, workDir, sceneIdx, jobId, usedClips);
+              if (!clipPath) throw new Error(`[5B][ERR][NO_MATCH][${jobId}] No fallback Ken Burns visual for scene ${sceneIdx + 1}!`);
+            }
+
+            const localClipPath = path.join(workDir, path.basename(clipPath));
+            await ensureLocalClipExists(clipPath, localClipPath);
+            assertFileExists(localClipPath, `CLIP_SCENE_${sceneIdx+1}`);
+
+            const audioHash = hashForCache(JSON.stringify({ text: scene.texts, voice, provider }));
+            const audioCachePath = path.join(audioCacheDir, `${audioHash}.mp3`);
+            if (!fs.existsSync(audioCachePath) || fs.statSync(audioCachePath).size < 10000)
+              await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
+            assertFileExists(audioCachePath, `AUDIO_SCENE_${sceneIdx+1}`);
+
+            const narrationDuration = await getDuration(audioCachePath);
+            const trimmedVideoPath = path.join(workDir, `scene${sceneIdx+1}-trimmed.mp4`);
+            await trimForNarration(localClipPath, trimmedVideoPath, narrationDuration);
+            const videoCachePath = path.join(videoCacheDir, `${hashForCache(JSON.stringify({
+              text: scene.texts,
+              voice,
+              provider,
+              clip: clipPath
+            }))}.mp4`);
+            await muxVideoWithNarration(trimmedVideoPath, audioCachePath, videoCachePath);
+            assertFileExists(videoCachePath, `MUXED_SCENE_${sceneIdx+1}`);
+
+            jobContext.sceneClipMetaList.push({
+              localFilePath: videoCachePath,
               subject: sceneSubject,
               sceneIdx,
-              allSceneTexts,
-              mainTopic,
-              isMegaScene: false,
-              usedClips,
-              workDir,
-              jobId,
-              jobContext,
-              categoryFolder
+              source: (clipPath || '').includes('pexels') ? 'pexels' : (clipPath || '').includes('pixabay') ? 'pixabay' : 'r2',
+              category: categoryFolder
             });
-          } catch (e) {
-            console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for scene ${sceneIdx + 1}:`, e);
+
+            sceneFiles[sceneIdx] = videoCachePath;
+            sceneMeta[sceneIdx] = { sourceClipPath: clipPath, subject: sceneSubject };
+
+            // Mark progress
+            completedScenes += 1;
+            const pct = Math.min(57, Math.floor(pctBase + completedScenes * pctPerScene));
+            progress[jobId] = { percent: pct, status: `Processing scene ${sceneIdx + 1} of ${totalScenes}...` };
+
+            return true;
+          };
+
+          // Try parallel work, retry serially once on failure
+          try {
+            return await doWork();
+          } catch (err) {
+            console.warn(`[5B][PARALLEL][WARN][${jobId}] Scene ${sceneIdx + 1} failed in parallel. Retrying serially...`, err);
+            try {
+              return await doWork();
+            } catch (err2) {
+              console.error(`[5B][PARALLEL][FATAL][${jobId}] Scene ${sceneIdx + 1} failed again serially.`, err2);
+              throw err2;
+            }
           }
-          if (!clipPath) {
-            const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
-            clipPath = await fallbackKenBurnsVideo(sceneSubject || mainTopic, workDir, sceneIdx, jobId, usedClips);
-            if (!clipPath) throw new Error(`[5B][ERR][NO_MATCH][${jobId}] No fallback Ken Burns visual for scene ${sceneIdx + 1}!`);
-          }
-
-          const localClipPath = path.join(workDir, path.basename(clipPath));
-          await ensureLocalClipExists(clipPath, localClipPath);
-          assertFileExists(localClipPath, `CLIP_SCENE_${sceneIdx+1}`);
-
-          const audioHash = hashForCache(JSON.stringify({
-            text: scene.texts,
-            voice,
-            provider
-          }));
-          const audioCachePath = path.join(audioCacheDir, `${audioHash}.mp3`);
-          if (!fs.existsSync(audioCachePath) || fs.statSync(audioCachePath).size < 10000)
-            await deps.createSceneAudio(scene.texts[0], voice, audioCachePath, provider);
-          assertFileExists(audioCachePath, `AUDIO_SCENE_${sceneIdx+1}`);
-
-          const narrationDuration = await getDuration(audioCachePath);
-          const trimmedVideoPath = path.join(workDir, `scene${sceneIdx+1}-trimmed.mp4`);
-          await trimForNarration(localClipPath, trimmedVideoPath, narrationDuration);
-          const videoCachePath = path.join(videoCacheDir, `${hashForCache(JSON.stringify({
-            text: scene.texts,
-            voice,
-            provider,
-            clip: clipPath
-          }))}.mp4`);
-          await muxVideoWithNarration(trimmedVideoPath, audioCachePath, videoCachePath);
-          assertFileExists(videoCachePath, `MUXED_SCENE_${sceneIdx+1}`);
-
-          jobContext.sceneClipMetaList.push({
-            localFilePath: videoCachePath,
-            subject: sceneSubject,
-            sceneIdx,
-            source: (clipPath || '').includes('pexels') ? 'pexels' : (clipPath || '').includes('pixabay') ? 'pixabay' : 'r2',
-            category: categoryFolder
-          });
-
-          sceneFiles[sceneIdx] = videoCachePath;
-          curPct += pctPerScene;
         }
 
-        // === Concatenation, music, outro, upload, final progress updates ===
+        // Kick off scenes 2..N in parallel with limit
+        const parallelPromises = [];
+        for (let i = 2; i < totalScenes; i++) {
+          parallelPromises.push(limit(() => processOneScene(i)));
+        }
+        await Promise.all(parallelPromises);
 
+        // Final sanity de-dupe check (rare parallel race guard)
+        const seenClip = new Set();
+        for (let i = 0; i < sceneMeta.length; i++) {
+          if (!sceneMeta[i]) continue;
+          const key = sceneMeta[i].sourceClipPath || '';
+          if (key && seenClip.has(key)) {
+            // If a dup somehow slipped through, re-run this scene serially to get a different clip
+            console.warn(`[5B][DEDUPE][WARN][${jobId}] Duplicate clip detected post-parallel for scene ${i + 1}. Re-running serially.`);
+            // Remove its previous registration from usedClips so 5D can pick an alternate
+            const idx = usedClips.indexOf(key);
+            if (idx >= 0) usedClips.splice(idx, 1);
+            await processOneScene(i);
+          } else if (key) {
+            seenClip.add(key);
+          }
+        }
+
+        // ===========================================
+        // CONCAT, AUDIO FIX, MUSIC, OUTRO, UPLOADS
+        // ===========================================
         progress[jobId] = { percent: 60, status: 'Stitching your video together...' };
         let refInfo = null;
         try {
@@ -501,7 +640,6 @@ module.exports = registerGenerateVideoEndpoint;
 async function uploadFinalToVideosBucket(finalPath, finalName, jobId, categoryFolder) {
   const bucket = process.env.R2_VIDEOS_BUCKET || 'socialstorm-videos';
   const fileData = fs.readFileSync(finalPath);
-  // Put in a category folder for organization
   const key = `${categoryFolder}/jobs/${jobId}/${finalName}`;
   console.log(`[5B][R2][UPLOAD] Uploading final to bucket=${bucket} key=${key}`);
   await s3Client.send(new PutObjectCommand({
