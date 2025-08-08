@@ -19,17 +19,17 @@ const axios = require('axios');
 
 // ------------ ENV / CONFIG ------------
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const EMOTION_MODEL = process.env.EMOTION_MODEL || 'gpt-4o'; // keep consistent with 10H
-const OPENAI_TIMEOUT_MS = 15000;
-const OPENAI_RETRIES = 2;
+const EMOTION_MODEL = process.env.EMOTION_MODEL || 'gpt-4o'; // keep consistent with 10H default family
+const OPENAI_TIMEOUT_MS = Number(process.env.EMOTION_OPENAI_TIMEOUT_MS || 15000);
+const OPENAI_RETRIES = Math.max(0, Number(process.env.EMOTION_OPENAI_RETRIES || 2));
 
 // If you're extremely cost-sensitive, disable GPT refinement:
 // (Heuristics still work very well.)
-const EMOTION_USE_GPT = (process.env.EMOTION_USE_GPT || '1') === '1';
+const EMOTION_USE_GPT = String(process.env.EMOTION_USE_GPT || '1') === '1';
 
 // ------------ LRU CACHE ------------
 const _cacheMax = 200;
-const _cache = new Map(); // key: `${sceneLine}|${mainTopic}`, value: string|null
+const _cache = new Map(); // key: `${sceneLine}|${mainTopic}|${preferTransitions}`, value: string|null
 function _cacheGet(k) {
   if (_cache.has(k)) {
     const v = _cache.get(k);
@@ -69,7 +69,10 @@ function _removeLeadingVerbs(s) {
   return String(s || '').replace(/^(show|display|depict|visualize|cut to|see)\s+/i, '').trim();
 }
 function _neutralizePunctuation(s) {
-  return String(s || '').replace(/[“”"’']/g, '').replace(/[.!?;:,]+$/g, '').trim();
+  return String(s || '')
+    .replace(/[“”"’']/g, '')
+    .replace(/[.!?;:,]+$/g, '')
+    .trim();
 }
 
 // ------------ GENERIC / BAN LISTS ------------
@@ -81,109 +84,110 @@ const BANNED_SOLO_GENERICS = new Set([
 function _isAllowedHumanPhrase(phrase) {
   const L = _lower(phrase);
   if (!/\b(man|woman|boy|girl|child|kid|person)\b/.test(L)) return true; // no human word — allowed
+
   // Require an adjective or action verb indicating the emotion/action:
   // e.g., "worried woman biting nails", "man jumping for joy", "shocked face close-up"
   const hasDescriptor = /\b(worried|anxious|sad|happy|angry|furious|scared|afraid|shocked|surprised|confused|excited|joyful|relieved|embarrassed|nervous|tense|stressed|calm|serene|proud|ashamed|disgusted|bored|lonely|heartbroken|overwhelmed|pensive|thoughtful)\b/.test(L);
-  const hasAction = /\b(crying|smiling|frowning|yelling|screaming|biting nails|pacing|trembling|jumping|cheering|hugging|sighing|laughing|gasping|covering face|hands on head|wide eyes|clenched fists|facepalm|eye roll|shrugging)\b/.test(L);
+  const hasAction = /\b(crying|smiling|frowning|yelling|screaming|biting nails|pacing|trembling|jumping|cheering|hugging|sighing|laughing|gasping|covering mouth|covering face|hands on head|wide eyes|clenched fists|facepalm|eye roll|shrugging)\b/.test(L);
   return hasDescriptor || hasAction;
 }
 
 // ------------ EMOTION LEXICON (heuristics) ------------
-// Map of emotion keywords/regexes → visual templates (short, literal, portrait-first)
+// All visuals normalized to 5–10 words to match hard limiter.
 const EMOTION_MAP = [
   { re: /\b(anxious|anxiety|worried|nervous|nerves|uneasy|tense|panic|panicky)\b/i, visuals: [
-    'worried woman biting nails',
-    'anxious man wringing hands',
-    'nervous person glancing around',
+    'worried woman biting nails close-up shot',
+    'anxious man wringing hands in hallway',
+    'nervous person glancing around on subway',
   ]},
   { re: /\b(happy|joy|joyful|glad|delighted|cheerful|ecstatic|excited|thrilled|elated)\b/i, visuals: [
-    'woman smiling brightly',
-    'man jumping for joy',
-    'friends cheering together',
+    'woman smiling brightly on camera close-up',
+    'man jumping for joy in slow motion',
+    'friends cheering together at city rooftop',
   ]},
   { re: /\b(sad|unhappy|down|blue|upset|depressed|gloomy|heartbroken)\b/i, visuals: [
-    'sad person alone on bench',
-    'woman wiping tears',
+    'sad person alone on park bench',
+    'woman wiping tears by window light',
     'man staring out window in rain',
   ]},
   { re: /\b(angry|mad|furious|irate|rage|annoyed|irritated|frustrated)\b/i, visuals: [
-    'man with clenched fists',
+    'man with clenched fists at desk',
     'woman frowning with furrowed brows',
-    'person slamming desk',
+    'person slamming desk in frustration',
   ]},
-  { re: /\b(scared|afraid|fear|terrified|frightened|spooked|nervous)\b/i, visuals: [
-    'person with wide eyes gasping',
-    'woman covering mouth in shock',
-    'man stepping back in fear',
+  { re: /\b(scared|afraid|fear|terrified|frightened|spooked)\b/i, visuals: [
+    'person with wide eyes gasping close-up',
+    'woman covering mouth in sudden shock',
+    'man stepping back in fear indoors',
   ]},
   { re: /\b(shock|shocked|surprised|astonished|amazed|wow|plot twist)\b/i, visuals: [
-    'face with shocked expression',
-    'woman with hands on cheeks',
-    'man gasping in surprise',
+    'face with shocked expression close-up shot',
+    'woman with hands on cheeks surprised',
+    'man gasping in surprise on street',
   ]},
   { re: /\b(confused|confusion|uncertain|unsure|perplexed|puzzled|dilemma)\b/i, visuals: [
-    'person scratching head',
-    'woman looking puzzled at screen',
-    'man tilting head confused',
+    'person scratching head at computer screen',
+    'woman looking puzzled at laptop screen',
+    'man tilting head confused in office',
   ]},
   { re: /\b(relief|relieved|calm|serene|peaceful|composed)\b/i, visuals: [
-    'person exhaling with relief',
-    'calm woman closing eyes',
-    'man taking deep breath',
+    'person exhaling with relief by window',
+    'calm woman closing eyes breathing deeply',
+    'man taking deep breath on balcony',
   ]},
   { re: /\b(embarrassed|awkward|cringe|ashamed|guilty|guilt)\b/i, visuals: [
-    'person covering face with hand',
-    'woman blushing and looking away',
-    'man rubbing neck awkwardly',
+    'person covering face with hand embarrassed',
+    'woman blushing and looking away shyly',
+    'man rubbing neck awkwardly in office',
   ]},
   { re: /\b(proud|victory|win|winner|accomplish|achievement|achieved|trophy|medal)\b/i, visuals: [
-    'athlete holding gold medal',
-    'person raising trophy',
-    'student holding certificate',
+    'athlete holding gold medal after race',
+    'person raising trophy on stage lights',
+    'student holding certificate with smile',
   ]},
   { re: /\b(lonely|alone|isolation|isolated)\b/i, visuals: [
-    'lonely person on empty street',
-    'silhouette sitting alone on bench',
-    'person looking out window alone',
+    'lonely person on empty street at night',
+    'silhouette sitting alone on park bench',
+    'person looking out window alone inside',
   ]},
   { re: /\b(stressed|burned out|overwhelmed|overload|pressure)\b/i, visuals: [
     'person with head in hands at desk',
-    'woman rubbing temples at laptop',
-    'man surrounded by paperwork',
+    'woman rubbing temples at laptop desk',
+    'man surrounded by paperwork at office',
   ]},
 ];
 
 // ------------ ACTION / TRANSITION LEXICON (heuristics) ------------
 const TRANSITION_MAP = [
   { re: /\b(meanwhile|at the same time|in the meantime)\b/i, visuals: [
-    'city time-lapse',
-    'fast moving clouds',
-    'busy street crosswalk time-lapse',
+    'city skyline fast time-lapse shot',
+    'fast moving clouds across blue sky',
+    'busy crosswalk pedestrians time-lapse view',
   ]},
   { re: /\b(later that day|later|afterward|afterwards|soon after|minutes later|hours later)\b/i, visuals: [
-    'clock hands spinning',
-    'sun moving across sky',
-    'day to night time-lapse',
+    'clock hands spinning close-up shot',
+    'sun moving across sky time-lapse',
+    'day to night city time-lapse transition',
   ]},
   { re: /\b(earlier|before that|previously|rewind)\b/i, visuals: [
-    'rewind tape animation',
-    'calendar flipping back',
-    'reverse time effect',
+    'rewind tape animation retro vhs effect',
+    'calendar flipping back with bold page',
+    'reverse time effect with particles',
   ]},
   { re: /\b(let\'?s get started|let us begin|getting started|kick off|time to begin)\b/i, visuals: [
-    'scene change animation',
-    'hand pressing start button',
-    'opening title swipe',
+    'scene change animation dynamic swipe',
+    'hand pressing start button macro shot',
+    'opening title swipe with bold text',
   ]},
   { re: /\b(moving on|next up|on to|now for|the real secret)\b/i, visuals: [
-    'hand pulling cloth to reveal',
-    'page turn animation',
-    'bold swipe transition',
+    'hand pulling cloth to reveal object',
+    'page turn animation clean paper flip',
+    'bold swipe transition across screen',
   ]},
   { re: /\b(finally|at last|in conclusion|to wrap up|wrap it up)\b/i, visuals: [
-    'closing curtain animation',
-    'checklist with last item ticked',
-    'sunset timelapse',
+    'closing curtain animation rich fabric',
+    'checklist last item ticked close-up',
+    'sunset timelapse ending scene visual',
   ]},
 ];
 
@@ -232,11 +236,8 @@ function _sanitizeVisual(visual) {
   // Safety: if the first word is still too vague, reject
   if (/^(thing|stuff|object|idea)$/.test(_lower(v.split(/\s+/)[0] || ''))) return null;
 
-  // Enforce 5–10 preferred, but allow 3–10 minimum (we already cut to 10)
-  if (!_between(3, 10, v)) {
-    // Try to pad lightly if too short and looks valid (rare case)
-    if (_between(1, 2, v)) return null;
-  }
+  // Enforce 5–10 words (strict)
+  if (!_between(5, 10, v)) return null;
 
   return v;
 }
@@ -250,13 +251,13 @@ Given a script line, output ONLY a single, literal, visual subject/action (5–1
 - No metaphors, no abstract concepts, no generic words like "something", "someone", "person", "people", "thing", "scene".
 - Output ONLY the phrase (no sentences, no punctuation at end, no quotes).
 Examples:
-Input: "Feeling anxious?" → "worried woman biting nails"
-Input: "Let's get started!" → "scene change animation"
-Input: "Meanwhile, across town..." → "city time-lapse"
-Input: "Later that day" → "clock spinning"
-Input: "He's overjoyed" → "man jumping for joy"
-Input: "Now for the real secret" → "hand pulling cloth to reveal"
-Input: "What a plot twist!" → "face with shocked expression"
+Input: "Feeling anxious?" → "worried woman biting nails close-up shot"
+Input: "Let's get started!" → "scene change animation dynamic swipe"
+Input: "Meanwhile, across town..." → "city skyline fast time-lapse shot"
+Input: "Later that day" → "clock hands spinning close-up shot"
+Input: "He's overjoyed" → "man jumping for joy in slow motion"
+Input: "Now for the real secret" → "hand pulling cloth to reveal object"
+Input: "What a plot twist!" → "face with shocked expression close-up shot"
 `.trim();
 
 async function _openaiSuggest(line, mainTopic, jobId) {
@@ -274,7 +275,7 @@ Return ONLY the best literal visual subject/action (5–10 words). If unsure, sa
   let attempt = 0;
   let lastErr = null;
 
-  while (attempt <= OPENAI_RETRIES) {
+  while (attempt <= OPENAI_RETRIES) { // attempts = retries+1
     try {
       console.log(`[10I][GPT][REQ][${jobId || 'job'}] attempt=${attempt + 1} model=${EMOTION_MODEL}`);
       const resp = await axios.post(
@@ -315,7 +316,7 @@ Return ONLY the best literal visual subject/action (5–10 words). If unsure, sa
       attempt++;
     }
   }
-  console.warn('[10I][GPT][GIVEUP] Returning null after retries.');
+  console.warn('[10I][GPT][GIVEUP] Returning null after retries.', lastErr ? `(last error: ${lastErr?.message || 'unknown'})` : '');
   return null;
 }
 
@@ -350,7 +351,7 @@ async function extractEmotionActionVisual(sceneLine, mainTopic = '', opts = {}) 
 
   // 1) Transition-first (if user prefers or line obviously a transition)
   let heuristic;
-  if (preferTransitions || /\b(meanwhile|later|earlier|moving on|finally|in conclusion|wrap up|rewind|next up|now for)\b/i.test(line)) {
+  if (preferTransitions || /\b(meanwhile|later|earlier|moving on|next up|now for|finally|in conclusion|wrap up|rewind)\b/i.test(line)) {
     heuristic = _heuristicTransition(line);
     if (heuristic) {
       const sanitized = _sanitizeVisual(heuristic);

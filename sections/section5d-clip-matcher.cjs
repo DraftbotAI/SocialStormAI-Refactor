@@ -1,13 +1,14 @@
 // ===========================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Canonicals + Staged Queries)
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Canonicals + Staged Queries + Scene Directives)
 // Smart, video-first, entity-strict, no duplicates, max logs.
 // Central scoring (10G). Uses 10M to normalize subjects and
 // build staged search queries: Feature/Action → Canonical → Synonyms.
+// Supports manual scene directives (options / mustShow / overrideSubject / overrideFeature / alternates / forceClip).
 // R2-first, then Pexels/Pixabay; image→Ken Burns → still-to-video fallback.
 //
 // *** 2025-08 Loop Killers ***
 // - No recursion. One optional GPT reformulation attempt.
-// - Per-scene ATTEMPT_LIMIT (default 2: literal + reformulated).
+// - Per-scene ATTEMPT_LIMIT (default 2: canonical + reformulated).
 // - TIME_BUDGET_MS per scene; hard stop with graceful fallback.
 // - Negative-result cache to avoid re-searching hopeless subjects.
 // - Strong de-dupe on candidates by normalized path.
@@ -125,7 +126,7 @@ const REFORMULATION_MODEL = process.env.REFORMULATION_MODEL || 'gpt-4.1';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
-console.log('[5D][INIT] Clip Matcher loaded (10M canonicals, staged queries, video-first, hard floors, loop-guarded, progress-aware).');
+console.log('[5D][INIT] Clip Matcher loaded (10M canonicals, staged queries, manual directives, video-first, hard floors, loop-guarded, progress-aware).');
 
 // ===========================================================
 // Constants / Utilities
@@ -135,7 +136,7 @@ const HARD_FLOOR_VIDEO = Number(process.env.MATCHER_FLOOR_VIDEO || 92);
 const HARD_FLOOR_IMAGE = Number(process.env.MATCHER_FLOOR_IMAGE || 88);
 const PROVIDER_TIMEOUT_MS = Number(process.env.MATCHER_PROVIDER_TIMEOUT_MS || 10000);
 
-const ATTEMPT_LIMIT = Math.max(1, Number(process.env.MATCHER_ATTEMPT_LIMIT || 2)); // literal + reformulated
+const ATTEMPT_LIMIT = Math.max(1, Number(process.env.MATCHER_ATTEMPT_LIMIT || 2)); // canonical + reformulated
 const TIME_BUDGET_MS = Math.max(4000, Number(process.env.MATCHER_TIME_BUDGET_MS || 16000));
 const MAX_SUBJECT_OPTIONS = Math.max(1, Number(process.env.MATCHER_MAX_SUBJECT_OPTIONS || 5));
 
@@ -344,6 +345,46 @@ function asPathAndSource(res, sourceTag) {
 }
 
 // ===========================================================
+// Manual Directive Utilities
+// ===========================================================
+function pickSceneDirective(sceneIdx, jobContext) {
+  // Accept from multiple places for flexibility
+  const pools = [
+    jobContext?.sceneDirectives,
+    jobContext?.payload?.sceneDirectives,
+    jobContext?.overrides?.sceneDirectives,
+    jobContext?.sceneOverrides,
+  ].filter(Boolean);
+
+  for (const pool of pools) {
+    const hit = Array.isArray(pool)
+      ? pool.find(x => Number(x?.sceneIdx) === Number(sceneIdx))
+      : (pool && pool[sceneIdx]); // map form
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function buildOverrideStageFromDirective(directive) {
+  // Priority: explicit options[] (ordered), else (mustShow + feature + alternates)
+  const terms = [];
+  if (Array.isArray(directive?.options) && directive.options.length) {
+    directive.options.forEach(t => t && terms.push(String(t)));
+  } else {
+    const must = directive?.mustShow || directive?.overrideSubject;
+    const feat = directive?.overrideFeature || directive?.feature;
+    const alts = Array.isArray(directive?.alternates) ? directive.alternates : [];
+    if (must && feat) terms.push(`${must} ${feat}`);
+    if (must) terms.push(String(must));
+    if (feat) terms.push(String(feat));
+    alts.forEach(a => a && terms.push(String(a)));
+  }
+  const cleaned = Array.from(new Set(terms.map(t => String(t).trim()).filter(Boolean)));
+  if (!cleaned.length) return null;
+  return { stage: 'OVERRIDE', terms: cleaned };
+}
+
+// ===========================================================
 // MAIN
 // ===========================================================
 /**
@@ -383,6 +424,15 @@ async function findClipForScene({
   const prevAttempts = Number(jobContext._matcherAttempts.get(attemptKey) || 0);
   jobContext._matcherAttempts.set(attemptKey, prevAttempts);
 
+  // ---- Forced clip short-circuit ----
+  const directive = pickSceneDirective(sceneIdx, jobContext);
+  if (forceClipPath || (directive && directive.forceClip)) {
+    const forced = forceClipPath || directive.forceClip;
+    console.log(`[5D][FORCE][${jobId}] Forced clip: ${forced}`);
+    progress(jobContext, sceneIdx, 92, 'matcher:forced');
+    return forced;
+  }
+
   // ---- Subject Anchor (scene 0 / mega) ----
   let searchSubject = subject;
   if (isMegaScene || sceneIdx === 0) {
@@ -403,17 +453,30 @@ async function findClipForScene({
     console.log(`[5D][FALLBACK][${jobId}] Using fallback subject: "${searchSubject}"`);
   }
 
-  if (forceClipPath) {
-    console.log(`[5D][FORCE][${jobId}] Forced clip: ${forceClipPath}`);
-    progress(jobContext, sceneIdx, 92, 'matcher:forced');
-    return forceClipPath;
-  }
-
   // =========================================================
   // Canonical normalization & staged query generation (10M)
+  // + Manual Directive Stage (if provided)
   // =========================================================
-  const strictExtract = await normalizeWith10M(searchSubject, mainTopic, prevVisualSubjects);
-  const queryStages = getQueryStagesForSubject(strictExtract);
+  const strictExtract = await normalizeWith10M(
+    directive?.overrideSubject || directive?.mustShow || searchSubject,
+    mainTopic,
+    prevVisualSubjects
+  );
+
+  let queryStages = getQueryStagesForSubject({
+    ...strictExtract,
+    // gently incorporate directive feature/alternates into 10M seed
+    featureOrAction: directive?.overrideFeature || directive?.feature || strictExtract?.featureOrAction || '',
+    // alternates handled by normalizeWith10M/10M internally
+  });
+
+  const overrideStage = buildOverrideStageFromDirective(directive || {});
+  if (overrideStage) {
+    // OVERRIDE runs first, and preserves the given order strictly
+    queryStages = [overrideStage, ...queryStages];
+    console.log('[5D][DIRECTIVES][OVERRIDE_STAGE]', overrideStage);
+  }
+
   console.log('[5D][10M][RESOLVED]', strictExtract);
   console.log('[5D][10M][STAGES]', queryStages);
 
@@ -435,7 +498,7 @@ async function findClipForScene({
   }
 
   // =========================================================
-  // Attempts: 1) canonicals, 2) optional GPT reformulation
+  // Attempts: 1) canonical/override, 2) optional GPT reformulation (single pass)
   // =========================================================
   let attempt = Number(jobContext._matcherAttempts.get(attemptKey) || 0);
   let reformulatedOnce = false;
@@ -451,12 +514,18 @@ async function findClipForScene({
     // For attempt > 0, try reformulation ONCE (layered atop canonical)
     let stagesThisAttempt = queryStages;
     if (attempt > 0 && !reformulatedOnce) {
-      const seed = (queryStages?.[0]?.terms?.[0]) || strictExtract?.canonical || String(searchSubject || '');
+      const seed =
+        (overrideStage?.terms?.[0]) ||
+        (queryStages?.[0]?.terms?.[0]) ||
+        strictExtract?.canonical ||
+        String(searchSubject || '');
       const reformulated = (await gptReformulateSubject(seed, mainTopic, jobId)) || backupKeywordExtraction(seed);
       reformulatedOnce = true;
       if (reformulated && reformulated.trim().length > 0) {
         const altExtract = await normalizeWith10M(reformulated, mainTopic, prevVisualSubjects);
-        stagesThisAttempt = getQueryStagesForSubject(altExtract);
+        const altStages = getQueryStagesForSubject(altExtract);
+        // Keep any override stage, then use alt stages (A/B/C)
+        stagesThisAttempt = overrideStage ? [overrideStage, ...altStages] : altStages;
         console.log(`[5D][REFORM_USED][${jobId}] Attempt ${attempt + 1} with: "${reformulated}"`);
         console.log('[5D][REFORM_STAGES]', stagesThisAttempt);
       } else {
@@ -468,16 +537,16 @@ async function findClipForScene({
     jobContext._matcherAttempts.set(attemptKey, attempt);
 
     // =========================================================
-    // Run staged search: A (feature/action) → B (canonical) → C (synonyms)
-    // Within each stage: R2 → Pexels → Pixabay (videos first)
+    // Run staged search: OVERRIDE? → A (feature/action) → B (canonical) → C (synonyms)
+    // Within each stage: R2 → Pexels → Pixabay (videos first), then images.
     // =========================================================
-    const stageOrder = ['A', 'B', 'C'];
+    const stageOrder = ['OVERRIDE', 'A', 'B', 'C'];
     for (const stage of stageOrder) {
       const stageObj = (stagesThisAttempt || []).find(s => s.stage === stage);
       const terms = (stageObj?.terms || []).slice(0, MAX_SUBJECT_OPTIONS);
       if (!terms.length) continue;
 
-      const stageLabel = ({ A: 'feature', B: 'canonical', C: 'synonym' }[stage]) || 'stage';
+      const stageLabel = ({ OVERRIDE: 'override', A: 'feature', B: 'canonical', C: 'synonym' }[stage]) || 'stage';
       console.log(`[5D][STAGE][${jobId}] ${stage} (${stageLabel}) terms:`, terms);
 
       // Search for VIDEOS first
@@ -495,7 +564,8 @@ async function findClipForScene({
       progress(jobContext, sceneIdx, 88, `matcher:${stageLabel}-score-video`);
       videoCandidates = dedupeByPath(videoCandidates).map(c => ({
         ...c,
-        score: scoreSceneCandidate(c, strictExtract?.canonical || subject || searchSubject, usedClips, true),
+        // *** improvement: pass entire strictExtract so 10G can leverage full 10M context ***
+        score: scoreSceneCandidate(c, strictExtract || (subject || searchSubject), usedClips, true),
       })).filter(c => c.score >= HARD_FLOOR_VIDEO).sort((a, b) => b.score - a.score);
 
       console.log(`[5D][CANDS][VIDEO][${stage}] TOP3`, videoCandidates.slice(0, 3).map(c => ({ path: c.path, src: c.source, score: c.score })));
@@ -524,7 +594,8 @@ async function findClipForScene({
       progress(jobContext, sceneIdx, 88, `matcher:${stageLabel}-score-image`);
       imageCandidates = dedupeByPath(imageCandidates).map(c => ({
         ...c,
-        score: scoreSceneCandidate(c, strictExtract?.canonical || subject || searchSubject, usedClips, false),
+        // *** improvement: pass entire strictExtract so 10G can leverage full 10M context ***
+        score: scoreSceneCandidate(c, strictExtract || (subject || searchSubject), usedClips, false),
       })).filter(c => c.score >= HARD_FLOOR_IMAGE).sort((a, b) => b.score - a.score);
 
       console.log(`[5D][CANDS][IMAGE][${stage}] TOP3`, imageCandidates.slice(0, 3).map(c => ({ path: c.path, src: c.source, score: c.score })));

@@ -33,15 +33,28 @@
 // Logging tags: [10M][INFO] / [10M][WARN] / [10M][ERR]
 // ============================================================
 
+'use strict';
+
 /* =========================
  * Internal Utilities
  * ========================= */
 
 const SLUG_RE = /[^a-z0-9]+/g;
 
-function lcase(s) { return (s || '').toString().trim().toLowerCase(); }
-function slugify(s) { return lcase(s).replace(SLUG_RE, ' ').replace(/\s+/g, ' ').trim(); }
-function uniq(arr) { return Array.from(new Set(arr.filter(Boolean).map(x => x.trim()))); }
+// Strip diacritics (é → e) and lowercase deterministically
+function _normLower(s) {
+  return (s || '')
+    .toString()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '') // remove combining marks
+    .toLowerCase();
+}
+
+function lcase(s) { return _normLower(s).trim(); }
+function slugify(s) {
+  return _normLower(s).replace(SLUG_RE, ' ').replace(/\s+/g, ' ').trim();
+}
+function uniq(arr) { return Array.from(new Set((arr || []).filter(Boolean).map(x => x.trim()))); }
 function notEmpty(x) { return !!(x && x.trim && x.trim().length); }
 function asArray(x) { return Array.isArray(x) ? x : (x ? [x] : []); }
 
@@ -153,7 +166,7 @@ const SEED_ENTITIES = [
     actions: ['burning'],
   },
 
-  // ----- Food (example to influence scoring rules later) -----
+  // ----- Food -----
   {
     canonical: 'milk',
     type: 'food',
@@ -225,10 +238,14 @@ const LANDMARK_HINTS = new Set([
 ]);
 
 function guessTypeFromTokens(tokens) {
-  // If any token is in ANIMAL_HINTS → animal
-  if (tokens.some(t => ANIMAL_HINTS.has(t))) return 'animal';
-  if (tokens.some(t => LANDMARK_HINTS.has(t))) return 'landmark';
-  return 'other';
+  try {
+    const t = (tokens || []).map(slugify);
+    if (t.some(x => ANIMAL_HINTS.has(x))) return 'animal';
+    if (t.some(x => LANDMARK_HINTS.has(x))) return 'landmark';
+    return 'other';
+  } catch {
+    return 'other';
+  }
 }
 
 /* =========================
@@ -274,14 +291,14 @@ function resolveCanonicalSubject(input) {
       ...(interpreted.alternates || []).map(slugify),
       ...meta.synonyms,
       ...meta.languageVariants,
-    ]).filter(a => a !== canonical);
+    ]).filter(a => a && a !== canonical);
 
     // Step 5: Final pack
     const resolved = {
       canonical,
       type,
       featureOrAction,
-      parent: canonical, // normalized; parent collapses to canonical in our current model
+      parent: canonical, // parent collapses to canonical after normalization
       alternates,
       synonyms: meta.synonyms,
       languageVariants: meta.languageVariants,
@@ -294,11 +311,12 @@ function resolveCanonicalSubject(input) {
   } catch (err) {
     logErr('resolveCanonicalSubject failed:', err?.message || err);
     // return minimal safe structure to avoid crashes downstream
+    const fallbackCanonical = slugify(typeof input === 'string' ? input : input?.primary || 'subject');
     return {
-      canonical: slugify(typeof input === 'string' ? input : input?.primary || 'subject'),
+      canonical: fallbackCanonical,
       type: 'other',
       featureOrAction: '',
-      parent: '',
+      parent: fallbackCanonical || '',
       alternates: [],
       synonyms: [],
       languageVariants: [],
@@ -310,9 +328,8 @@ function resolveCanonicalSubject(input) {
 
 function interpretInput(input) {
   if (typeof input === 'string') {
-    // Heuristic: try to split "subject feature" patterns
+    // For raw strings, treat entire string as primary; 11 handles parsing.
     const s = slugify(input);
-    // No hard split here—11 will pass richer info; for strings, treat all as primary
     return { primary: s, featureOrAction: '', parent: s, alternates: [], type: null };
   }
   if (input && typeof input === 'object') {
@@ -334,22 +351,34 @@ function resolveToCanonical(name) {
 }
 
 function synthesizeUnknownEntity(canonical, maybeType) {
-  const tokens = canonical.split(' ').filter(Boolean);
-  const inferredType = maybeType || guessTypeFromTokens(tokens);
-  // Create an ephemeral entry in-memory so synonyms/features are empty.
-  if (!ONTOLOGY[canonical]) {
-    ONTOLOGY[canonical] = {
+  try {
+    const tokens = (canonical || '').split(' ').filter(Boolean);
+    const inferredType = maybeType || guessTypeFromTokens(tokens);
+    if (!ONTOLOGY[canonical]) {
+      ONTOLOGY[canonical] = {
+        canonical,
+        type: inferredType,
+        parents: [],
+        synonyms: [],
+        languageVariants: [],
+        features: [],
+        actions: [],
+      };
+      ALIAS_TO_CANON.set(canonical, canonical);
+    }
+    return ONTOLOGY[canonical];
+  } catch (e) {
+    logWarn('synthesizeUnknownEntity error; returning minimal entity.', e?.message || e);
+    return {
       canonical,
-      type: inferredType,
+      type: 'other',
       parents: [],
       synonyms: [],
       languageVariants: [],
       features: [],
       actions: [],
     };
-    ALIAS_TO_CANON.set(canonical, canonical);
   }
-  return ONTOLOGY[canonical];
 }
 
 function summarizeInput(input) {
@@ -379,24 +408,36 @@ function summarizeInput(input) {
  * [
  *   { stage: 'A', terms: ['statue of liberty crown','crown of statue of liberty',...] },
  *   { stage: 'B', terms: ['statue of liberty'] },
- *   { stage: 'C', terms: ['lady liberty','statue de la liberté', ...] }
+ *   { stage: 'C', terms: ['lady liberty','statue de la liberte', ...] }
  * ]
  */
 function getQueryStagesForSubject(input) {
-  const e = resolveCanonicalSubject(input);
+  try {
+    const e = resolveCanonicalSubject(input);
 
-  const stageA = buildFeatureFirstTerms(e);
-  const stageB = buildCanonicalOnlyTerms(e);
-  const stageC = buildSynonymAlternateTerms(e);
+    const stageA = buildFeatureFirstTerms(e);
+    const stageB = buildCanonicalOnlyTerms(e);
+    const stageC = buildSynonymAlternateTerms(e);
 
-  const result = [
-    { stage: 'A', terms: uniq(stageA) },
-    { stage: 'B', terms: uniq(stageB) },
-    { stage: 'C', terms: uniq(stageC) },
-  ];
+    // Ensure arrays exist (even if empty) and are de-duped
+    const result = [
+      { stage: 'A', terms: uniq(stageA).filter(notEmpty) },
+      { stage: 'B', terms: uniq(stageB).filter(notEmpty) },
+      { stage: 'C', terms: uniq(stageC).filter(notEmpty) },
+    ];
 
-  logInfo('[QUERIES]', { canonical: e.canonical, type: e.type, stages: result });
-  return result;
+    logInfo('[QUERIES]', { canonical: e.canonical, type: e.type, stages: result });
+    return result;
+  } catch (err) {
+    logErr('getQueryStagesForSubject failed:', err?.message || err);
+    // Minimal safe output
+    const c = slugify(typeof input === 'string' ? input : input?.primary || 'subject');
+    return [
+      { stage: 'A', terms: [] },
+      { stage: 'B', terms: [c] },
+      { stage: 'C', terms: [] },
+    ];
+  }
 }
 
 function buildFeatureFirstTerms(e) {
@@ -405,16 +446,20 @@ function buildFeatureFirstTerms(e) {
 
   if (e.featureOrAction) {
     const fa = e.featureOrAction;
+
     // Core pairings
     terms.push(`${c} ${fa}`);
     terms.push(`${fa} ${c}`);
-    // Slight variations
-    terms.push(`${c} ${normalizeActionPhrase(fa, c)}`);
-    terms.push(`${normalizeActionPhrase(fa, c)}`);
-    // If type=animal: ensure animal subject leads the phrase
-    if (e.type === 'animal' && !fa.includes(c)) {
-      terms.push(`${c} ${fa}`);
+
+    // Variations with safe action normalization
+    const norm = normalizeActionPhrase(fa, c);
+    if (norm && norm !== fa) terms.push(norm);
+    terms.push(`${c} ${norm}`);
+
+    // If type=animal, prefer animal-first lead with angle
+    if (e.type === 'animal') {
       terms.push(`${c} ${fa} close-up`);
+      terms.push(`${c} ${fa} in field`);
     }
   }
   return terms.filter(notEmpty);
@@ -458,11 +503,12 @@ function buildSynonymAlternateTerms(e) {
 }
 
 function normalizeActionPhrase(fa, canonical) {
-  // Expand some common verb phrases without overcomplicating
   const s = slugify(fa);
   if (!s) return '';
-  // Add canonical if it's an action that could be ambiguous
-  if (/(drinking|pouring|grazing|climbing|running|sleeping|purring|swinging|time-lapse|fireworks|light show|aerial|close up|close-up)/.test(s)) {
+
+  // Expand some common verb phrases without overcomplicating
+  // Always keep canonical present for ambiguous actions
+  if (/(drinking|pouring|grazing|climbing|running|sleeping|purring|swinging|time[- ]?lapse|fireworks|light show|aerial|close ?up|close-up|night|celebrating|coin toss|water flow)/.test(s)) {
     return `${canonical} ${s}`;
   }
   return s;
@@ -476,7 +522,8 @@ function normalizeActionPhrase(fa, canonical) {
  * Get full metadata for a canonical or alias string.
  */
 function getEntityMetadata(nameOrAlias) {
-  const c = resolveToCanonical(slugify(nameOrAlias)) || slugify(nameOrAlias);
+  const key = slugify(nameOrAlias);
+  const c = resolveToCanonical(key) || key;
   return ONTOLOGY[c] || null;
 }
 
@@ -496,9 +543,10 @@ function isSameCanonical(a, b) {
  */
 function addCustomEntities(entitiesArray = []) {
   try {
-    const countBefore = Object.keys(ONTOLOGY).length;
-    entitiesArray.forEach(indexEntity);
-    logInfo(`[ADD] Added ${Object.keys(ONTOLOGY).length - countBefore} entities`);
+    const before = Object.keys(ONTOLOGY).length;
+    asArray(entitiesArray).forEach(indexEntity);
+    const after = Object.keys(ONTOLOGY).length;
+    logInfo(`[ADD] Added ${Math.max(0, after - before)} entities (total=${after})`);
   } catch (err) {
     logErr('addCustomEntities failed:', err?.message || err);
   }

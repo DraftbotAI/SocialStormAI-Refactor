@@ -1,17 +1,21 @@
 // ===========================================================
 // SECTION 10G: SCENE SCORING HELPER (Entity-Aware Candidate Matcher)
 // Scores candidate videos/images for best subject match, across sources.
-// Upgrades:
-//   - 10M Canonical integration (canonical name, synonyms, alternates)
-//   - Feature/Action bonus (e.g., "crown", "drinking milk")
-//   - Entity type penalties/bonuses (landmark/animal/object/food/person)
+//
+// Upgrades in this build:
+//   - 10M Canonical integration (canonical, alternates, synonyms, language variants)
+//   - Feature/Action bonuses (inline & loose)
+//   - Entity-type penalties/bonuses (landmark/animal/object/food/person) w/ landmark strictness
 //   - Strong exact-boundary matching over filename/title/desc/tags/url
-//   - Landmark strictness: block people/animals unless ceremonial context
-//   - Portrait bias retained (light) for Shorts/Reels when dims known
+//   - Geography nudge (if 10M returns { city/country/region } and candidate text matches)
 //   - Provider trust weighting (R2 > Pexels > Pixabay > Unsplash)
-//   - Anti-dup/angle-repeat hard blocks
+//   - Anti-dup & angle-repeat hard blocks (per job)
 //   - Jaccard token overlap fallback
-// Max logging; zero placeholders.
+//   - Practical quality filters: watermark/compilation/“edit” penalties
+//   - Light portrait bias for Shorts/Reels (when dims known)
+//   - Extra landmark lexicon (Parliament, Alamo, Mermaid, Opera House, etc.)
+//   - Max logging; zero placeholders.
+//
 // Used by Section 5D and all video/image helpers.
 // ===========================================================
 
@@ -27,7 +31,7 @@ try {
   console.log('[10G][INIT] 10M Canonicals connected.');
 } catch (e) {
   console.warn('[10G][INIT][WARN] 10M Canonicals not found. Falling back to legacy synonym-only scoring.');
-  // Minimal fallbacks to avoid crash (no enrich)
+  // Minimal fallbacks so we never crash
   resolveCanonicalSubject = (s) => ({
     canonical: (typeof s === 'string' ? s : (s?.primary || 'subject')).toLowerCase().trim(),
     type: (s?.type || 'other'),
@@ -57,7 +61,9 @@ const LANDMARK_KEYWORDS = [
   'mount','mountain','peak','summit','canyon','gorge','valley','desert','dune','oasis','volcano',
   'falls','waterfall','lake','river','glacier','fjord','coast','beach','shore','harbor','harbour','bay',
   'park','national park','forest','rainforest','reserve','island','archipelago','peninsula',
-  'museum','gallery','library','university','campus','garden','plaza','square','market','bazaar'
+  'museum','gallery','library','university','campus','garden','plaza','square','market','bazaar',
+  // + extras for common scripts we see
+  'parliament','alamo','mermaid','opera house','parthenon','buckingham','palace of',
 ];
 
 const ANIMAL_TERMS = [
@@ -94,6 +100,9 @@ const SYNONYMS = {
   'eiffel tower': ['tour eiffel','paris tower'],
   stonehenge: ['stone henge'],
   'machu picchu': ['machupicchu'],
+  'parliament building': ['parliament','hungarian parliament','parlament budapest'],
+  'the alamo': ['alamo mission','alamo fort'],
+  'little mermaid': ['the little mermaid','copenhagen mermaid'],
 };
 
 // Portrait bias (light) if width/height known (Shorts/Reels/TikTok)
@@ -106,6 +115,10 @@ const FEATURE_BONUS_LOOSE  = 7;    // feature present without canonical boundary
 // Type penalty magnitudes
 const PENALTY_OFFTOPIC_PERSON = 28;   // animal/landmark subject but humans in candidate (non-ceremonial)
 const PENALTY_OFFTOPIC_ANIMAL = 26;   // landmark/object subject but animals in candidate
+
+// Practical quality penalties
+const PENALTY_WATERMARK = 30;        // "watermark", "logo", "tiktok", "youtube", "subscribe", etc.
+const PENALTY_COMPILATION = 18;      // "compilation", "edit", "montage", "meme edit", etc.
 
 // -----------------------------
 // Utility Helpers
@@ -288,18 +301,26 @@ function isPortraitLike(candidate) {
   return h > w; // portrait-ish
 }
 
+// Practical quality checks
+function hasWatermarkishText(s) {
+  const L = lower(s || '');
+  return /\b(watermark|subscribe|logo|tiktok|youtube|instagram|follow)\b/.test(L);
+}
+function isCompilationishText(s) {
+  const L = lower(s || '');
+  return /\b(compilation|edit|montage|remix|meme edit)\b/.test(L);
+}
+
 // ----------------------------------------------------------
 // 10M-aware subject normalization for scoring
 // ----------------------------------------------------------
 function normalizeSubjectForScoring(subject) {
-  // Accept either: string, legacy object, or Section 11 strict object
-  // We run everything through 10M for a canonical, and then add legacy extras.
+  // Accept: string, legacy object, array, or Section 11 strict object
   let resolved = null;
   try {
     if (typeof subject === 'string') {
       resolved = resolveCanonicalSubject({ primary: subject });
     } else if (Array.isArray(subject)) {
-      // Take first as primary, pass rest as alternates
       resolved = resolveCanonicalSubject({ primary: subject[0], alternates: subject.slice(1) });
     } else if (subject && typeof subject === 'object') {
       resolved = resolveCanonicalSubject(subject);
@@ -307,7 +328,6 @@ function normalizeSubjectForScoring(subject) {
       resolved = resolveCanonicalSubject('subject');
     }
   } catch (e) {
-    // Last-ditch
     resolved = resolveCanonicalSubject(subject || 'subject');
   }
 
@@ -325,7 +345,6 @@ function normalizeSubjectForScoring(subject) {
   const legacyTokens = subjectToTokensLegacy(subject);
   const legacyExpanded = expandSynonymsLegacy(legacyStrings);
 
-  // Canonical strings we will try as "exact boundary" phrases
   const canonicalStrings = dedupeKeepOrder([
     canon,
     ...alts,
@@ -334,16 +353,21 @@ function normalizeSubjectForScoring(subject) {
     ...legacyExpanded
   ]).filter(Boolean);
 
-  // Subject tokens for overlap fallback
   const subjectTokens = dedupeKeepOrder([
     ...majorWords(canon),
     ...legacyTokens
   ]);
 
-  // Feature/action tokens
   const featureTokens = feature ? majorWords(feature) : [];
 
-  return { canon, type, feature, featureTokens, canonicalStrings, subjectTokens };
+  // Geography metadata from 10M (optional)
+  let geo = null;
+  try {
+    geo = getEntityMetadata ? getEntityMetadata(canon) : null;
+    // Expected geo shape: { city, country, region, altNames: [] } — best-effort
+  } catch (_) { /* noop */ }
+
+  return { canon, type, feature, featureTokens, canonicalStrings, subjectTokens, geo };
 }
 
 // ----------------------------------------------------------
@@ -355,15 +379,17 @@ function normalizeSubjectForScoring(subject) {
  * - Exact boundary matching on canonical/synonyms/language variants
  * - Feature/Action bonuses when present
  * - Entity-type penalties to suppress off-topic content
+ * - Geography nudges from 10M metadata (city/country/region presence)
  * - Provider/portrait/video bonuses
  * - Anti-dup/angle-repeat hard blocks
+ * - Watermark/compilation penalties
  * - Jaccard token overlap fallback
  *
  * @param {object} candidate - { filename, tags, title, description, filePath, provider, isVideo, url, width, height }
  * @param {string|object|array} subject
  * @param {string[]} usedFiles - Array of filePaths/filenames used so far in this job
  * @param {boolean} realMatchExists - legacy signal (safe to pass true)
- * @returns {number} score (can be negative); typical 0–200
+ * @returns {number} score (can be negative); typical 0–220
  */
 function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists = true) {
   try {
@@ -413,11 +439,21 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
 
     // Aggregate haystacks
     const hayTitle = title;
-    const hayDesc = desc;
-    const hayFile = fname;
-    const hayTags = tags.join(' ');
-    const hayUrl = url;
-    const hayAll = `${hayTitle} ${hayDesc} ${hayFile} ${hayTags} ${hayUrl}`.trim();
+    const hayDesc  = desc;
+    const hayFile  = fname;
+    const hayTags  = tags.join(' ');
+    const hayUrl   = url;
+    const hayAll   = `${hayTitle} ${hayDesc} ${hayFile} ${hayTags} ${hayUrl}`.trim();
+
+    // ------------------------------------------------------
+    // Practical quality penalties
+    // ------------------------------------------------------
+    if (hasWatermarkishText(hayAll)) {
+      console.log(`[10G][SCORE][PENALTY][WATERMARK] ${fname} -${PENALTY_WATERMARK}`);
+    }
+    if (isCompilationishText(hayAll)) {
+      console.log(`[10G][SCORE][PENALTY][COMPILATION] ${fname} -${PENALTY_COMPILATION}`);
+    }
 
     // ------------------------------------------------------
     // Entity-Type Off-topic Culls (pre-score penalties)
@@ -434,12 +470,10 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
     }
     if (animalMode) {
       if (hasPersonText(candidate)) {
-        // Pet-owner selfies, fashion shots, etc. Penalize heavily.
         console.log(`[10G][SCORE][PENALTY][ANIMAL_HAS_PEOPLE] ${fname} -${PENALTY_OFFTOPIC_PERSON}`);
       }
     }
     if (objectMode || foodMode) {
-      // If unrelated people/animals dominate, nudge down
       if (hasPersonText(candidate)) {
         console.log(`[10G][SCORE][PENALTY][OBJECT_FOOD_HAS_PEOPLE] ${fname} -${Math.floor(PENALTY_OFFTOPIC_PERSON * 0.6)}`);
       }
@@ -460,7 +494,7 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
         tags.includes(lower(subjStr));
 
       if (boundaryHit) {
-        let score = 160; // stronger than legacy 150 — canonical-first world
+        let score = 160; // canonical-first world
         if (isVid) score += 20;
         score += provWeight;
         if (candidateCategory && containsPhraseBoundary(candidateCategory, subjStr)) score += 8;
@@ -477,10 +511,31 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
           }
         }
 
+        // Geography nudge (city/country/region)
+        if (S.geo) {
+          const geoParts = [
+            S.geo.city,
+            S.geo.country,
+            S.geo.region,
+            ...(Array.isArray(S.geo.altNames) ? S.geo.altNames : [])
+          ].filter(Boolean).map(lower);
+          if (geoParts.length) {
+            const geoHit = geoParts.some(g => containsPhraseBoundary(hayAll, g));
+            if (geoHit) {
+              score += 8;
+              console.log(`[10G][SCORE][GEO] +8 for geography match [${fname}]`);
+            }
+          }
+        }
+
         // Entity-type micro bonuses (subject-fit nudges)
         if (landmarkMode) score += 6;
         if (animalMode)   score += 6;
         if (foodMode)     score += 4;
+
+        // Quality penalties applied after positives so logs are clearer
+        if (hasWatermarkishText(hayAll)) score -= PENALTY_WATERMARK;
+        if (isCompilationishText(hayAll)) score -= PENALTY_COMPILATION;
 
         score += baseGenericPenalty;
         console.log(`[10G][SCORE][STRICT_BOUNDARY]["${subjStr}"] = ${score} [${fname}]`);
@@ -527,10 +582,30 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
       looseScore += baseGenericPenalty;
       looseScore += featureLooseBonus;
 
+      // Geography nudge
+      if (S.geo) {
+        const geoParts = [
+          S.geo.city,
+          S.geo.country,
+          S.geo.region,
+          ...(Array.isArray(S.geo.altNames) ? S.geo.altNames : [])
+        ].filter(Boolean).map(lower);
+        if (geoParts.length) {
+          const geoHit = geoParts.some(g => containsPhraseBoundary(hayAll, g));
+          if (geoHit) {
+            looseScore += 6;
+            console.log(`[10G][SCORE][GEO_LOOSE] +6 for geography match [${fname}]`);
+          }
+        }
+      }
+
       // Entity-fit nudges
       if (landmarkMode) looseScore += 4;
       if (animalMode)   looseScore += 4;
       if (foodMode)     looseScore += 2;
+
+      if (hasWatermarkishText(hayAll)) looseScore -= PENALTY_WATERMARK;
+      if (isCompilationishText(hayAll)) looseScore -= PENALTY_COMPILATION;
 
       console.log(`[10G][SCORE][LOOSE][canon="${S.canon}"] tokens=${tokenHits} jac=${jac.toFixed(3)} feat+${featureLooseBonus} => ${looseScore} [${fname}]`);
       return looseScore;
@@ -544,6 +619,8 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
       if (subjCatHint) {
         let catScore = 38 + provWeight + (isVid ? 2 : 0) + baseGenericPenalty;
         if (isPortraitLike(candidate)) catScore += Math.floor(PORTRAIT_BONUS / 2);
+        if (hasWatermarkishText(hayAll)) catScore -= Math.floor(PENALTY_WATERMARK / 2);
+        if (isCompilationishText(hayAll)) catScore -= Math.floor(PENALTY_COMPILATION / 2);
         console.log(`[10G][SCORE][CATEGORY_HINT]["${S.canon}"] = ${catScore} [${fname}]`);
         return catScore;
       }
@@ -556,6 +633,8 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
     genericScore += provWeight;
     if (isVid) genericScore += 2;
     if (isPortraitLike(candidate)) genericScore += Math.floor(PORTRAIT_BONUS / 2);
+    if (hasWatermarkishText(hayAll)) genericScore -= Math.floor(PENALTY_WATERMARK / 2);
+    if (isCompilationishText(hayAll)) genericScore -= Math.floor(PENALTY_COMPILATION / 2);
     console.log(`[10G][SCORE][DEFAULT]["${S.canon}"] = ${genericScore} [${fname}]`);
     return genericScore;
   } catch (err) {
