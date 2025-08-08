@@ -1,8 +1,8 @@
 // ===========================================================
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR
 // Smart, video-first, landmark-strict, no duplicates, max logs,
-// strict central scoring (10G), GPT reformulation, parallel lookups,
-// R2-first preference, image→Ken Burns fallback to VIDEO,
+// strict central scoring (10G), GPT reformulation, parallel lookups
+// *within tier*, R2-first preference, image→Ken Burns fallback to VIDEO,
 // caching, timeouts, and hard floors.
 //
 // *** 2025-08 Loop Killers ***
@@ -120,7 +120,7 @@ const REFORMULATION_MODEL = process.env.REFORMULATION_MODEL || 'gpt-4.1';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
-console.log('[5D][INIT] Smart Clip Matcher loaded (video-first, scoring floor, landmark-mode, loop-guarded, progress-aware).');
+console.log('[5D][INIT] Smart Clip Matcher loaded (video-first tiered, scoring floor, landmark-mode, loop-guarded, progress-aware).');
 
 // ===========================================================
 // Constants / Utilities
@@ -128,11 +128,11 @@ console.log('[5D][INIT] Smart Clip Matcher loaded (video-first, scoring floor, l
 
 const HARD_FLOOR_VIDEO = Number(process.env.MATCHER_FLOOR_VIDEO || 70);
 const HARD_FLOOR_IMAGE = Number(process.env.MATCHER_FLOOR_IMAGE || 75);
-const PROVIDER_TIMEOUT_MS = Number(process.env.MATCHER_PROVIDER_TIMEOUT_MS || 10000); // shaved to speed up stalls
+const PROVIDER_TIMEOUT_MS = Number(process.env.MATCHER_PROVIDER_TIMEOUT_MS || 10000);
 
 // LOOP GUARDS
 const ATTEMPT_LIMIT = Math.max(1, Number(process.env.MATCHER_ATTEMPT_LIMIT || 2)); // literal + reformulated
-const TIME_BUDGET_MS = Math.max(4000, Number(process.env.MATCHER_TIME_BUDGET_MS || 16000)); // slightly tighter for snappier jobs
+const TIME_BUDGET_MS = Math.max(4000, Number(process.env.MATCHER_TIME_BUDGET_MS || 16000));
 const MAX_SUBJECT_OPTIONS = Math.max(1, Number(process.env.MATCHER_MAX_SUBJECT_OPTIONS || 5));
 const RELAX_LANDMARK_ON_LAST_ATTEMPT = String(process.env.MATCHER_RELAX_LANDMARK_ON_LAST_ATTEMPT || 'true').toLowerCase() !== 'false';
 
@@ -584,7 +584,7 @@ async function findClipForScene({
     jobContext._matcherAttempts.set(attemptKey, attempt);
 
     // =========================================================
-    // Collect candidates (videos first; images as fallback)
+    // VIDEO TIER — collect only videos first (R2 → Pexels → Pixabay)
     // =========================================================
     let videoCandidates = [];
     let imageCandidates = [];
@@ -606,7 +606,7 @@ async function findClipForScene({
         landmarkMode = false; // allow humans/animals on last-ditch try
       }
 
-      // ---- Video lookups in parallel with timeouts ----
+      // ---- VIDEO lookups (tier 1) with timeouts, in parallel within tier ----
       progress(jobContext, sceneIdx, 80, 'matcher:video-lookups');
       await Promise.allSettled([
         (async () => {
@@ -670,7 +670,14 @@ async function findClipForScene({
         })(),
       ]);
 
-      // ---- Photo lookups in parallel (fallback tier) with timeouts ----
+      // If we already have any video candidates after this subject option,
+      // SKIP image tier for this subject (strict video-first).
+      if (videoCandidates.length > 0) {
+        console.log(`[5D][TIER][${jobId}] Video candidates found for "${subjectOption}". Deferring image lookups.`);
+        continue;
+      }
+
+      // ---- IMAGE lookups (tier 2) ONLY if no videos found so far ----
       progress(jobContext, sceneIdx, 84, 'matcher:image-lookups');
       await Promise.allSettled([
         (async () => {
@@ -739,7 +746,7 @@ async function findClipForScene({
     imageCandidates = dedupeByPath(imageCandidates);
 
     // =========================================================
-    // Score candidates (strict thresholds, video preferred)
+    // Score candidates (strict thresholds, VIDEO ALWAYS WINS)
     // =========================================================
     progress(jobContext, sceneIdx, 88, 'matcher:scoring');
     videoCandidates.forEach(c => { c.score = scoreSceneCandidate(c, c.subject || subject || searchSubject, usedClips, true); });
@@ -779,7 +786,7 @@ async function findClipForScene({
         break;
       }
 
-      // If KB failed, try still-to-video again explicitly (in case KB partially failed)
+      // If KB failed, try still-to-video as backup
       if (makeKenBurnsVideoFromImage && staticImageToVideo && preprocessImageToJpeg) {
         try {
           const safeDir = workDir || path.join(__dirname, '..', 'jobs', `kb-${jobId || 'job'}`);
@@ -809,7 +816,7 @@ async function findClipForScene({
         break;
       } else {
         console.warn(`[5D][IMAGE_FALLBACK][${jobId}] Suppressing raw image return (ALLOW_RAW_IMAGE=false).`);
-        // continue loop to allow reformulation/last attempt or fallbacks below
+        // continue loop to allow reformulation/last attempt
       }
     }
 

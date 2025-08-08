@@ -12,7 +12,7 @@
 // Exports:
 //   - findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
 //   - findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips)
-// Returns rich objects { filePath, title, description, tags, provider, isVideo }.
+// Returns rich objects { filePath, title, description, tags, provider, isVideo, score }.
 // ===========================================================
 
 const axios = require('axios');
@@ -338,7 +338,7 @@ async function pixabayVideoSearch(query, perPage, jobId) {
 }
 
 async function pixabayPhotoSearch(query, perPage, jobId, portraitPreferred) {
-  const q = encodeURIComponent(String(query || '').replace(/[^\w\s]/g, ' ').trim()).slice(0, 100);
+  const q = encodeURIComponent(String(query || '').replace(/[^\w\s]/g, ' ')).slice(0, 100);
   const orientation = portraitPreferred ? '&orientation=vertical' : '';
   const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${q}&image_type=photo&per_page=${perPage}&order=popular${orientation}`;
   console.log(`[10C][API][PHOTO][${jobId}] GET ${url}`);
@@ -372,7 +372,7 @@ async function withRetry(fn, label, jobId) {
 
 // ===========================================================
 // MAIN VIDEO FINDER (VIDEO-FIRST)
-// Returns { filePath, title, description, tags, provider:'pixabay', isVideo:true } or null
+// Returns { filePath, title, description, tags, provider:'pixabay', isVideo:true, score } or null
 // ===========================================================
 async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
   const q = subjectString(subject);
@@ -380,6 +380,10 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
 
   if (!PIXABAY_API_KEY) {
     console.error('[10C][VIDEO][ERR] No Pixabay API key set!');
+    return null;
+  }
+  if (!workDir) {
+    console.error('[10C][VIDEO][FATAL] workDir is required.');
     return null;
   }
   if (!q || q.length < 2) {
@@ -474,12 +478,13 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
     tags: best.tags,
     provider: PROVIDER,
     isVideo: true,
+    score: best.score,
   };
 }
 
 // ===========================================================
 // PHOTO FALLBACK FINDER
-// Returns { filePath, title, description, tags, provider:'pixabay', isVideo:false } or null
+// Returns { filePath, title, description, tags, provider:'pixabay', isVideo:false, score } or null
 // ===========================================================
 async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
   const q = subjectString(subject);
@@ -487,6 +492,10 @@ async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedC
 
   if (!PIXABAY_API_KEY) {
     console.warn('[10C][PHOTO][ERR] No Pixabay API key set!');
+    return null;
+  }
+  if (!workDir) {
+    console.error('[10C][PHOTO][FATAL] workDir is required.');
     return null;
   }
   if (!q || q.length < 2) {
@@ -574,6 +583,7 @@ async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedC
     tags: best.tags,
     provider: PROVIDER,
     isVideo: false,
+    score: best.score,
   };
 }
 

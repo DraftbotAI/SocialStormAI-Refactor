@@ -273,6 +273,7 @@ async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
         console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
         continue;
       }
+      console.log(`[10A][VIDEO][FOUND][${jobId}] Local path ready: ${outPath} (from ${r2Key})`);
       addUsed(usedClips, r2Key);
       addUsed(usedClips, outPath);
       return outPath;
@@ -461,8 +462,8 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       const bestAngle = multiAngle[0];
       if (bestAngle && bestAngle.score >= 35 && !looksUsed(bestAngle.path, usedClips)) {
         console.log(`[10A][R2][${jobId}][MULTIANGLE][SELECTED] ${bestAngle.path} | score=${bestAngle.score}`);
-        const out = await downloadAndValidate(bestAngle.path, workDir, sceneIdx, jobId, usedClips);
-        return out || null;
+        const outMA = await downloadAndValidate(bestAngle.path, workDir, sceneIdx, jobId, usedClips);
+        if (outMA) return outMA;
       }
     }
 
@@ -561,5 +562,8 @@ async function getAllFiles(subject = null, categoryFolder = null) {
     return [];
   }
 }
+
+// Attach for 5D’s pattern: findR2ClipForScene.getAllFiles(...)
+findR2ClipForScene.getAllFiles = getAllFiles;
 
 module.exports = { findR2ClipForScene, getAllFiles };

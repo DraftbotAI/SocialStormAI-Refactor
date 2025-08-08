@@ -32,7 +32,7 @@ if (!PEXELS_API_KEY) {
 console.log('[10B][INIT] Pexels helper (video-first, vertical-preferred, anti-dupe, landmark-mode) loaded.');
 
 const PEXELS_VIDEO_URL = 'https://api.pexels.com/videos/search';
-const PEXELS_PHOTO_URL = 'https://api.pexels.com/v1/search';
+PEXELS_PHOTO_URL = 'https://api.pexels.com/v1/search';
 
 // ==== CONSTANTS / TUNABLES ====
 const MIN_BYTES_VIDEO = 2048;
@@ -59,6 +59,7 @@ const STRICT_LANDMARK_MODE = String(process.env.PEXELS_STRICT_LANDMARK_MODE || '
 // ==== SMALL UTILS ====
 function ensureDir(dir) {
   try {
+    if (!dir) return;
     fs.mkdirSync(dir, { recursive: true });
   } catch (e) {
     // no-op; subsequent writes will error and be logged
@@ -348,6 +349,11 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
     console.error('[10B][FATAL] No PEXELS_API_KEY!');
     return null;
   }
+  if (!workDir) {
+    console.error('[10B][VIDEO][FATAL] workDir is required.');
+    return null;
+  }
+
   const q = String(subject || '').trim();
   if (!q) {
     console.error(`[10B][VIDEO][${jobId}] Empty subject.`);
@@ -479,6 +485,10 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
 async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips = [], bestVideoScore = 0) {
   if (!PEXELS_API_KEY) {
     console.error('[10B][FATAL] No PEXELS_API_KEY!');
+    return null;
+  }
+  if (!workDir) {
+    console.error('[10B][PHOTO][FATAL] workDir is required.');
     return null;
   }
   const q = String(subject || '').trim();
