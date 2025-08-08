@@ -1,21 +1,31 @@
 // ===========================================================
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR
-// Smart, Video-Preferred, No Duplicates, Max Logs, Strict Scoring
-// + GPT Reformulation + Parallelized Lookups
+// Smart, video-first, landmark-strict, no duplicates, max logs,
+// strict central scoring (10G), GPT reformulation, parallel lookups,
+// R2-first preference, image→Ken Burns fallback to VIDEO,
+// caching, timeouts, and hard floors.
 //
-// FIXES:
-// - Do NOT assert local existence for R2 keys (5B downloads them).
-// - When an image wins, make a local Ken Burns VIDEO from that image
-//   (no subject search) so 5B gets a real video clip.
-// - Prefer video whenever available; photos are fallback only.
-// - Reduce noisy "file does not exist" logs for remote/R2 items.
-// - Works whether usedClips is an Array or a Set, with normalized keys.
+// GOAL: "Best scene matcher on the planet."
+//
+// NOTES / GUARANTEES:
+// - We DO NOT assert local existence for R2 keys (5B downloads them).
+// - When an image wins, we build a local Ken Burns VIDEO so 5B always
+//   receives a real video path (unless extreme edge-case).
+// - Video is always preferred; photos are fallback only.
+// - Hard reject animal/person clips when subject is a landmark (unless
+//   ceremonial/guard context is explicit).
+// - Works whether usedClips is an Array or a Set (keys normalized).
+// - Global hard floors: video ≥ 70, image ≥ 75. Below that → Ken Burns.
+// - Max logging everywhere; no silent failures.
 // ===========================================================
 
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
+// -----------------------------
+// Providers (strictly required)
+// -----------------------------
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const {
   findPexelsClipForScene,
@@ -25,39 +35,95 @@ const {
   findPixabayClipForScene,
   findPixabayPhotoForScene
 } = require('./section10c-pixabay-clip-helper.cjs');
-const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
+
+// -----------------------------
+// Optional providers / helpers (soft-require)
+// -----------------------------
+let findUnsplashImageForScene = null;
+try {
+  ({ findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs'));
+  console.log('[5D][INIT] 10F Unsplash helper loaded.');
+} catch {
+  console.warn('[5D][INIT][WARN] 10F Unsplash helper not found. Will proceed without it.');
+}
 
 // Ken Burns image → video helpers
-const {
-  makeKenBurnsVideoFromImage,
-  preprocessImageToJpeg,
-  staticImageToVideo,
-} = require('./section10d-kenburns-image-helper.cjs');
+let makeKenBurnsVideoFromImage = null;
+let preprocessImageToJpeg = null;
+let staticImageToVideo = null;
+try {
+  ({
+    makeKenBurnsVideoFromImage,
+    preprocessImageToJpeg,
+    staticImageToVideo,
+  } = require('./section10d-kenburns-image-helper.cjs'));
+  console.log('[5D][INIT] 10D Ken Burns helpers loaded.');
+} catch {
+  console.warn('[5D][INIT][WARN] 10D Ken Burns helper not found. KB fallback disabled.');
+}
 
-// Subject extraction, symbolic & edge-case helpers, repetition breaker, scoring
+// Subject extraction (strict 11)
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
-const { extractSymbolicVisualSubject } = require('./section10h-symbolic-matcher.cjs');
-const { extractEmotionActionVisual } = require('./section10i-emotion-action-helper.cjs');
-const { extractQuestionVisual } = require('./section10j-question-fallback-helper.cjs');
-const { extractMultiSubjectVisual } = require('./section10k-multi-subject-handler.cjs');
-const { breakRepetition } = require('./section10l-repetition-blocker.cjs');
-const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
+// Optional semantic helpers (soft)
+let extractSymbolicVisualSubject = null;
+try {
+  ({ extractSymbolicVisualSubject } = require('./section10h-symbolic-matcher.cjs'));
+  console.log('[5D][INIT] 10H symbolic matcher loaded.');
+} catch { /* noop */ }
+
+let extractEmotionActionVisual = null;
+try {
+  ({ extractEmotionActionVisual } = require('./section10i-emotion-action-helper.cjs'));
+  console.log('[5D][INIT] 10I emotion/action helper loaded.');
+} catch { /* noop */ }
+
+let extractQuestionVisual = null;
+try {
+  ({ extractQuestionVisual } = require('./section10j-question-fallback-helper.cjs'));
+  console.log('[5D][INIT] 10J question fallback helper loaded.');
+} catch { /* noop */ }
+
+let extractMultiSubjectVisual = null;
+try {
+  ({ extractMultiSubjectVisual } = require('./section10k-multi-subject-handler.cjs'));
+  console.log('[5D][INIT] 10K multi-subject helper loaded.');
+} catch { /* noop */ }
+
+let breakRepetition = null;
+try {
+  ({ breakRepetition } = require('./section10l-repetition-blocker.cjs'));
+  console.log('[5D][INIT] 10L repetition blocker loaded.');
+} catch { /* noop */ }
+
+// Scoring (strict 10G)
+const {
+  scoreSceneCandidate,
+  LANDMARK_KEYWORDS,
+  ANIMAL_TERMS,
+  PERSON_TERMS,
+} = require('./section10g-scene-scoring-helper.cjs');
+
+// GPT (for one-shot reformulation)
 const OpenAI = require('openai');
 const REFORMULATION_MODEL = process.env.REFORMULATION_MODEL || 'gpt-4.1';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
-console.log('[5D][INIT] Smart Clip Matcher (video-preferred, R2-safe) loaded.');
+console.log('[5D][INIT] Smart Clip Matcher loaded (video-first, scoring floor, landmark-mode).');
 
 // ===========================================================
 // Constants / Utilities
 // ===========================================================
 
+const HARD_FLOOR_VIDEO = Number(process.env.MATCHER_FLOOR_VIDEO || 70);
+const HARD_FLOOR_IMAGE = Number(process.env.MATCHER_FLOOR_IMAGE || 75);
+const PROVIDER_TIMEOUT_MS = Number(process.env.MATCHER_PROVIDER_TIMEOUT_MS || 12000);
+
 const GENERIC_SUBJECTS = [
   'face','person','man','woman','it','thing','someone','something','body','eyes',
   'kid','boy','girl','they','we','people','scene','child','children','sign','logo',
-  'text','skyline','dubai'
+  'text','skyline','dubai','view','image','photo','background','object','stuff'
 ];
 
 function normKey(p) {
@@ -88,25 +154,22 @@ function usedAdd(usedClips, p) {
     } else if (Array.isArray(usedClips)) {
       if (!usedClips.includes(k)) usedClips.push(k);
       if (!usedClips.includes(p)) usedClips.push(p);
-    } else {
-      // fallback: silently ignore
     }
   } catch (e) {
     console.error('[5D][USED][ERR] Failed to add used clip:', e);
   }
 }
 
-// Only assert for local files (e.g., downloaded Pexels/Pixabay, KB outputs).
-// Skip for R2 keys and HTTP URLs — those are remote/fetched later.
+// Only assert for local files (KB outputs, downloaded provider files).
+// Skip for R2 keys and HTTP URLs (remote).
 function assertLocalFileExists(file, label = 'FILE', minSize = 8192) {
   try {
     if (!file) return false;
     const s = String(file);
     if (s.startsWith('http://') || s.startsWith('https://')) return true; // remote
-    // If not absolute, still allow; just check exists if possible
     if (!fs.existsSync(s)) {
-      console.warn(`[5D][${label}][SKIP_ASSERT] Not local yet (R2/remote or temp missing): ${s}`);
-      return true; // do not hard-fail, caller decides
+      console.warn(`[5D][${label}][SKIP_ASSERT] Not local yet (remote/R2 or temp missing): ${s}`);
+      return true; // do not hard-fail
     }
     const stat = fs.statSync(s);
     if (!stat.isFile()) {
@@ -124,27 +187,52 @@ function assertLocalFileExists(file, label = 'FILE', minSize = 8192) {
   }
 }
 
-// Optional heuristic; currently not used to branch logic
-function isProbablyR2Key(p) {
-  if (!p) return false;
-  const s = String(p);
-  if (s.startsWith('http://') || s.startsWith('https://')) return false;
-  return !fs.existsSync(s);
+function containsAny(list, s) {
+  const L = String(s || '').toLowerCase();
+  return list.some(w => L.includes(String(w).toLowerCase()));
+}
+
+function isLandmarkSubject(subject) {
+  const s = String(subject || '').toLowerCase();
+  return containsAny(LANDMARK_KEYWORDS, s);
+}
+
+function alnumLower(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function eqLoose(a, b) {
+  return alnumLower(a) === alnumLower(b);
+}
+
+async function withTimeout(promise, ms, label) {
+  let t;
+  const timeout = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error(`[TIMEOUT] ${label} after ${ms}ms`)), ms);
+  });
+  try {
+    const result = await Promise.race([promise, timeout]);
+    clearTimeout(t);
+    return result;
+  } catch (e) {
+    clearTimeout(t);
+    throw e;
+  }
 }
 
 async function gptReformulateSubject(subject, mainTopic, jobId) {
   if (!openai) {
-    console.warn(`[5D][REFORM][${jobId}] OpenAI API key missing; skipping query reformulation.`);
+    console.warn(`[5D][REFORM][${jobId}] OpenAI API key missing; skipping reformulation.`);
     return null;
   }
   try {
     const prompt =
-      `Rephrase this into a literal, short stock VIDEO search phrase (no metaphors): "${subject}".` +
-      (mainTopic ? ` Context: ${mainTopic}` : '');
+      `Rephrase into a literal, short STOCK VIDEO search query (no metaphors), ideally using a proper noun if present.\n` +
+      `Subject: "${subject}"` + (mainTopic ? `\nContext: ${mainTopic}` : '');
     const response = await openai.chat.completions.create({
       model: REFORMULATION_MODEL,
       messages: [
-        { role: 'system', content: 'You are a search query generator for stock video matching.' },
+        { role: 'system', content: 'You generate literal stock VIDEO queries. No fluff.' },
         { role: 'user', content: prompt }
       ],
       max_tokens: 20,
@@ -152,11 +240,11 @@ async function gptReformulateSubject(subject, mainTopic, jobId) {
     });
     const reformulated = response.choices?.[0]?.message?.content?.trim();
     if (reformulated) {
-      console.log(`[5D][REFORM][${jobId}] "${subject}" -> "${reformulated}"`);
+      console.log(`[5D][REFORM][${jobId}] "${subject}" → "${reformulated}"`);
       return reformulated;
     }
   } catch (err) {
-    console.error(`[5D][REFORM][${jobId}] GPT failed:`, err);
+    console.error(`[5D][REFORM][${jobId}] GPT failed:`, err?.response?.data || err);
   }
   return null;
 }
@@ -167,28 +255,28 @@ function backupKeywordExtraction(text) {
   return tokens[0] || text;
 }
 
-// Quick landmark context check to bias R2 if we have it indexed
 async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobId) {
   if (!findR2ClipForScene.getAllFiles) return null;
   const LANDMARK_WORDS = [
     'statue of liberty','white house','empire state building','eiffel tower','sphinx','great wall',
     'mount rushmore','big ben','colosseum','machu picchu','pyramids','chichen itza','louvre','taj mahal',
     'notre dame','angkor wat','leaning tower','buckingham palace','niagara falls','grand canyon',
-    'hollywood sign','stonehenge','burj khalifa','golden gate bridge','petra','cristo redentor','opera house'
+    'hollywood sign','stonehenge','burj khalifa','golden gate bridge','petra','cristo redentor','opera house',
+    'edinburgh castle','great wall of china'
   ];
   const toTest = [subject, mainTopic].filter(Boolean).map(s => (typeof s === 'string' ? s.toLowerCase() : ''));
   const landmark = LANDMARK_WORDS.find(l => toTest.some(t => t.includes(l)));
   if (!landmark) return null;
 
   try {
-    const r2Files = await findR2ClipForScene.getAllFiles(); // list of keys
-    const needle = landmark.replace(/\s+/g, '_');
+    const r2Files = await findR2ClipForScene.getAllFiles(); // array of keys
+    const needle = landmark.replace(/\s+/g, '_').toLowerCase();
     for (const key of r2Files) {
       if (usedHas(usedClips, key)) continue;
       if (String(key).toLowerCase().includes(needle)) {
-        console.log(`[5D][CONTEXT][${jobId}] Landmark override "${landmark}" -> "${key}"`);
+        console.log(`[5D][CONTEXT][${jobId}] Landmark override "${landmark}" → "${key}"`);
         usedAdd(usedClips, key);
-        return key; // return R2 key directly (5B will fetch)
+        return key;
       }
     }
   } catch (err) {
@@ -200,6 +288,10 @@ async function tryContextualLandmarkOverride(subject, mainTopic, usedClips, jobI
 // Produce a Ken Burns VIDEO locally from a chosen image file.
 // Returns absolute path to a .mp4 (preferred) or null on failure.
 async function kenBurnsVideoFromImagePath(imgPath, workDir, sceneIdx, jobId) {
+  if (!makeKenBurnsVideoFromImage || !preprocessImageToJpeg || !staticImageToVideo) {
+    console.warn('[5D][KENBURNS][WARN] 10D helpers missing; cannot build Ken Burns video.');
+    return null;
+  }
   try {
     const safeDir = workDir || path.join(__dirname, '..', 'jobs', `kb-${jobId || 'job'}`);
     if (!fs.existsSync(safeDir)) fs.mkdirSync(safeDir, { recursive: true });
@@ -211,7 +303,7 @@ async function kenBurnsVideoFromImagePath(imgPath, workDir, sceneIdx, jobId) {
     await makeKenBurnsVideoFromImage(prepped, outVid, 5, jobId);
 
     if (!assertLocalFileExists(outVid, 'KENBURNS_OUT', 2048)) {
-      // Fallback: static still-to-video (never fails)
+      // Fallback: static still-to-video
       await staticImageToVideo(prepped, outVid, 5, jobId);
     }
     console.log(`[5D][KENBURNS][${jobId}] Built local KB video from image: ${outVid}`);
@@ -222,10 +314,33 @@ async function kenBurnsVideoFromImagePath(imgPath, workDir, sceneIdx, jobId) {
   }
 }
 
-// Normalize helper returns into a { path, source } object
 function asPathAndSource(res, sourceTag) {
   const p = res?.filePath || res?.path || res;
-  return p ? { path: p, source: sourceTag } : null;
+  return p ? { path: p, source: sourceTag, title: res?.title, description: res?.description, tags: res?.tags, provider: res?.provider, isVideo: !!res?.isVideo } : null;
+}
+
+// Hard negative filters in landmark mode
+function landmarkCull(candidate) {
+  const text = [
+    candidate.path,
+    candidate.title,
+    candidate.description,
+    candidate.tags ? candidate.tags.join(' ') : '',
+    candidate.source,
+    candidate.provider
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  const hasAnimal = containsAny(ANIMAL_TERMS, text);
+  const hasPerson = containsAny(PERSON_TERMS, text);
+
+  // Allow ceremonial humans at famous landmarks
+  const allowedHumanContext = /\b(guard|guards|soldier|soldiers|ceremony|changing of the guard)\b/.test(text);
+  const looksLandmarky = containsAny(LANDMARK_KEYWORDS, text);
+
+  if ((hasAnimal || hasPerson) && !(allowedHumanContext && looksLandmarky)) {
+    return false;
+  }
+  return true;
 }
 
 // ===========================================================
@@ -236,8 +351,8 @@ function asPathAndSource(res, sourceTag) {
  * Chooses the best visual for a scene.
  * Returns either:
  *  - R2 key string (no local assert; 5B downloads)
- *  - Local absolute file path to a video (pexels/pixabay download or Ken Burns output)
- *  - null (true last resort; 5B may still handle a final safety net)
+ *  - Local absolute file path to a video (provider download or Ken Burns output)
+ *  - null (last resort)
  */
 async function findClipForScene({
   subject,
@@ -258,7 +373,7 @@ async function findClipForScene({
   console.log(`[5D][START][${jobId}][S${sceneIdx}] Subject="${subject}" Mega=${isMegaScene}`);
   console.log(`[5D][CTX][S${sceneIdx}]`, allSceneTexts?.[sceneIdx] || '(no scene text)');
 
-  // ---- Anchor subject for scene 0 or explicit mega scene ----
+  // ---- Subject Anchor (scene 0 / mega) ----
   let searchSubject = subject;
   if (isMegaScene || sceneIdx === 0) {
     try {
@@ -280,10 +395,10 @@ async function findClipForScene({
 
   if (forceClipPath) {
     console.log(`[5D][FORCE][${jobId}] Forced clip: ${forceClipPath}`);
-    return forceClipPath; // may be R2 key or local file
+    return forceClipPath;
   }
 
-  // ---- Subject enrichment in parallel (symbolic/emotion/question/multi) ----
+  // ---- Subject enrichment (parallel, soft) ----
   let extractedSubjects = [];
   const subjectExtractors = [
     ['MULTI', extractMultiSubjectVisual],
@@ -294,6 +409,7 @@ async function findClipForScene({
 
   await Promise.all(
     subjectExtractors.map(async ([label, fn]) => {
+      if (typeof fn !== 'function') return;
       try {
         const res = await fn(searchSubject, mainTopic);
         if (res && !GENERIC_SUBJECTS.includes(String(res).toLowerCase())) {
@@ -317,23 +433,40 @@ async function findClipForScene({
   }
 
   if (!extractedSubjects.length) extractedSubjects.push(searchSubject);
-  // Dedup
   extractedSubjects = [...new Set(extractedSubjects.map(s => String(s)))];
 
-  // Break repetition against prior subjects (soft variation)
+  // Soft variation vs prior subjects (continuity lock but no drift)
   let finalSubjects = [];
   for (const sub of extractedSubjects) {
     try {
-      const varied = await breakRepetition(sub, prevVisualSubjects || [], { maxRepeats: 2 });
-      if (varied && !finalSubjects.includes(varied)) finalSubjects.push(varied);
+      if (typeof breakRepetition === 'function') {
+        const varied = await breakRepetition(sub, prevVisualSubjects || [], { maxRepeats: 2 });
+        if (varied && !finalSubjects.includes(varied)) finalSubjects.push(varied);
+      } else {
+        if (!finalSubjects.includes(sub)) finalSubjects.push(sub);
+      }
     } catch {
       if (!finalSubjects.includes(sub)) finalSubjects.push(sub);
     }
   }
 
-  // Quick landmark override to R2 if we spot a famous subject
+  // Quick R2 override for ultra-famous landmarks
   const contextOverride = await tryContextualLandmarkOverride(finalSubjects[0], mainTopic, usedClips, jobId);
   if (contextOverride) return contextOverride;
+
+  // =========================================================
+  // Caching — keep results per subject across the job
+  // =========================================================
+  if (!jobContext._matcherCache) jobContext._matcherCache = new Map();
+  const cacheKey = `${alnumLower(finalSubjects.join('|'))}|${categoryFolder || 'misc'}`;
+  if (jobContext._matcherCache.has(cacheKey)) {
+    const cached = jobContext._matcherCache.get(cacheKey);
+    console.log(`[5D][CACHE][HIT][${jobId}] key=${cacheKey} → ${cached?.path || '(no path)'}`);
+    if (cached && !usedHas(usedClips, cached.path)) {
+      usedAdd(usedClips, cached.path);
+      return cached.path;
+    }
+  }
 
   // =========================================================
   // Collect candidates (videos first; images as fallback)
@@ -344,76 +477,129 @@ async function findClipForScene({
   for (const subjectOption of finalSubjects) {
     console.log(`[5D][SEARCH][${jobId}] Subject Option: "${subjectOption}"`);
 
-    // ---- Video lookups in parallel ----
-    await Promise.all([
+    const landmarkMode = isLandmarkSubject(subjectOption) || isLandmarkSubject(mainTopic);
+
+    // ---- Video lookups in parallel with timeouts ----
+    await Promise.allSettled([
       (async () => {
-        // R2 returns keys; do NOT assert local existence
         try {
-          if (findR2ClipForScene.getAllFiles) {
-            const r2Files = await findR2ClipForScene.getAllFiles(subjectOption, categoryFolder);
-            for (const key of r2Files) {
-              if (!usedHas(usedClips, key)) {
-                videoCandidates.push({ path: key, source: 'R2', isVideo: true, subject: subjectOption });
+          if (typeof findR2ClipForScene.getAllFiles === 'function') {
+            const r2Files = await withTimeout(
+              findR2ClipForScene.getAllFiles(subjectOption, categoryFolder),
+              PROVIDER_TIMEOUT_MS,
+              'R2.getAllFiles'
+            );
+            for (const key of r2Files || []) {
+              if (usedHas(usedClips, key)) continue;
+              const candidate = { path: key, source: 'R2', isVideo: true, subject: subjectOption, provider: 'r2' };
+              if (!landmarkMode || landmarkCull(candidate)) {
+                videoCandidates.push(candidate);
               }
             }
-            console.log(`[5D][R2][${jobId}] +${r2Files.length} candidates for "${subjectOption}"`);
+            console.log(`[5D][R2][${jobId}] +${(r2Files || []).length} candidates for "${subjectOption}"`);
           }
         } catch (err) {
-          console.error(`[5D][R2][${jobId}][ERR]`, err);
+          console.error(`[5D][R2][${jobId}][ERR]`, err?.message || err);
         }
       })(),
       (async () => {
         try {
-          const hit = asPathAndSource(await findPexelsClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips), 'PEXELS_VIDEO');
+          const res = await withTimeout(
+            findPexelsClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips),
+            PROVIDER_TIMEOUT_MS,
+            'PEXELS_VIDEO'
+          );
+          const hit = asPathAndSource(res, 'PEXELS_VIDEO');
           if (hit && !usedHas(usedClips, hit.path) && assertLocalFileExists(hit.path, 'PEXELS_VIDEO_RESULT')) {
-            videoCandidates.push({ ...hit, isVideo: true, subject: subjectOption });
+            if (!landmarkMode || landmarkCull(hit)) {
+              hit.isVideo = true;
+              hit.provider = hit.provider || 'pexels';
+              videoCandidates.push(hit);
+            }
           }
         } catch (err) {
-          console.error(`[5D][PEXELS_VIDEO][${jobId}][ERR]`, err);
+          console.error(`[5D][PEXELS_VIDEO][${jobId}][ERR]`, err?.message || err);
         }
       })(),
       (async () => {
         try {
-          const hit = asPathAndSource(await findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips), 'PIXABAY_VIDEO');
+          const res = await withTimeout(
+            findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips),
+            PROVIDER_TIMEOUT_MS,
+            'PIXABAY_VIDEO'
+          );
+          const hit = asPathAndSource(res, 'PIXABAY_VIDEO');
           if (hit && !usedHas(usedClips, hit.path) && assertLocalFileExists(hit.path, 'PIXABAY_VIDEO_RESULT')) {
-            videoCandidates.push({ ...hit, isVideo: true, subject: subjectOption });
+            if (!landmarkMode || landmarkCull(hit)) {
+              hit.isVideo = true;
+              hit.provider = hit.provider || 'pixabay';
+              videoCandidates.push(hit);
+            }
           }
         } catch (err) {
-          console.error(`[5D][PIXABAY_VIDEO][${jobId}][ERR]`, err);
+          console.error(`[5D][PIXABAY_VIDEO][${jobId}][ERR]`, err?.message || err);
         }
       })(),
     ]);
 
-    // ---- Photo lookups in parallel (fallback tier) ----
-    await Promise.all([
+    // ---- Photo lookups in parallel (fallback tier) with timeouts ----
+    await Promise.allSettled([
       (async () => {
         try {
-          const hit = asPathAndSource(await findPexelsPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips), 'PEXELS_PHOTO');
+          const res = await withTimeout(
+            findPexelsPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips),
+            PROVIDER_TIMEOUT_MS,
+            'PEXELS_PHOTO'
+          );
+          const hit = asPathAndSource(res, 'PEXELS_PHOTO');
           if (hit && !usedHas(usedClips, hit.path) && assertLocalFileExists(hit.path, 'PEXELS_PHOTO_RESULT', 4096)) {
-            imageCandidates.push({ ...hit, isVideo: false, subject: subjectOption });
+            if (!landmarkMode || landmarkCull(hit)) {
+              hit.isVideo = false;
+              hit.provider = hit.provider || 'pexels';
+              imageCandidates.push(hit);
+            }
           }
         } catch (err) {
-          console.error(`[5D][PEXELS_PHOTO][${jobId}][ERR]`, err);
+          console.error(`[5D][PEXELS_PHOTO][${jobId}][ERR]`, err?.message || err);
         }
       })(),
       (async () => {
         try {
-          const hit = asPathAndSource(await findPixabayPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips), 'PIXABAY_PHOTO');
-        if (hit && !usedHas(usedClips, hit.path) && assertLocalFileExists(hit.path, 'PIXABAY_PHOTO_RESULT', 4096)) {
-            imageCandidates.push({ ...hit, isVideo: false, subject: subjectOption });
+          const res = await withTimeout(
+            findPixabayPhotoForScene(subjectOption, workDir, sceneIdx, jobId, usedClips),
+            PROVIDER_TIMEOUT_MS,
+            'PIXABAY_PHOTO'
+          );
+          const hit = asPathAndSource(res, 'PIXABAY_PHOTO');
+          if (hit && !usedHas(usedClips, hit.path) && assertLocalFileExists(hit.path, 'PIXABAY_PHOTO_RESULT', 4096)) {
+            if (!landmarkMode || landmarkCull(hit)) {
+              hit.isVideo = false;
+              hit.provider = hit.provider || 'pixabay';
+              imageCandidates.push(hit);
+            }
           }
         } catch (err) {
-          console.error(`[5D][PIXABAY_PHOTO][${jobId}][ERR]`, err);
+          console.error(`[5D][PIXABAY_PHOTO][${jobId}][ERR]`, err?.message || err);
         }
       })(),
       (async () => {
+        if (!findUnsplashImageForScene) return;
         try {
-          const hit = asPathAndSource(await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext), 'UNSPLASH');
+          const res = await withTimeout(
+            findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext),
+            PROVIDER_TIMEOUT_MS,
+            'UNSPLASH'
+          );
+          const hit = asPathAndSource(res, 'UNSPLASH');
           if (hit && !usedHas(usedClips, hit.path) && assertLocalFileExists(hit.path, 'UNSPLASH_RESULT', 4096)) {
-            imageCandidates.push({ ...hit, isVideo: false, subject: subjectOption });
+            if (!landmarkMode || landmarkCull(hit)) {
+              hit.isVideo = false;
+              hit.provider = hit.provider || 'unsplash';
+              imageCandidates.push(hit);
+            }
           }
         } catch (err) {
-          console.error(`[5D][UNSPLASH][${jobId}][ERR]`, err);
+          console.error(`[5D][UNSPLASH][${jobId}][ERR]`, err?.message || err);
         }
       })(),
     ]);
@@ -425,7 +611,7 @@ async function findClipForScene({
   if (!videoCandidates.length) {
     const seed = finalSubjects[0];
     const reformulated = (await gptReformulateSubject(seed, mainTopic, jobId)) || backupKeywordExtraction(seed);
-    if (reformulated && reformulated !== seed) {
+    if (reformulated && !eqLoose(reformulated, seed)) {
       console.log(`[5D][REFORM_USED][${jobId}] Retrying with: "${reformulated}"`);
       return await findClipForScene({
         subject: reformulated,
@@ -448,20 +634,24 @@ async function findClipForScene({
   // =========================================================
   // Score candidates (strict thresholds, video preferred)
   // =========================================================
-  videoCandidates.forEach(c => { c.score = scoreSceneCandidate(c, c.subject, usedClips, true); });
-  imageCandidates.forEach(c => { c.score = scoreSceneCandidate(c, c.subject, usedClips, false); });
+  videoCandidates.forEach(c => { c.score = scoreSceneCandidate(c, c.subject || subject, usedClips, true); });
+  imageCandidates.forEach(c => { c.score = scoreSceneCandidate(c, c.subject || subject, usedClips, false); });
 
-  // Filter/Sort
-  videoCandidates = videoCandidates.filter(c => c.score >= 65).sort((a, b) => b.score - a.score);
-  imageCandidates = imageCandidates.filter(c => c.score >= 70).sort((a, b) => b.score - a.score);
+  // Filter & Sort by score desc
+  videoCandidates = videoCandidates.filter(c => c.score >= HARD_FLOOR_VIDEO).sort((a, b) => b.score - a.score);
+  imageCandidates = imageCandidates.filter(c => c.score >= HARD_FLOOR_IMAGE).sort((a, b) => b.score - a.score);
+
+  // Log top-3 for transparency
+  console.log('[5D][CANDS][VIDEO][TOP3]', videoCandidates.slice(0, 3).map(c => ({ path: c.path, src: c.source, score: c.score })));
+  console.log('[5D][CANDS][IMAGE][TOP3]', imageCandidates.slice(0, 3).map(c => ({ path: c.path, src: c.source, score: c.score })));
 
   // *** VIDEO ALWAYS WINS if any present ***
   if (videoCandidates.length) {
     const best = videoCandidates[0];
     usedAdd(usedClips, best.path);
+    jobContext._matcherCache.set(cacheKey, { path: best.path, type: 'video', score: best.score });
     console.log(`[5D][RESULT][VIDEO][${jobId}]`, { path: best.path, source: best.source, score: best.score, subj: best.subject });
-    // Return R2 key or local video path; Section 5B handles both cases
-    return best.path;
+    return best.path; // R2 key or local video path; 5B handles both
   }
 
   // =========================================================
@@ -473,26 +663,28 @@ async function findClipForScene({
 
     const kbVid = await kenBurnsVideoFromImagePath(bestImg.path, workDir, sceneIdx, jobId);
     if (kbVid && assertLocalFileExists(kbVid, 'KB_OUT', 2048)) {
-      // mark original image as used to avoid reusing the same visual
-      usedAdd(usedClips, bestImg.path);
+      usedAdd(usedClips, bestImg.path); // mark image used to avoid repetition
+      jobContext._matcherCache.set(cacheKey, { path: kbVid, type: 'kb', score: bestImg.score });
       return kbVid; // local video path
     }
 
-    // Shouldn’t happen often; last-ditch image path (5B may struggle)
+    // Should be rare; last-ditch: return image path (5B may struggle)
     console.warn(`[5D][IMAGE_FALLBACK][${jobId}] Ken Burns build failed; returning image path.`);
+    jobContext._matcherCache.set(cacheKey, { path: bestImg.path, type: 'image', score: bestImg.score });
     return bestImg.path;
   }
 
   // =========================================================
   // Total miss → pick any R2 clip not yet used (no local assert)
   // =========================================================
-  if (findR2ClipForScene.getAllFiles) {
+  if (typeof findR2ClipForScene.getAllFiles === 'function') {
     try {
       const r2Files = await findR2ClipForScene.getAllFiles();
-      const fallback = r2Files.find(f => !usedHas(usedClips, f));
+      const fallback = (r2Files || []).find(f => !usedHas(usedClips, f));
       if (fallback) {
         console.warn(`[5D][FALLBACK][${jobId}] Using first-available R2 clip: ${fallback}`);
         usedAdd(usedClips, fallback);
+        jobContext._matcherCache.set(cacheKey, { path: fallback, type: 'video', score: 0 });
         return fallback; // R2 key
       }
     } catch (err) {

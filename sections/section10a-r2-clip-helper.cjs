@@ -55,6 +55,7 @@ const PREFER_RECENT = (process.env.R2_PREFER_RECENT || '1') === '1';
 // Exclude *composed outputs* and any cached concat artifacts from being used as source clips.
 const EXCLUDE_PATTERNS = [
   '/jobs/',                // any job artifacts
+  '/final/',               // final folders
   'final-with-outro',
   'with-music',
   'concat-',
@@ -62,6 +63,8 @@ const EXCLUDE_PATTERNS = [
   'megamux',
   '-bp-',                  // bulletproofed outputs
   '-vol',                  // volume-adjusted outro
+  '/thumbnails/',
+  '/thumbs/',
 ];
 
 // ===========================================================
@@ -122,11 +125,19 @@ function isExcludedKey(key) {
   return EXCLUDE_PATTERNS.some(p => k.includes(String(p).toLowerCase()));
 }
 
+function hasCategoryPrefix(key = '', categoryFolder = '') {
+  if (!categoryFolder) return true;
+  const k = String(key).toLowerCase();
+  const c = String(categoryFolder).replace(/^\/+/, '').toLowerCase();
+  return k.includes(`/${c}/`) || k.startsWith(`${c}/`);
+}
+
 // ===========================================================
 // LISTING WITH CACHING
 // ===========================================================
 let _listCache = {
   when: 0,
+  // objs: array of {Key, Size?, LastModified?}
   objs: /** @type {{Key: string, Size?: number, LastModified?: Date}[]} */ ([]),
 };
 
@@ -209,7 +220,7 @@ function extractSubjectAndPhrases(scene) {
 }
 
 // ===========================================================
-// DOWNLOAD + VALIDATE
+// DOWNLOAD + VALIDATE (with simple retry)
 // ===========================================================
 async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
   const unique = uuidv4();
@@ -220,32 +231,40 @@ async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
     return outPath;
   }
 
-  console.log(`[10A][R2][${jobId}] Downloading R2 clip: ${r2Key} -> ${outPath}`);
-  const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: r2Key });
-  const resp = await s3Client.send(getCmd);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      console.log(`[10A][R2][${jobId}] Downloading R2 clip (attempt ${attempt}): ${r2Key} -> ${outPath}`);
+      const getCmd = new GetObjectCommand({ Bucket: R2_LIBRARY_BUCKET, Key: r2Key });
+      const resp = await s3Client.send(getCmd);
 
-  await new Promise((resolve, reject) => {
-    const stream = resp.Body;
-    const fileStream = fs.createWriteStream(outPath);
-    stream.pipe(fileStream);
-    stream.on('error', (err) => {
-      console.error(`[10A][R2][${jobId}][ERR] Stream error during download:`, err);
-      reject(err);
-    });
-    fileStream.on('finish', resolve);
-    fileStream.on('error', (err) => {
-      console.error(`[10A][R2][${jobId}][ERR] Write error during download:`, err);
-      reject(err);
-    });
-  });
+      await new Promise((resolve, reject) => {
+        const stream = resp.Body;
+        const fileStream = fs.createWriteStream(outPath);
+        stream.pipe(fileStream);
+        stream.on('error', (err) => {
+          console.error(`[10A][R2][${jobId}][ERR] Stream error during download:`, err);
+          reject(err);
+        });
+        fileStream.on('finish', resolve);
+        fileStream.on('error', (err) => {
+          console.error(`[10A][R2][${jobId}][ERR] Write error during download:`, err);
+          reject(err);
+        });
+      });
 
-  if (!isValidLocalFile(outPath)) {
-    console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
-    return null;
+      if (!isValidLocalFile(outPath)) {
+        console.warn(`[10A][R2][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+        continue;
+      }
+      usedClips?.push(r2Key);
+      return outPath;
+    } catch (err) {
+      console.error(`[10A][R2][${jobId}][ERR] Download attempt ${attempt} failed:`, err?.message || err);
+    }
   }
 
-  usedClips?.push(r2Key);
-  return outPath;
+  console.warn(`[10A][R2][${jobId}] Giving up on download for: ${r2Key}`);
+  return null;
 }
 
 // ===========================================================
@@ -372,6 +391,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
 
       return {
         type: 'video',
+        provider: 'r2',
         source: 'r2',
         path: o.Key,
         filename: path.basename(o.Key),
@@ -490,15 +510,33 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
 // ===========================================================
 // STATIC EXPORT: getAllFiles (used by 5D for scans)
 // Returns an array of mp4 keys (strings), cached for 60s.
+// Accepts optional subject and categoryFolder to prefilter server-side.
 // ===========================================================
-findR2ClipForScene.getAllFiles = async function() {
+findR2ClipForScene.getAllFiles = async function(subject = null, categoryFolder = null) {
   try {
     const objs = await listAllObjectsInR2('', 'STATIC');
-    const mp4s = objs
+    let mp4s = objs
       .map(o => o.Key)
       .filter(k => isMp4Key(k))
       .filter(k => !isExcludedKey(k)); // do not expose composed outputs to scanners
-    console.log(`[10A][STATIC] getAllFiles: Found ${mp4s.length} mp4s in R2 (cached=${Date.now() - _listCache.when < LIST_CACHE_TTL_MS}).`);
+
+    if (categoryFolder) {
+      mp4s = mp4s.filter(k => hasCategoryPrefix(k, categoryFolder));
+    }
+
+    if (subject) {
+      const normSubj = normalize(subject);
+      const tokens = new Set(tokenize(subject));
+      mp4s = mp4s.filter(k => {
+        const base = normalize(path.basename(k, path.extname(k)));
+        const baseTokens = new Set(tokenize(base));
+        const overlap = [...tokens].some(t => baseTokens.has(t));
+        const containsSubject = base.includes(normSubj);
+        return overlap || containsSubject;
+      });
+    }
+
+    console.log(`[10A][STATIC] getAllFiles: Found ${mp4s.length} mp4s in R2 (cached=${Date.now() - _listCache.when < LIST_CACHE_TTL_MS}, subject=${subject ? 'Y' : 'N'}, category=${categoryFolder || 'none'})`);
     return mp4s;
   } catch (err) {
     console.error('[10A][STATIC][ERR] getAllFiles failed:', err);
