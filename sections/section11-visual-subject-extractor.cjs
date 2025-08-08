@@ -1,16 +1,20 @@
 // ===========================================================
-// SECTION 11: GPT VISUAL SUBJECT EXTRACTOR (STRICT V4)
-// Purpose: Return the top 4 concrete, on-topic visual subjects
-//          for a given script line (Primary, Context, Fallback, General).
+// SECTION 11: GPT VISUAL SUBJECT EXTRACTOR (STRICT V5)
+// Purpose: Return the strongest visual subject for a script line,
+//          with a canonical subject + optional feature/action + type,
+//          plus a backward-compatible list of 4 concrete options.
 //
-// Improvements vs V3:
-// - Heuristic pre-pass: proper-noun + landmark keyword detection.
-// - Landmark strictness: if a landmark/place is detected, ban animals/people.
-// - Off-topic guard: culls generic/abstract/jokey outputs.
-// - Typo corrections: "Edinboro" -> "Edinburgh", "Giza Pyrimids" -> "Giza Pyramids", etc.
-// - Deterministic JSON output from GPT with fallback parsing.
-// - Always returns EXACTLY 4 strong, non-generic items.
-// - MAX LOGGING, no silent failures.
+// Major Upgrades vs V4:
+// - Adds 10M canonical normalization (aliases → canonical; features/actions).
+// - Returns a STRICT structured object for downstream precision:
+//     { primary, featureOrAction, parent, alternates[], type }
+// - Detects and prefers EXACT landmark/object/animal matches.
+// - Extracts visual FEATURES/ACTIONS when present (e.g., "crown", "drinking milk").
+// - Entity typing: landmark | animal | object | food | person | other.
+// - Hard culls generic/abstract/off-topic; landmark-mode bans animals/people.
+// - Deterministic JSON from GPT with resilient parsing & heuristic merge.
+// - Backward compatibility: still exports extractVisualSubjects() → [4 strings].
+// - MAX LOGGING, no placeholders.
 // ===========================================================
 
 const axios = require('axios');
@@ -18,9 +22,37 @@ const axios = require('axios');
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 if (!OPENAI_API_KEY) throw new Error('[11][FATAL] OPENAI_API_KEY not set in env!');
 
-console.log('[11][INIT] Visual Subject Extractor (STRICT V4) loaded');
+console.log('[11][INIT] Visual Subject Extractor (STRICT V5) loaded');
 
-const DEFAULT_MODEL = process.env.VISUAL_SUBJECT_MODEL || 'gpt-4.1'; // keep configurable
+const DEFAULT_MODEL = process.env.VISUAL_SUBJECT_MODEL || 'gpt-4.1'; // configurable
+
+// -----------------------------
+// 10M Canonical Subjects
+// -----------------------------
+let resolveCanonicalSubject = null;
+try {
+  ({ resolveCanonicalSubject } = require('./section10m-canonical-subjects.cjs'));
+  console.log('[11][INIT] 10M canonical subject resolver connected.');
+} catch (e) {
+  console.warn('[11][INIT][WARN] 10M canonical resolver not found. Using internal minimal normalizer.');
+  // minimal fallback to avoid crashes
+  resolveCanonicalSubject = (input) => {
+    const s = (typeof input === 'string' ? input : (input?.primary || '')).toLowerCase().trim();
+    const feature = (input?.featureOrAction || input?.feature || input?.action || '').toLowerCase().trim();
+    const type = (input?.type || guessTypeFromText(s)).toLowerCase();
+    return {
+      canonical: s,
+      type,
+      featureOrAction: feature,
+      parent: s,
+      alternates: Array.isArray(input?.alternates) ? input.alternates : [],
+      synonyms: [],
+      languageVariants: [],
+      features: [],
+      actions: [],
+    };
+  };
+}
 
 // ===========================================================
 // Vocabulary / Heuristics
@@ -33,7 +65,7 @@ const GENERIC_SUBJECTS = [
 
 const ANIMAL_TERMS = [
   'dog','cat','monkey','orangutan','ape','gorilla','chimp','chimpanzee','lion','tiger','bear','elephant','giraffe',
-  'wolf','fox','deer','rabbit','horse','cow','sheep','goat','pig','bird','eagle','hawk','owl','panda'
+  'wolf','fox','deer','rabbit','horse','cow','sheep','goat','pig','bird','eagle','hawk','owl','panda','kitten','puppy'
 ];
 
 const PERSON_TERMS = [
@@ -49,7 +81,7 @@ const LANDMARK_KEYWORDS = [
   'museum','gallery','library','university','campus','garden','plaza','square','market','bazaar'
 ];
 
-// Quick known-landmark expansions / typo corrections (add over time)
+// Known-landmark expansions / typo corrections (extend over time)
 const LANDMARK_CORRECTIONS = [
   { re: /\bedinboro\b/gi, fix: 'Edinburgh' }, // user-reported
   { re: /\bgreat\s*wall\b/gi, fix: 'Great Wall of China' },
@@ -63,9 +95,18 @@ const LANDMARK_CORRECTIONS = [
   { re: /\bburj\s*khalifa\b/gi, fix: 'Burj Khalifa' },
 ];
 
-// Mild country/city proper-name booster
+// Country/city proper-name booster
 const PLACE_HINTS = [
-  'edinburgh','scotland','china','beijing','paris','france','rome','italy','london','england','egypt','giza','peru','cuzco','mexico'
+  'edinburgh','scotland','china','beijing','paris','france','rome','italy','london','england','egypt','giza','peru','cuzco','mexico','new york','usa','united states','united kingdom','uk'
+];
+
+// Feature/action vocab seeds (expand as needed)
+const FEATURE_WORDS = [
+  'crown','torch','clock face','summit','top','base','arches','interior','entrance','pedestal','tablet','face','facade'
+];
+const ACTION_WORDS = [
+  'drinking milk','drinking','pouring milk','pouring','fainting','grazing','climbing','running','sleeping','purring',
+  'eating','swinging','time-lapse','timelapse','fireworks','light show','aerial','close-up','close up'
 ];
 
 // ===========================================================
@@ -75,25 +116,21 @@ function cleanString(s) {
   return String(s || '').trim();
 }
 function toAlphaNumLower(s) {
-  return cleanString(s).toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return cleanString(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
 }
 function isGeneric(phrase) {
   const base = toAlphaNumLower(phrase);
   if (!base) return true;
   return GENERIC_SUBJECTS.some(g => base.includes(toAlphaNumLower(g)));
 }
-function containsAnimalWord(s) {
-  const low = (s || '').toLowerCase();
-  return ANIMAL_TERMS.some(t => low.includes(t));
+function containsAny(list, s) {
+  const L = (s || '').toLowerCase();
+  return list.some(t => L.includes(String(t).toLowerCase()));
 }
-function containsPersonWord(s) {
-  const low = (s || '').toLowerCase();
-  return PERSON_TERMS.some(t => low.includes(t));
-}
-function containsLandmarkKeyword(s) {
-  const low = (s || '').toLowerCase();
-  return LANDMARK_KEYWORDS.some(t => low.includes(t));
-}
+function containsAnimalWord(s) { return containsAny(ANIMAL_TERMS, s); }
+function containsPersonWord(s) { return containsAny(PERSON_TERMS, s); }
+function containsLandmarkKeyword(s) { return containsAny(LANDMARK_KEYWORDS, s); }
+
 function titleCase(s) {
   return cleanString(s)
     .split(/\s+/)
@@ -109,7 +146,6 @@ function applyLandmarkCorrections(s) {
   return out;
 }
 
-// capture quoted phrases
 function extractQuotedPhrases(s) {
   const res = [];
   const re = /"([^"]+)"|'([^']+)'/g;
@@ -120,7 +156,6 @@ function extractQuotedPhrases(s) {
   return res;
 }
 
-// capture proper-noun like sequences (>=2 capitalized tokens)
 function extractProperNounSequences(s) {
   const tokens = s.split(/(\s+|[.,!?;:()"'])/).filter(Boolean);
   const out = [];
@@ -138,24 +173,18 @@ function extractProperNounSequences(s) {
 }
 
 function maybeLandmarkFromKeywords(s) {
-  // Try to find the minimal phrase around landmark words (e.g., "Edinburgh Castle", "Great Wall of China")
-  const low = s.toLowerCase();
-  let best = null;
-
-  // Heuristic windows
   const words = s.split(/\s+/);
+  let best = null;
   for (let i = 0; i < words.length; i++) {
     const wLow = words[i].toLowerCase();
     if (LANDMARK_KEYWORDS.some(k => wLow === k || wLow.endsWith(k))) {
-      // Expand left/right to include proper nouns and of/ the/ in/ etc.
       let start = Math.max(0, i - 3);
       let end = Math.min(words.length - 1, i + 3);
       const phrase = words.slice(start, end + 1).join(' ');
       if (!best || phrase.length > best.length) best = phrase;
     }
   }
-  if (best) return titleCase(best);
-  return null;
+  return best ? titleCase(best) : null;
 }
 
 function boostPlaceHints(s) {
@@ -163,7 +192,6 @@ function boostPlaceHints(s) {
   return PLACE_HINTS.filter(h => low.includes(h));
 }
 
-// Deduplicate by alphanum-lower
 function uniqueKeepOrder(arr) {
   const seen = new Set();
   const out = [];
@@ -176,17 +204,11 @@ function uniqueKeepOrder(arr) {
   return out;
 }
 
-// If any item contains landmark keyword, consider the whole set "landmark-mode".
-function shouldForceLandmarkMode(items) {
-  return items.some(containsLandmarkKeyword);
+function shouldForceLandmarkMode(itemsOrText) {
+  if (Array.isArray(itemsOrText)) return itemsOrText.some(containsLandmarkKeyword);
+  return containsLandmarkKeyword(itemsOrText);
 }
 
-// Enforce anti-animal/person when landmark mode
-function filterOffTopicForLandmark(items) {
-  return items.filter(x => !containsAnimalWord(x) && !containsPersonWord(x));
-}
-
-// Hard cull: generics, too short, non-visual
 function strongCull(items) {
   return items
     .map(x => x && String(x).trim())
@@ -195,43 +217,71 @@ function strongCull(items) {
     .filter(x => !isGeneric(x));
 }
 
-// Ensure exactly 4 results, padding with mainTopic variations if needed
-function finalize4(items, mainTopic) {
-  let arr = uniqueKeepOrder(items);
-  arr = strongCull(arr);
+function guessTypeFromText(s) {
+  const L = (s || '').toLowerCase();
+  if (containsAny(LANDMARK_KEYWORDS, L)) return 'landmark';
+  if (containsAny(ANIMAL_TERMS, L)) return 'animal';
+  if (/\b(milk|bread|pizza|burger|coffee|tea|drink|food)\b/.test(L)) return 'food';
+  if (containsAny(PERSON_TERMS, L)) return 'person';
+  return 'other';
+}
 
-  if (arr.length === 0) arr.push(mainTopic);
-  while (arr.length < 4) {
-    if (!arr.includes(mainTopic)) arr.push(mainTopic);
-    else {
-      const t = `${mainTopic} view`;
-      if (!arr.includes(t)) arr.push(t);
-      else arr.push(`${mainTopic} close-up`);
+function extractFeatureOrAction(text) {
+  const L = (text || '').toLowerCase();
+  const hits = [];
+  FEATURE_WORDS.forEach(f => { if (L.includes(f)) hits.push(f); });
+  ACTION_WORDS.forEach(a => { if (L.includes(a)) hits.push(a); });
+  // Prefer multi-word actions (drinking milk) then feature nouns
+  hits.sort((a, b) => b.split(' ').length - a.split(' ').length);
+  return hits[0] || '';
+}
+
+function combineAndCullLandmarkMode(items, landmarkMode) {
+  let merged = uniqueKeepOrder(items);
+  merged = strongCull(merged);
+  if (landmarkMode) {
+    const before = merged.length;
+    merged = merged.filter(x => !containsAnimalWord(x) && !containsPersonWord(x));
+    const after = merged.length;
+    if (after < before) {
+      console.log(`[11][FILTER] Landmark mode culled ${before - after} animal/person items`);
     }
   }
-  if (arr.length > 4) arr = arr.slice(0, 4);
-  return arr;
+  return merged;
+}
+
+function toFourStrings(primary, alternates, mainTopic) {
+  const base = [];
+  if (primary?.featureOrAction) base.push(`${primary.primary} ${primary.featureOrAction}`.trim());
+  base.push(primary.primary);
+  (alternates || []).forEach(a => base.push(a));
+  const final = strongCull(uniqueKeepOrder(base));
+  while (final.length < 4) {
+    const filler = final.length === 0 ? mainTopic : `${primary.primary} close-up`;
+    if (!final.includes(filler)) final.push(filler);
+    else final.push(`${primary.primary} view`);
+  }
+  return final.slice(0, 4);
 }
 
 // ===========================================================
-// GPT Prompting (JSON enforced, but with resilient parsing)
+// GPT Prompting (JSON enforced, resilient parsing)
 // ===========================================================
 function buildSystemPrompt(genericBlacklistCSV) {
   return [
     'You are a senior editor for viral short-form videos (TikTok/Reels/Shorts).',
-    'Your job: Given a script line and main topic, produce EXACTLY FOUR concrete, showable visual subjects.',
+    'Given a script line and main topic, produce a single STRICT visual subject with optional feature/action and type.',
     'Rules:',
-    '- Only return visuals that can literally appear on screen (objects/places/landmarks/actions).',
+    '- Only return visuals that can literally appear on screen (objects/places/landmarks/animals/actions).',
     '- Ignore metaphors, jokes, emotions, or abstract concepts.',
-    '- Prefer PROPER NOUNS and famous landmarks when present.',
+    '- Prefer PROPER NOUNS and famous landmarks/objects/animals when present.',
     '- If the line names a landmark/place, DO NOT return animals/people unless they are part of the landmark (e.g., guards at Buckingham Palace).',
-    `- NEVER return: ${genericBlacklistCSV}.`,
+    `- NEVER use: ${genericBlacklistCSV}.`,
     '- No duplicates. No vague words like “scene”, “view”, “image”, “photo”, “text”, “logo”.',
-    '- If nothing is clear, use the main topic as fallback.',
     '',
-    'Output must be strict JSON object with this shape:',
-    '{ "primary": "string", "context": "string", "fallback": "string", "general": "string" }',
-    'Do not add explanations or any other fields.',
+    'Output MUST be strict JSON with this shape:',
+    '{ "primary": "string", "featureOrAction": "string", "type": "landmark|animal|object|food|person|other", "alternates": ["string", "string"] }',
+    'No explanations. No extra fields.',
   ].join('\n');
 }
 
@@ -247,7 +297,7 @@ function buildUserPrompt(line, mainTopic, heuristicHints) {
   ].join('\n');
 }
 
-async function callOpenAIForSubjects(line, mainTopic, heuristicHints) {
+async function callOpenAIForStrict(line, mainTopic, heuristicHints) {
   const system = buildSystemPrompt(GENERIC_SUBJECTS.join(', '));
   const user = buildUserPrompt(line, mainTopic, heuristicHints);
 
@@ -257,8 +307,8 @@ async function callOpenAIForSubjects(line, mainTopic, heuristicHints) {
       { role: 'system', content: system },
       { role: 'user', content: user }
     ],
-    temperature: 0.2,
-    max_tokens: 120
+    temperature: 0.1,
+    max_tokens: 180
   };
 
   const res = await axios.post(
@@ -269,19 +319,17 @@ async function callOpenAIForSubjects(line, mainTopic, heuristicHints) {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      timeout: 20000,
+      timeout: 22000,
     }
   );
 
   const raw = res.data?.choices?.[0]?.message?.content?.trim() || '';
   console.log('[11][GPT][RAW]', raw);
 
-  // First try JSON parse
   let obj = null;
   try {
     obj = JSON.parse(raw);
   } catch {
-    // fallback: try to extract JSON object substring
     const m = raw.match(/\{[\s\S]*\}/);
     if (m) {
       try { obj = JSON.parse(m[0]); } catch { /* noop */ }
@@ -289,136 +337,163 @@ async function callOpenAIForSubjects(line, mainTopic, heuristicHints) {
   }
 
   if (obj && typeof obj === 'object') {
-    const { primary, context, fallback, general } = obj;
-    return [primary, context, fallback, general]
-      .map(x => (typeof x === 'string' ? x : ''))
-      .filter(x => !!x && x.trim().length > 0);
+    // sanitize
+    let primary = cleanString(obj.primary || '');
+    let featureOrAction = cleanString(obj.featureOrAction || obj.feature || obj.action || '');
+    let type = cleanString(obj.type || '');
+    let alternates = Array.isArray(obj.alternates) ? obj.alternates.map(cleanString).filter(Boolean) : [];
+
+    return { primary, featureOrAction, type, alternates };
   }
 
-  // Second fallback: numbered list parsing (if model ignored JSON)
-  const list = raw
-    .split('\n')
-    .map(l => l.replace(/^\s*\d+[\.\)]\s*/, '').replace(/^\s*-\s*/, '').trim())
-    .filter(Boolean);
-  return list;
+  return null;
 }
 
 // ===========================================================
-// Main API
+// Public API (STRICT object) + Back-compat array of 4 strings
 // ===========================================================
-async function extractVisualSubjects(line, mainTopic) {
+async function extractVisualSubjectStrict(line, mainTopic) {
   try {
     const rawLine = cleanString(line);
     const rawTopic = cleanString(mainTopic || 'misc');
-
     console.log(`[11][INPUT] Line="${rawLine}" | Topic="${rawTopic}"`);
 
     if (!rawLine) {
-      console.warn('[11][WARN] Blank/invalid line. Returning topic-based fillers.');
-      return finalize4([rawTopic], rawTopic);
+      console.warn('[11][WARN] Blank/invalid line. Returning topic-based filler.');
+      const fallbackObj = resolveCanonicalSubject({ primary: rawTopic, type: guessTypeFromText(rawTopic) });
+      const normalized = {
+        primary: titleCase(fallbackObj.canonical || rawTopic),
+        featureOrAction: '',
+        parent: titleCase(fallbackObj.canonical || rawTopic),
+        alternates: [],
+        type: fallbackObj.type || 'other',
+      };
+      console.log('[11][RESULT][STRICT][FALLBACK]', normalized);
+      return normalized;
     }
 
     // ---------- Heuristic Pre-pass ----------
     let preCandidates = [];
 
-    // Typo/variant corrections applied to the line
     let correctedLine = applyLandmarkCorrections(rawLine);
     if (correctedLine !== rawLine) {
       console.log(`[11][HEUR][CORRECT] "${rawLine}" -> "${correctedLine}"`);
     }
 
-    // Quoted phrases carry high intent
     const quoted = extractQuotedPhrases(correctedLine);
     if (quoted.length) console.log('[11][HEUR][QUOTED]', quoted);
     preCandidates.push(...quoted);
 
-    // Proper noun sequences (>=2 caps)
     const pn = extractProperNounSequences(correctedLine);
     if (pn.length) console.log('[11][HEUR][PROPER]', pn);
     preCandidates.push(...pn);
 
-    // Landmark keyword windowing
     const lm = maybeLandmarkFromKeywords(correctedLine);
     if (lm) {
       console.log('[11][HEUR][LANDMARK]', lm);
       preCandidates.push(lm);
     }
 
-    // Place hint boosters (city/country present)
     const hints = boostPlaceHints(correctedLine);
     if (hints.length) console.log('[11][HEUR][PLACE_HINTS]', hints);
 
-    // If nothing strong, try mainTopic with corrections
-    const correctedTopic = applyLandmarkCorrections(rawTopic);
-    if (correctedTopic !== rawTopic) {
-      console.log(`[11][HEUR][TOPIC_CORRECT] "${rawTopic}" -> "${correctedTopic}"`);
-    }
-
-    // Normalize and title-case heuristic candidates
-    preCandidates = uniqueKeepOrder(
-      preCandidates
-        .map(applyLandmarkCorrections)
-        .map(titleCase)
-        .filter(Boolean)
-    );
-
-    // Enforce landmark mode if any candidate clearly indicates landmark/place
-    const landmarkMode = shouldForceLandmarkMode(preCandidates) || containsLandmarkKeyword(correctedLine);
+    const landmarkMode = shouldForceLandmarkMode(preCandidates) || shouldForceLandmarkMode(correctedLine);
     if (landmarkMode) console.log('[11][MODE] Landmark mode is ON');
 
-    // ---------- GPT Call (JSON enforced) ----------
-    let gptList = [];
+    // ---------- GPT STRICT ----------
+    let gptStrict = null;
     try {
-      gptList = await callOpenAIForSubjects(correctedLine, correctedTopic, preCandidates);
+      gptStrict = await callOpenAIForStrict(correctedLine, rawTopic, preCandidates);
     } catch (e) {
       console.error('[11][GPT][ERR] GPT call failed:', e?.response?.data || e);
-      gptList = [];
+      gptStrict = null;
     }
 
-    // Merge heuristic + GPT, apply landmark rules & culls
-    let merged = uniqueKeepOrder([
-      ...preCandidates,
-      ...gptList
-    ]);
+    // ---------- Heuristic subject & feature/action ----------
+    // If GPT missed feature/action, try to pull from line.
+    const heuristicFeature = extractFeatureOrAction(correctedLine);
 
-    if (landmarkMode) {
-      const before = merged.length;
-      merged = filterOffTopicForLandmark(merged);
-      const after = merged.length;
-      if (after < before) {
-        console.log(`[11][FILTER] Landmark mode culled ${before - after} animal/person items`);
+    // Decide a primary candidate string
+    const mergedPre = uniqueKeepOrder(preCandidates);
+    let primaryGuess = gptStrict?.primary || mergedPre[0] || correctedLine;
+    primaryGuess = titleCase(applyLandmarkCorrections(primaryGuess));
+
+    // Cull generic primary (rare but guard it)
+    if (isGeneric(primaryGuess)) {
+      // try next best from merged pre-candidates or topic
+      const alt = mergedPre.find(x => !isGeneric(x)) || rawTopic;
+      console.log(`[11][HEUR][PRIMARY_REPLACE] "${primaryGuess}" -> "${alt}"`);
+      primaryGuess = titleCase(alt);
+    }
+
+    // Merge feature/action
+    let featureOrAction = cleanString(gptStrict?.featureOrAction || heuristicFeature || '');
+    // Light normalization for close up variant
+    if (featureOrAction.toLowerCase() === 'close up') featureOrAction = 'close-up';
+
+    // Type: trust GPT if valid; else guess
+    const validTypes = new Set(['landmark','animal','object','food','person','other']);
+    let type = (gptStrict?.type && validTypes.has(gptStrict.type.toLowerCase()))
+      ? gptStrict.type.toLowerCase()
+      : guessTypeFromText(primaryGuess);
+
+    // Alternates: GPT alternates + heuristics (proper nouns / quoted)
+    let alternates = Array.isArray(gptStrict?.alternates) ? gptStrict.alternates : [];
+    alternates = uniqueKeepOrder([...alternates, ...mergedPre.slice(1)]).filter(x => !isGeneric(x));
+
+    // Landmark-mode cull alternates containing animals/people
+    if (type === 'landmark' || landmarkMode) {
+      const before = alternates.length;
+      alternates = alternates.filter(x => !containsAnimalWord(x) && !containsPersonWord(x));
+      if (before !== alternates.length) {
+        console.log(`[11][ALT][CULL] Removed ${before - alternates.length} off-topic alternates in landmark mode`);
       }
     }
 
-    // Strong cull of generics/shorts/abstracts
-    merged = strongCull(merged);
+    // ---------- Canonical normalization via 10M ----------
+    const normalized10M = resolveCanonicalSubject({
+      primary: primaryGuess,
+      featureOrAction,
+      parent: primaryGuess, // parent collapses to canonical in 10M
+      alternates,
+      type,
+    });
 
-    // If still nothing, seed with topic and a landmark-ified guess if present in line
-    if (merged.length === 0) {
-      console.warn('[11][EMPTY] No solid subjects found after culls. Seeding with topic.');
-      if (lm) merged.push(lm);
-      merged.push(correctedTopic);
-    }
-
-    // Finalize exactly 4
-    const final4 = finalize4(merged, correctedTopic);
-
-    // Order normalization: Primary → Context → Fallback → General
-    // - Keep first as Primary, next as Context, then Fallback, then General
-    const labeled = {
-      primary: final4[0],
-      context: final4[1],
-      fallback: final4[2],
-      general: final4[3],
+    // Final strict object
+    const strictObj = {
+      primary: titleCase(normalized10M.canonical || primaryGuess),
+      featureOrAction: normalized10M.featureOrAction || '',
+      parent: titleCase(normalized10M.canonical || primaryGuess),
+      alternates: (normalized10M.alternates || []).map(titleCase).slice(0, 6),
+      type: normalized10M.type || type || 'other',
     };
 
-    console.log('[11][RESULT]', labeled);
-    return [labeled.primary, labeled.context, labeled.fallback, labeled.general];
+    console.log('[11][RESULT][STRICT]', strictObj);
+    return strictObj;
   } catch (err) {
     console.error('[11][FATAL]', err);
     const topic = cleanString(mainTopic || 'misc') || 'misc';
-    return finalize4([topic], topic);
+    const fallbackObj = {
+      primary: titleCase(topic),
+      featureOrAction: '',
+      parent: titleCase(topic),
+      alternates: [],
+      type: guessTypeFromText(topic),
+    };
+    console.log('[11][RESULT][STRICT][FALLBACK2]', fallbackObj);
+    return fallbackObj;
   }
+}
+
+/**
+ * Backward-compatible helper used by 5D (returns 4 strings).
+ * Internally uses STRICT to get primary/feature/alternates and expands to 4.
+ */
+async function extractVisualSubjects(line, mainTopic) {
+  const strict = await extractVisualSubjectStrict(line, mainTopic);
+  const arr4 = toFourStrings(strict, strict.alternates, cleanString(mainTopic || 'misc'));
+  console.log('[11][RESULT][ARRAY4]', arr4);
+  return arr4;
 }
 
 // ===========================================================
@@ -426,17 +501,17 @@ async function extractVisualSubjects(line, mainTopic) {
 // Usage: node section11-visual-subject-extractor.cjs "<line>" "<topic>"
 // ===========================================================
 if (require.main === module) {
-  const testLine = process.argv[2] || 'A line about the Great Wall of China and Edinburgh Castle.';
+  const testLine = process.argv[2] || 'Inside the Statue of Liberty’s crown, visitors peer through the windows.';
   const mainTopic = process.argv[3] || 'World Landmarks';
-  extractVisualSubjects(testLine, mainTopic)
-    .then(subjects => {
-      console.log('[11][CLI][OK] Extracted subjects:', subjects);
-      process.exit(0);
-    })
-    .catch(err => {
-      console.error('[11][CLI][ERR]', err);
-      process.exit(1);
-    });
+  (async () => {
+    const strict = await extractVisualSubjectStrict(testLine, mainTopic);
+    console.log('[11][CLI][STRICT]', strict);
+    const arr = await extractVisualSubjects(testLine, mainTopic);
+    console.log('[11][CLI][ARRAY4]', arr);
+  })().catch(err => {
+    console.error('[11][CLI][ERR]', err);
+    process.exit(1);
+  });
 }
 
-module.exports = { extractVisualSubjects };
+module.exports = { extractVisualSubjects, extractVisualSubjectStrict, LANDMARK_KEYWORDS, ANIMAL_TERMS, PERSON_TERMS };

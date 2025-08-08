@@ -1,15 +1,46 @@
 // ===========================================================
-// SECTION 10G: SCENE SCORING HELPER (Universal Candidate Matcher)
-// Scores candidate videos/images for best subject match, no matter source.
-// Bulletproof: penalizes generics, signs, logos, dupes, prefers video.
-// Adds: landmark strictness, provider weighting, category & angle preference,
-// multi-angle anti-repeat, Jaccard token overlap, proper-noun exact matching,
-// portrait bias for Shorts/Reels (when dims known).
-// Handles subject as string, object, or array. MAX LOGGING.
+// SECTION 10G: SCENE SCORING HELPER (Entity-Aware Candidate Matcher)
+// Scores candidate videos/images for best subject match, across sources.
+// Upgrades:
+//   - 10M Canonical integration (canonical name, synonyms, alternates)
+//   - Feature/Action bonus (e.g., "crown", "drinking milk")
+//   - Entity type penalties/bonuses (landmark/animal/object/food/person)
+//   - Strong exact-boundary matching over filename/title/desc/tags/url
+//   - Landmark strictness: block people/animals unless ceremonial context
+//   - Portrait bias retained (light) for Shorts/Reels when dims known
+//   - Provider trust weighting (R2 > Pexels > Pixabay > Unsplash)
+//   - Anti-dup/angle-repeat hard blocks
+//   - Jaccard token overlap fallback
+// Max logging; zero placeholders.
 // Used by Section 5D and all video/image helpers.
 // ===========================================================
 
 const path = require('path');
+
+// -----------------------------
+// 10M Canonical Subjects (soft require but expected present)
+// -----------------------------
+let resolveCanonicalSubject = null;
+let getEntityMetadata = null;
+try {
+  ({ resolveCanonicalSubject, getEntityMetadata } = require('./section10m-canonical-subjects.cjs'));
+  console.log('[10G][INIT] 10M Canonicals connected.');
+} catch (e) {
+  console.warn('[10G][INIT][WARN] 10M Canonicals not found. Falling back to legacy synonym-only scoring.');
+  // Minimal fallbacks to avoid crash (no enrich)
+  resolveCanonicalSubject = (s) => ({
+    canonical: (typeof s === 'string' ? s : (s?.primary || 'subject')).toLowerCase().trim(),
+    type: (s?.type || 'other'),
+    featureOrAction: (s?.featureOrAction || s?.feature || s?.action || '').toLowerCase().trim(),
+    parent: (s?.parent || '').toLowerCase().trim(),
+    alternates: (Array.isArray(s?.alternates) ? s.alternates : []).map(x => String(x || '').toLowerCase().trim()),
+    synonyms: [],
+    languageVariants: [],
+    features: [],
+    actions: [],
+  });
+  getEntityMetadata = () => null;
+}
 
 // -----------------------------
 // Constants & Lexicons
@@ -49,8 +80,7 @@ const PROVIDER_WEIGHTS = {
   unknown: 0,
 };
 
-// Synonyms & alias expansions. Keep short and safe.
-// NOTE: We also auto-generate landmark aliases from subject itself.
+// Legacy synonyms (kept; 10M adds more via canonical enrichment)
 const SYNONYMS = {
   gorilla: ['gorillas','primate','ape','apes','chimpanzee','monkey'],
   chimpanzee: ['chimp','chimps','ape','apes','primate','monkey'],
@@ -58,7 +88,6 @@ const SYNONYMS = {
   dog: ['dogs','puppy','puppies','canine'],
   cat: ['cats','kitten','kittens','feline'],
 
-  // Landmarks (basic expansions)
   'great wall of china': ['great wall','china wall','the great wall'],
   'edinburgh castle': ['edinburgh fortress','edinburgh castle scotland','castle rock edinburgh'],
   'giza pyramids': ['pyramids of giza','giza pyramid','great pyramids','egypt pyramids'],
@@ -69,6 +98,14 @@ const SYNONYMS = {
 
 // Portrait bias (light) if width/height known (Shorts/Reels/TikTok)
 const PORTRAIT_BONUS = 6; // gentle nudge, not dominant
+
+// Feature/Action bonus ranges
+const FEATURE_BONUS_INLINE = 12;   // feature present alongside canonical
+const FEATURE_BONUS_LOOSE  = 7;    // feature present without canonical boundary
+
+// Type penalty magnitudes
+const PENALTY_OFFTOPIC_PERSON = 28;   // animal/landmark subject but humans in candidate (non-ceremonial)
+const PENALTY_OFFTOPIC_ANIMAL = 26;   // landmark/object subject but animals in candidate
 
 // -----------------------------
 // Utility Helpers
@@ -102,7 +139,6 @@ function dedupeKeepOrder(arr) {
   return out;
 }
 
-// Generic checks (string/candidate)
 function isGenericString(s = '') {
   const L = lower(s);
   if (GENERIC_SUBJECTS.some(g => L.includes(g))) return true;
@@ -146,10 +182,10 @@ function hasPersonText(candidate) {
   return containsAny(PERSON_TERMS, text);
 }
 
-function subjectToStrings(subject) {
+function subjectToStringsLegacy(subject) {
   if (!subject) return [];
   if (typeof subject === 'string') return [subject];
-  if (Array.isArray(subject)) return subject.flatMap(subjectToStrings);
+  if (Array.isArray(subject)) return subject.flatMap(subjectToStringsLegacy);
   const out = [];
   if (subject.main) out.push(subject.main);
   if (subject.secondary) out.push(subject.secondary);
@@ -158,10 +194,10 @@ function subjectToStrings(subject) {
   return out.filter(Boolean).map(String);
 }
 
-function subjectToTokens(subject) {
+function subjectToTokensLegacy(subject) {
   if (!subject) return [];
   if (typeof subject === 'string') return majorWords(subject);
-  if (Array.isArray(subject)) return subject.flatMap(subjectToTokens);
+  if (Array.isArray(subject)) return subject.flatMap(subjectToTokensLegacy);
   let tokens = [];
   if (subject.main) tokens.push(...majorWords(subject.main));
   if (subject.secondary) tokens.push(...majorWords(subject.secondary));
@@ -170,7 +206,7 @@ function subjectToTokens(subject) {
   return tokens.filter(Boolean);
 }
 
-function expandSynonyms(strings) {
+function expandSynonymsLegacy(strings) {
   const out = [];
   for (const s of strings) {
     out.push(s);
@@ -181,25 +217,21 @@ function expandSynonyms(strings) {
   return dedupeKeepOrder(out);
 }
 
-// Create alias forms for phrases (drop stopwords, short form, etc.)
 function aliasPhrases(strings) {
   const out = new Set();
   for (const s of strings) {
     const L = lower(s);
     out.add(s);
-    // Short form: remove stopwords
     const mw = majorWords(L).join(' ');
     if (mw && mw !== L) out.add(mw);
-    // Hyphen/underscore free
     out.add(L.replace(/[-_]+/g, ' '));
   }
   return Array.from(out);
 }
 
-// Identify if the subject is a "landmark-mode" target
-function isLandmarkSubject(subject) {
-  const strings = subjectToStrings(subject);
-  const tokens = subjectToTokens(subject);
+function isLandmarkSubjectLegacy(subject) {
+  const strings = subjectToStringsLegacy(subject);
+  const tokens = subjectToTokensLegacy(subject);
   if (strings.some(s => containsAny(LANDMARK_KEYWORDS, s))) return true;
   if (tokens.some(t => LANDMARK_KEYWORDS.includes(t))) return true;
   return false;
@@ -256,28 +288,84 @@ function isPortraitLike(candidate) {
   return h > w; // portrait-ish
 }
 
-// -----------------------------
+// ----------------------------------------------------------
+// 10M-aware subject normalization for scoring
+// ----------------------------------------------------------
+function normalizeSubjectForScoring(subject) {
+  // Accept either: string, legacy object, or Section 11 strict object
+  // We run everything through 10M for a canonical, and then add legacy extras.
+  let resolved = null;
+  try {
+    if (typeof subject === 'string') {
+      resolved = resolveCanonicalSubject({ primary: subject });
+    } else if (Array.isArray(subject)) {
+      // Take first as primary, pass rest as alternates
+      resolved = resolveCanonicalSubject({ primary: subject[0], alternates: subject.slice(1) });
+    } else if (subject && typeof subject === 'object') {
+      resolved = resolveCanonicalSubject(subject);
+    } else {
+      resolved = resolveCanonicalSubject('subject');
+    }
+  } catch (e) {
+    // Last-ditch
+    resolved = resolveCanonicalSubject(subject || 'subject');
+  }
+
+  const canon = lower(resolved.canonical || '');
+  const type = lower(resolved.type || 'other');
+  const feature = lower(resolved.featureOrAction || '');
+  const alts = Array.isArray(resolved.alternates) ? resolved.alternates.map(lower) : [];
+  const syns10m = Array.isArray(resolved.synonyms) ? resolved.synonyms.map(lower) : [];
+  const langs10m = Array.isArray(resolved.languageVariants) ? resolved.languageVariants.map(lower) : [];
+  const features10m = Array.isArray(resolved.features) ? resolved.features.map(lower) : [];
+  const actions10m = Array.isArray(resolved.actions) ? resolved.actions.map(lower) : [];
+
+  // Legacy expansions for robustness
+  const legacyStrings = subjectToStringsLegacy(subject);
+  const legacyTokens = subjectToTokensLegacy(subject);
+  const legacyExpanded = expandSynonymsLegacy(legacyStrings);
+
+  // Canonical strings we will try as "exact boundary" phrases
+  const canonicalStrings = dedupeKeepOrder([
+    canon,
+    ...alts,
+    ...syns10m,
+    ...langs10m,
+    ...legacyExpanded
+  ]).filter(Boolean);
+
+  // Subject tokens for overlap fallback
+  const subjectTokens = dedupeKeepOrder([
+    ...majorWords(canon),
+    ...legacyTokens
+  ]);
+
+  // Feature/action tokens
+  const featureTokens = feature ? majorWords(feature) : [];
+
+  return { canon, type, feature, featureTokens, canonicalStrings, subjectTokens };
+}
+
+// ----------------------------------------------------------
 // Core Scoring
-// -----------------------------
+// ----------------------------------------------------------
 
 /**
  * Bulletproof scorer for scene candidates.
- * - Blocks generic/sign/logo/background if real match exists.
- * - Penalizes duplicates and previous angle/variant repeats.
- * - Prefers video over photo (if specified on candidate).
- * - Uses proper-noun exact boundary matching, synonym/alias expansion,
- *   Jaccard token overlap for robust partials.
- * - Landmark strictness: if subject is a landmark, auto-reject animal/person clips (unless guard/ceremony context).
- * - Portrait bias nudge when dims known.
- * - Hard reject floor handled by callers (e.g., 5D).
+ * - Exact boundary matching on canonical/synonyms/language variants
+ * - Feature/Action bonuses when present
+ * - Entity-type penalties to suppress off-topic content
+ * - Provider/portrait/video bonuses
+ * - Anti-dup/angle-repeat hard blocks
+ * - Jaccard token overlap fallback
  *
  * @param {object} candidate - { filename, tags, title, description, filePath, provider, isVideo, url, width, height }
  * @param {string|object|array} subject
  * @param {string[]} usedFiles - Array of filePaths/filenames used so far in this job
- * @param {boolean} realMatchExists - Are there any real (non-generic) candidates in this batch? (optional signal)
+ * @param {boolean} realMatchExists - legacy signal (safe to pass true)
  * @returns {number} score (can be negative); typical 0–200
  */
-function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists = false) {
+function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists = true) {
   try {
     if (!candidate || !subject) {
       console.log('[10G][SCORE][ERR] Missing candidate or subject!', { candidate, subject });
@@ -312,29 +400,14 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
       return -3500;
     }
 
-    // Subject normalization
-    const subjectStringsRaw = subjectToStrings(subject);
-    const subjectTokens = subjectToTokens(subject);
-    const rawSubj = typeof subject === 'string'
-      ? subject
-      : (subject.main || subject.secondary || subjectStringsRaw[0] || '');
+    // 10M-normalized subject
+    const S = normalizeSubjectForScoring(subject);
+    const landmarkMode = S.type === 'landmark' || isLandmarkSubjectLegacy(S.canon);
+    const animalMode   = S.type === 'animal';
+    const objectMode   = S.type === 'object' || S.type === 'symbol';
+    const foodMode     = S.type === 'food';
 
-    // Expand aliases/synonyms for strong exact/boundary matches
-    let subjectStrings = aliasPhrases(expandSynonyms(subjectStringsRaw));
-
-    // Landmark strictness & off-topic culls
-    const landmarkMode = isLandmarkSubject(subject) || subjectStrings.some(s => containsAny(LANDMARK_KEYWORDS, s));
-    if (landmarkMode && (hasAnimalText(candidate) || hasPersonText(candidate))) {
-      // Allow people only if title/desc mentions guard/soldier/ceremony with landmark context
-      const allowedHumanContext = /\b(guard|guards|soldier|soldiers|ceremony|changing of the guard)\b/.test(`${title} ${desc}`);
-      const landmarkContextPresent = subjectStrings.some(s => containsPhraseBoundary(`${title} ${desc} ${fname}`, s));
-      if (!(allowedHumanContext && landmarkContextPresent)) {
-        console.log(`[10G][SCORE][BLOCKED][LANDMARK_MODE_OFFTOPIC] ${fname}`);
-        return -3000;
-      }
-    }
-
-    // Generic penalty (so true matches dominate)
+    // Generic penalty: strong if any real match exists (callers usually filter)
     const generic = isGenericCandidate(candidate);
     const baseGenericPenalty = generic ? (realMatchExists ? -1200 : -160) : 0;
 
@@ -346,96 +419,144 @@ function scoreSceneCandidate(candidate, subject, usedFiles = [], realMatchExists
     const hayUrl = url;
     const hayAll = `${hayTitle} ${hayDesc} ${hayFile} ${hayTags} ${hayUrl}`.trim();
 
-    // -----------------------------
-    // 1) PROPER-NOUN / EXACT BOUNDARY MATCH
-    // -----------------------------
+    // ------------------------------------------------------
+    // Entity-Type Off-topic Culls (pre-score penalties)
+    // ------------------------------------------------------
+    if (landmarkMode) {
+      const animalText  = hasAnimalText(candidate);
+      const personText  = hasPersonText(candidate);
+      const allowedHumans = /\b(guard|guards|soldier|soldiers|ceremony|changing of the guard)\b/.test(`${title} ${desc}`);
+      const hasLandmarkWords = containsAny(LANDMARK_KEYWORDS, `${title} ${desc} ${fname} ${hayTags}`);
+      if ((animalText || personText) && !(allowedHumans && hasLandmarkWords)) {
+        console.log(`[10G][SCORE][BLOCKED][LANDMARK_OFFTOPIC] ${fname}`);
+        return -3000;
+      }
+    }
+    if (animalMode) {
+      if (hasPersonText(candidate)) {
+        // Pet-owner selfies, fashion shots, etc. Penalize heavily.
+        console.log(`[10G][SCORE][PENALTY][ANIMAL_HAS_PEOPLE] ${fname} -${PENALTY_OFFTOPIC_PERSON}`);
+      }
+    }
+    if (objectMode || foodMode) {
+      // If unrelated people/animals dominate, nudge down
+      if (hasPersonText(candidate)) {
+        console.log(`[10G][SCORE][PENALTY][OBJECT_FOOD_HAS_PEOPLE] ${fname} -${Math.floor(PENALTY_OFFTOPIC_PERSON * 0.6)}`);
+      }
+      if (hasAnimalText(candidate) && !animalMode) {
+        console.log(`[10G][SCORE][PENALTY][OBJECT_FOOD_HAS_ANIMALS] ${fname} -${Math.floor(PENALTY_OFFTOPIC_ANIMAL * 0.6)}`);
+      }
+    }
+
+    // ------------------------------------------------------
+    // 1) STRICT BOUNDARY: Canonical / Synonym / Language Variant
+    // ------------------------------------------------------
     let strictBest = 0;
-    for (const subjStr of subjectStrings) {
+    for (const subjStr of S.canonicalStrings) {
       if (!subjStr) continue;
-      if (
+
+      const boundaryHit =
         containsPhraseBoundary(hayAll, subjStr) ||
-        tags.includes(lower(subjStr))
-      ) {
-        // Strong hit
-        let score = 150; // base for exact landmark/phrase hit
+        tags.includes(lower(subjStr));
+
+      if (boundaryHit) {
+        let score = 160; // stronger than legacy 150 — canonical-first world
         if (isVid) score += 20;
-        score += provWeight; // provider trust bonus
+        score += provWeight;
         if (candidateCategory && containsPhraseBoundary(candidateCategory, subjStr)) score += 8;
         if (isPortraitLike(candidate)) score += PORTRAIT_BONUS;
+
+        // Feature/Action inline bonus if also present
+        if (S.featureTokens.length > 0) {
+          const featureHit = S.featureTokens.some(ft =>
+            containsPhraseBoundary(hayAll, ft) || tags.includes(ft)
+          );
+          if (featureHit) {
+            score += FEATURE_BONUS_INLINE;
+            console.log(`[10G][SCORE][FEATURE_INLINE][+"${S.feature}"] +${FEATURE_BONUS_INLINE} [${fname}]`);
+          }
+        }
+
+        // Entity-type micro bonuses (subject-fit nudges)
+        if (landmarkMode) score += 6;
+        if (animalMode)   score += 6;
+        if (foodMode)     score += 4;
+
         score += baseGenericPenalty;
         console.log(`[10G][SCORE][STRICT_BOUNDARY]["${subjStr}"] = ${score} [${fname}]`);
         strictBest = Math.max(strictBest, score);
-      } else {
-        // Synonym boundary
-        const syns = SYNONYMS[lower(subjStr)] || [];
-        for (const syn of syns) {
-          if (containsPhraseBoundary(hayAll, syn) || tags.includes(lower(syn))) {
-            let s = 132;
-            if (isVid) s += 16;
-            s += provWeight;
-            if (isPortraitLike(candidate)) s += PORTRAIT_BONUS;
-            s += baseGenericPenalty;
-            console.log(`[10G][SCORE][STRICT_SYNONYM]["${subjStr}"→"${syn}"] = ${s} [${fname}]`);
-            strictBest = Math.max(strictBest, s);
-            break;
-          }
-        }
       }
     }
     if (strictBest > 0) return strictBest;
 
-    // -----------------------------
-    // 2) LOOSE TOKEN / JACCARD OVERLAP
-    // -----------------------------
+    // ------------------------------------------------------
+    // 2) FEATURE/ACTION LOOSE BONUS (without canonical boundary)
+    // ------------------------------------------------------
+    let featureLooseBonus = 0;
+    if (S.featureTokens.length > 0) {
+      const featureLooseHit = S.featureTokens.some(ft =>
+        hayAll.includes(ft) || tags.some(t => t.includes(ft))
+      );
+      if (featureLooseHit) {
+        featureLooseBonus += FEATURE_BONUS_LOOSE;
+        console.log(`[10G][SCORE][FEATURE_LOOSE][+"${S.feature}"] +${FEATURE_BONUS_LOOSE} [${fname}]`);
+      }
+    }
+
+    // ------------------------------------------------------
+    // 3) LOOSE TOKEN / JACCARD OVERLAP
+    // ------------------------------------------------------
     let tokenHits = 0;
     let looseScore = 0;
-    for (const w of subjectTokens) {
+    for (const w of S.subjectTokens) {
       if (!w) continue;
-      if (
-        hayAll.includes(w) ||
-        tags.some(t => t.includes(w))
-      ) {
+      if (hayAll.includes(w) || tags.some(t => t.includes(w))) {
         tokenHits++;
         looseScore += 11;
       }
     }
-    // Jaccard boost with candidate title or filename tokens
     const candTokens = majorWords(hayTitle || hayFile);
-    const jac = jaccardScore(subjectTokens, candTokens);
+    const jac = jaccardScore(S.subjectTokens, candTokens);
     if (jac > 0) looseScore += Math.round(jac * 30); // up to +30
 
-    if (tokenHits > 0) {
-      if (tokenHits >= subjectTokens.length && subjectTokens.length > 0) looseScore += 18; // full cover bonus
+    if (tokenHits > 0 || featureLooseBonus > 0) {
+      if (tokenHits >= S.subjectTokens.length && S.subjectTokens.length > 0) looseScore += 18; // full cover bonus
       if (isVid) looseScore += 10;
       if (isPortraitLike(candidate)) looseScore += PORTRAIT_BONUS;
       looseScore += provWeight;
       looseScore += baseGenericPenalty;
-      console.log(`[10G][SCORE][LOOSE][${rawSubj}] tokens=${tokenHits} jac=${jac.toFixed(3)} => ${looseScore} [${fname}]`);
+      looseScore += featureLooseBonus;
+
+      // Entity-fit nudges
+      if (landmarkMode) looseScore += 4;
+      if (animalMode)   looseScore += 4;
+      if (foodMode)     looseScore += 2;
+
+      console.log(`[10G][SCORE][LOOSE][canon="${S.canon}"] tokens=${tokenHits} jac=${jac.toFixed(3)} feat+${featureLooseBonus} => ${looseScore} [${fname}]`);
       return looseScore;
     }
 
-    // -----------------------------
-    // 3) THEMATIC / CATEGORY LAST RESORT
-    // -----------------------------
+    // ------------------------------------------------------
+    // 4) THEMATIC / CATEGORY LAST RESORT
+    // ------------------------------------------------------
     if (candidateCategory) {
-      // If subject hint matches category (very weak)
-      const subjCatHint = subjectStrings.some(s => candidateCategory === getCategoryFromPathish(s));
+      const subjCatHint = S.canonicalStrings.some(s => candidateCategory === getCategoryFromPathish(s));
       if (subjCatHint) {
         let catScore = 38 + provWeight + (isVid ? 2 : 0) + baseGenericPenalty;
         if (isPortraitLike(candidate)) catScore += Math.floor(PORTRAIT_BONUS / 2);
-        console.log(`[10G][SCORE][CATEGORY_HINT][${rawSubj}] = ${catScore} [${fname}]`);
+        console.log(`[10G][SCORE][CATEGORY_HINT]["${S.canon}"] = ${catScore} [${fname}]`);
         return catScore;
       }
     }
 
-    // -----------------------------
-    // 4) DEFAULT / GENERIC
-    // -----------------------------
+    // ------------------------------------------------------
+    // 5) DEFAULT / GENERIC
+    // ------------------------------------------------------
     let genericScore = generic ? (realMatchExists ? -1200 : -160) : 8;
     genericScore += provWeight;
     if (isVid) genericScore += 2;
     if (isPortraitLike(candidate)) genericScore += Math.floor(PORTRAIT_BONUS / 2);
-    console.log(`[10G][SCORE][DEFAULT][${rawSubj}] = ${genericScore} [${fname}]`);
+    console.log(`[10G][SCORE][DEFAULT]["${S.canon}"] = ${genericScore} [${fname}]`);
     return genericScore;
   } catch (err) {
     console.error('[10G][SCORE][FATAL]', err);
@@ -459,10 +580,11 @@ module.exports = {
     containsPhraseBoundary,
     jaccardScore,
     isGenericCandidate,
-    isLandmarkSubject,
+    isLandmarkSubject: isLandmarkSubjectLegacy,
     providerWeight,
     getAngleOrVersion,
     getCategoryFromPathish,
     isPortraitLike,
+    normalizeSubjectForScoring,
   },
 };
