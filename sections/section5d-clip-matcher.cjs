@@ -57,8 +57,48 @@ try {
 
 // -----------------------------
 // 10Z: simple three-option generator (required for this flow)
+// Be flexible about filename & export names to avoid deploy breakage.
 // -----------------------------
-const { generateSceneChoices } = require('./section10z-choice-directives.cjs');
+let generateSceneChoices = null;
+try {
+  // preferred filename used in your repo
+  const z = require('./section10z-three-option-helper.cjs');
+  generateSceneChoices = z.generateSceneChoices || z.generateThreeOptions || z.generateOptions || z.generate;
+  if (generateSceneChoices) {
+    console.log('[5D][INIT] 10Z helper loaded from section10z-three-option-helper.cjs');
+  } else {
+    throw new Error('Exports missing on section10z-three-option-helper.cjs');
+  }
+} catch (e1) {
+  try {
+    // alternate name some branches used earlier
+    const z2 = require('./section10z-choice-directives.cjs');
+    generateSceneChoices = z2.generateSceneChoices || z2.generateThreeOptions || z2.generateOptions || z2.generate;
+    if (generateSceneChoices) {
+      console.log('[5D][INIT] 10Z helper loaded from section10z-choice-directives.cjs');
+    } else {
+      throw new Error('Exports missing on section10z-choice-directives.cjs');
+    }
+  } catch (e2) {
+    console.error('[5D][INIT][FATAL] 10Z helper not found in either filename.');
+  }
+}
+
+// -----------------------------
+// Optional Unsplash (work with either file name)
+// -----------------------------
+let unsplashModule = null;
+try {
+  unsplashModule = require('./section10f-unsplash-image-helper.cjs');
+  console.log('[5D][INIT] 10F Unsplash (image-helper) loaded.');
+} catch {
+  try {
+    unsplashModule = require('./section10f-unsplash-helper.cjs');
+    console.log('[5D][INIT] 10F Unsplash (helper) loaded.');
+  } catch {
+    console.warn('[5D][INIT][WARN] Unsplash helper not found. Proceeding without it.');
+  }
+}
 
 // -----------------------------
 // Scoring (10G) and landmark guards
@@ -365,10 +405,9 @@ async function gatherImageCandidates(term, workDir, sceneIdx, jobId, usedClips, 
 
   // Unsplash photo (optional)
   try {
-    const unsplash = require('./section10f-unsplash-image-helper.cjs');
-    if (unsplash?.findUnsplashImageForScene) {
+    if (unsplashModule?.findUnsplashImageForScene) {
       const res = await withTimeout(
-        unsplash.findUnsplashImageForScene(term, workDir, sceneIdx, jobId, usedClips, {}),
+        unsplashModule.findUnsplashImageForScene(term, workDir, sceneIdx, jobId, usedClips, {}),
         PROVIDER_TIMEOUT_MS,
         'UNSPLASH'
       );
@@ -422,16 +461,20 @@ async function findClipForScene({
   const line = String(allSceneTexts?.[sceneIdx] || subject || '').trim();
   let choices = [];
   try {
-    const z = await generateSceneChoices({
-      sceneLine: line,
-      mainTopic: mainTopic || '',
-      maxChoices: MAX_CHOICE_TERMS,
-      jobId,
-    });
-    choices = (Array.isArray(z) ? z : [])
-      .map(s => String(s || '').trim())
-      .filter(Boolean)
-      .slice(0, MAX_CHOICE_TERMS);
+    if (typeof generateSceneChoices === 'function') {
+      const z = await generateSceneChoices({
+        sceneLine: line,
+        mainTopic: mainTopic || '',
+        maxChoices: MAX_CHOICE_TERMS,
+        jobId,
+      });
+      choices = (Array.isArray(z) ? z : [])
+        .map(s => String(s || '').trim())
+        .filter(Boolean)
+        .slice(0, MAX_CHOICE_TERMS);
+    } else {
+      console.warn('[5D][10Z][WARN] generateSceneChoices not available; falling back to raw line.');
+    }
   } catch (e) {
     console.error('[5D][10Z][ERR]', e?.message || e);
   }
