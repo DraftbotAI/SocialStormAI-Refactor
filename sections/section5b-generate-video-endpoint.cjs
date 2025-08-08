@@ -955,3 +955,4 @@ async function uploadFinalToVideosBucket(finalPath, finalName, jobId, categoryFo
   console.log('[5B][R2][UPLOAD][OK] Final uploaded:', url);
   return url;
 }
+
