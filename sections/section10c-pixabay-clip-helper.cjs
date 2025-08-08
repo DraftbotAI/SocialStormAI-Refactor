@@ -4,218 +4,385 @@
 // MAX LOGGING EVERY STEP, Modular System Compatible
 // Bulletproof: unique files, dedupe, valid output, crash-proof
 // Scoring with universal strict/fuzzy/partial, no skips
-// 2024-08: Video-first, photo fallback, anti-generic, max debug
+// 2025-08: Video-first, vertical-preferred, photo fallback,
+//          local downloads for both (so 5D can assertFileExists),
+//          strong anti-dupe across URL + local path, timeouts,
+//          and robust logging.
+// Exports:
+//   - findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
+//   - findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips)
 // ===========================================================
 
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const scoreSceneCandidate = require('./section10g-scene-scoring-helper.cjs').scoreSceneCandidate;
+const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
-console.log('[10C][INIT] Pixabay clip helper loaded.');
+console.log('[10C][INIT] Pixabay clip helper loaded (video-first, vertical preferred, max logs).');
 
 // === ENV KEYS ===
-const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
+const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY || '';
 if (!PIXABAY_API_KEY) {
   console.error('[10C][FATAL] Missing PIXABAY_API_KEY in environment!');
 }
 
+// === CONSTANTS / PREFS ===
+const DOWNLOAD_MIN_BYTES = 2048;
+const AXIOS_TIMEOUT_MS = 20000;
+const USER_AGENT = 'SocialStormAI/10C (Pixabay Helper)';
+
+// Prefer vertical if possible (Shorts/Reels/TikTok)
+const PREFER_VERTICAL = (process.env.PIXABAY_PREFER_VERTICAL || '1') === '1';
+// Score bump for vertical-ish clips
+const VERTICAL_BONUS = 8;
+
 // === FILE VALIDATION ===
-function isValidClip(filePath, jobId) {
+function isValidLocal(filePath) {
   try {
-    if (!fs.existsSync(filePath)) {
-      console.warn(`[10C][DL][${jobId}] File does not exist: ${filePath}`);
-      return false;
-    }
-    const size = fs.statSync(filePath).size;
-    if (size < 2048) {
-      console.warn(`[10C][DL][${jobId}] File too small or broken: ${filePath} (${size} bytes)`);
-      return false;
-    }
-    return true;
-  } catch (err) {
-    console.error(`[10C][DL][${jobId}] File validation error:`, err);
+    if (!filePath) return false;
+    if (!fs.existsSync(filePath)) return false;
+    const sz = fs.statSync(filePath).size;
+    return sz >= DOWNLOAD_MIN_BYTES;
+  } catch {
     return false;
   }
 }
 
+// === ANTI-DUPE ===
+function looksUsedPixabay(needle, usedClips = []) {
+  if (!needle) return false;
+  const base = path.basename(String(needle));
+  return usedClips.some(u => {
+    if (!u) return false;
+    const ub = path.basename(String(u));
+    return u === needle || ub === base || String(needle).endsWith(String(u)) || String(u).endsWith(String(needle));
+  });
+}
+
+function markUsed(usedClips, ...items) {
+  items.filter(Boolean).forEach(i => {
+    if (!looksUsedPixabay(i, usedClips)) usedClips.push(i);
+  });
+}
+
 // === DOWNLOAD UTILITIES ===
-async function downloadPixabayVideoToLocal(url, outPath, jobId) {
+async function streamDownload(url, outPath, jobId, headers = {}) {
   try {
-    console.log(`[10C][DL][${jobId}] Downloading Pixabay video: ${url} -> ${outPath}`);
-    const response = await axios.get(url, { responseType: 'stream' });
-    await new Promise((resolve, reject) => {
-      const stream = response.data.pipe(fs.createWriteStream(outPath));
-      stream.on('finish', () => {
-        console.log(`[10C][DL][${jobId}] Video saved to: ${outPath}`);
-        resolve();
-      });
-      stream.on('error', (err) => {
-        console.error('[10C][DL][ERR]', err);
-        reject(err);
-      });
+    const response = await axios({
+      url,
+      method: 'GET',
+      responseType: 'stream',
+      timeout: AXIOS_TIMEOUT_MS,
+      headers: { 'User-Agent': USER_AGENT, ...headers }
     });
-    if (!isValidClip(outPath, jobId)) {
-      console.warn(`[10C][DL][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+
+    await new Promise((resolve, reject) => {
+      const ws = fs.createWriteStream(outPath);
+      response.data.pipe(ws);
+      response.data.on('error', reject);
+      ws.on('finish', resolve);
+      ws.on('error', reject);
+    });
+
+    if (!isValidLocal(outPath)) {
+      console.warn(`[10C][DL][${jobId}] Downloaded file invalid/broken: ${outPath}`);
       return null;
     }
+    console.log(`[10C][DL][${jobId}] Saved: ${outPath}`);
     return outPath;
   } catch (err) {
-    console.error('[10C][DL][ERR]', err);
+    if (err?.response?.status) {
+      console.error(`[10C][DL][${jobId}][HTTP ${err.response.status}] ${url}`);
+    } else {
+      console.error(`[10C][DL][${jobId}][ERR]`, err?.message || err);
+    }
     return null;
   }
 }
 
-// === ANTI-DUPE ===
-function isDupePixabay(url, usedClips = []) {
-  if (!url) return false;
-  const base = path.basename(url);
-  return usedClips.some(u =>
-    typeof u === 'string' && (
-      u === url ||
-      u === base ||
-      url.endsWith(u) ||
-      base === u
-    )
-  );
+// Force .mp4 extension for videos (Pixabay links may not clearly end with .mp4)
+function ensureMp4(outPath) {
+  const ext = path.extname(outPath).toLowerCase();
+  if (ext === '.mp4') return outPath;
+  return `${outPath}.mp4`;
 }
 
-// === SMART SCORING ===
-function scorePixabayVideo(hit, vid, subject, usedClips = [], scene = null) {
-  if (typeof scoreSceneCandidate === 'function') {
-    const candidate = {
-      type: 'video',
-      source: 'pixabay',
-      file: vid.url,
-      filename: path.basename(vid.url),
-      subject,
-      pixabayHit: hit,
-      pixabayVid: vid,
-      scene,
-      isVideo: true
-    };
-    return scoreSceneCandidate(candidate, scene || subject, usedClips);
+// === SUBJECT NORMALIZATION ===
+function subjectString(subject) {
+  if (typeof subject === 'string') return subject;
+  if (Array.isArray(subject)) return String(subject[0] || '');
+  if (subject && typeof subject === 'object') return String(subject.subject || subject.main || '');
+  return '';
+}
+
+// === PIXABAY SEARCH HELPERS ===
+function buildVideoCandidatesFromHit(hit, subject, usedClips, scene) {
+  // hit.videos has keys like large, medium, small, tiny; each has url,width,height,size
+  const variants = Object.values(hit?.videos || {}).filter(Boolean);
+  return variants
+    .filter(v => v.url && !looksUsedPixabay(v.url, usedClips))
+    .map(v => {
+      const isVertical = (v.height || 0) > (v.width || 0);
+      const base = {
+        type: 'video',
+        source: 'pixabay',
+        file: v.url,
+        filename: path.basename(v.url),
+        subject,
+        pixabayHit: hit,
+        pixabayVid: v,
+        scene,
+        isVideo: true,
+        width: v.width || null,
+        height: v.height || null,
+        duration: hit?.duration || null, // sometimes present for video API
+      };
+      let score = 0;
+      try {
+        score = scoreSceneCandidate(base, scene || subject, usedClips, /*realVideoExists=*/true);
+        if (isVertical && PREFER_VERTICAL) score += VERTICAL_BONUS;
+      } catch (e) {
+        // If scoring helper fails for some reason, keep a sane baseline
+        score = (isVertical ? 55 : 45);
+      }
+      return { ...base, score, _isVertical: isVertical };
+    });
+}
+
+function buildPhotoCandidate(hit, subject, usedClips) {
+  const url =
+    hit?.largeImageURL ||
+    hit?.webformatURL ||
+    hit?.previewURL ||
+    null;
+
+  if (!url || looksUsedPixabay(url, usedClips)) return null;
+
+  const base = {
+    type: 'photo',
+    source: 'pixabay',
+    file: url,
+    filename: path.basename(url),
+    subject,
+    hit,
+    isVideo: false,
+    width: hit?.imageWidth || null,
+    height: hit?.imageHeight || null
+  };
+
+  let score = 0;
+  try {
+    score = scoreSceneCandidate(base, subject, usedClips, /*realVideoExists=*/false);
+    // Very rough portrait preference for photos (if metadata exists)
+    if (PREFER_VERTICAL && base.height && base.width && base.height > base.width) {
+      score += Math.floor(VERTICAL_BONUS / 2);
+    }
+  } catch {
+    score = 35; // fallback minimal score
   }
-  // Fallback: random score, never recommended
-  return Math.random() * 100 - (isDupePixabay(vid.url, usedClips) ? 100 : 0);
+
+  return { ...base, score };
 }
 
-function scorePixabayPhoto(hit, subject, usedClips = []) {
-  if (typeof scoreSceneCandidate === 'function') {
-    const candidate = {
-      type: 'photo',
-      source: 'pixabay',
-      file: hit.largeImageURL,
-      filename: path.basename(hit.largeImageURL),
-      subject,
-      hit,
-      isVideo: false
-    };
-    return scoreSceneCandidate(candidate, subject, usedClips);
-  }
-  return Math.random() * 100 - (isDupePixabay(hit.largeImageURL, usedClips) ? 80 : 0);
-}
-
-// === MAIN VIDEO FINDER ===
+// ===========================================================
+// MAIN VIDEO FINDER
+// ===========================================================
 async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
-  // Accepts string/object/array, auto-normalizes
-  let logSubject = (typeof subject === 'object' && subject.subject) ? subject.subject : subject;
-  console.log(`[10C][PIXABAY][${jobId}] findPixabayClipForScene | subject="${logSubject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
+  const q = subjectString(subject);
+  console.log(`[10C][PIXABAY][${jobId}] findPixabayClipForScene | subject="${q}" | sceneIdx=${sceneIdx}`);
 
   if (!PIXABAY_API_KEY) {
     console.error('[10C][PIXABAY][ERR] No Pixabay API key set!');
     return null;
   }
-  try {
-    let queryStr = (typeof subject === 'object' && subject.subject) ? subject.subject : (Array.isArray(subject) ? subject[0] : subject);
-    const query = encodeURIComponent(String(queryStr || '').replace(/[^\w\s]/gi, '').trim()).slice(0, 100);
-    const url = `https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${query}&per_page=15`;
-    console.log(`[10C][PIXABAY][${jobId}] Searching: ${url}`);
-    const resp = await axios.get(url);
-
-    if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
-      let scored = [];
-      for (const hit of resp.data.hits) {
-        const videoCandidates = Object.values(hit.videos || {});
-        for (const vid of videoCandidates) {
-          if (isDupePixabay(vid.url, usedClips)) {
-            console.log(`[10C][PIXABAY][${jobId}][DUPE] Skipping duplicate file: ${vid.url}`);
-            continue;
-          }
-          const score = scorePixabayVideo(hit, vid, subject, usedClips, subject);
-          scored.push({ hit, vid, score });
-        }
-      }
-      scored.sort((a, b) => b.score - a.score);
-      scored.slice(0, 7).forEach((s, i) =>
-        console.log(`[10C][PIXABAY][${jobId}][CANDIDATE][${i + 1}] ${s.vid.url} | score=${s.score} | size=${s.vid.width}x${s.vid.height}`)
-      );
-
-      let best = scored.find(s => s.score > 15) || scored[0];
-      if (!best && scored.length > 0) best = scored[0];
-      if (best) {
-        console.log(`[10C][PIXABAY][${jobId}][PICKED] Selected: ${best.vid.url} | score=${best.score}`);
-        const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
-        const resultPath = await downloadPixabayVideoToLocal(best.vid.url, outPath, jobId);
-        if (resultPath) return resultPath;
-      } else {
-        console.warn(`[10C][PIXABAY][${jobId}] No Pixabay videos matched subject, but candidates were returned.`);
-      }
-    } else {
-      console.log(`[10C][PIXABAY][${jobId}] No Pixabay video results found for "${logSubject}"`);
-    }
+  if (!q || q.length < 2) {
+    console.warn(`[10C][PIXABAY][${jobId}] Empty/short subject; skipping.`);
     return null;
+  }
+
+  try {
+    const query = encodeURIComponent(q.replace(/[^\w\s]/g, ' ').trim()).slice(0, 100);
+    const url = `https://pixabay.com/api/videos/?key=${PIXABAY_API_KEY}&q=${query}&per_page=20&order=popular`;
+    console.log(`[10C][PIXABAY][${jobId}] GET ${url}`);
+
+    const resp = await axios.get(url, {
+      timeout: AXIOS_TIMEOUT_MS,
+      headers: { 'User-Agent': USER_AGENT }
+    });
+
+    const hits = resp?.data?.hits || [];
+    if (!hits.length) {
+      console.log(`[10C][PIXABAY][${jobId}] No video results for "${q}"`);
+      return null;
+    }
+
+    // Build + score all variants from all hits
+    let all = [];
+    for (const hit of hits) {
+      const cs = buildVideoCandidatesFromHit(hit, q, usedClips, subject);
+      all.push(...cs);
+    }
+
+    if (!all.length) {
+      console.log(`[10C][PIXABAY][${jobId}] No viable video variants after filtering/dupe check.`);
+      return null;
+    }
+
+    // Sort by score desc; tie-breaker: vertical then larger area
+    all.sort((a, b) => {
+      const ds = b.score - a.score;
+      if (ds !== 0) return ds;
+      if (PREFER_VERTICAL && (b._isVertical - a._isVertical) !== 0) return (b._isVertical ? 1 : 0) - (a._isVertical ? 1 : 0);
+      const areaA = (a.width || 0) * (a.height || 0);
+      const areaB = (b.width || 0) * (b.height || 0);
+      return areaB - areaA;
+    });
+
+    // Log top candidates
+    all.slice(0, 8).forEach((c, i) => {
+      console.log(`[10C][PIXABAY][${jobId}][CANDIDATE][${i + 1}] ${c.file} | score=${c.score} | ${c.width}x${c.height} | vertical=${c._isVertical ? 'Y' : 'N'}`);
+    });
+
+    // Pick the first candidate above a reasonable threshold, else best available
+    const best = all.find(c => c.score >= 45) || all[0];
+    if (!best) {
+      console.warn(`[10C][PIXABAY][${jobId}] No candidate selected after scoring.`);
+      return null;
+    }
+
+    if (looksUsedPixabay(best.file, usedClips)) {
+      console.warn(`[10C][PIXABAY][${jobId}] Top candidate already used, seeking alternative...`);
+      const alt = all.find(c => !looksUsedPixabay(c.file, usedClips));
+      if (!alt) {
+        console.warn(`[10C][PIXABAY][${jobId}] No alternative candidate available post-dedupe.`);
+        return null;
+      }
+      return await downloadPixabayVideo(alt, workDir, sceneIdx, jobId, usedClips);
+    }
+
+    return await downloadPixabayVideo(best, workDir, sceneIdx, jobId, usedClips);
   } catch (err) {
-    if (err.response?.data) {
+    if (err?.response?.data) {
       console.error('[10C][PIXABAY][ERR]', JSON.stringify(err.response.data));
     } else {
-      console.error('[10C][PIXABAY][ERR]', err);
+      console.error('[10C][PIXABAY][ERR]', err?.message || err);
     }
     return null;
   }
 }
 
-// === PHOTO FALLBACK FINDER ===
+async function downloadPixabayVideo(candidate, workDir, sceneIdx, jobId, usedClips) {
+  const unique = uuidv4();
+  const rawOut = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${unique}`);
+  const outPath = ensureMp4(rawOut);
+
+  console.log(`[10C][DL][${jobId}] Downloading video (${candidate.width}x${candidate.height}, score=${candidate.score}): ${candidate.file}`);
+  const local = await streamDownload(candidate.file, outPath, jobId);
+  if (!local) return null;
+
+  // Mark both remote URL and local path as used to prevent re-use across modules
+  markUsed(usedClips, candidate.file, local);
+  console.log(`[10C][PIXABAY][${jobId}][SELECTED] ${local} | score=${candidate.score}`);
+  return local;
+}
+
+// ===========================================================
+// PHOTO FALLBACK FINDER (downloads local JPG)
+// ===========================================================
 async function findPixabayPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
+  const q = subjectString(subject);
+  console.log(`[10C][PIXABAY-PHOTO][${jobId}] findPixabayPhotoForScene | subject="${q}" | sceneIdx=${sceneIdx}`);
+
   if (!PIXABAY_API_KEY) {
     console.warn('[10C][PIXABAY-PHOTO][ERR] No Pixabay API key set!');
     return null;
   }
-  try {
-    let queryStr = (typeof subject === 'object' && subject.subject) ? subject.subject : (Array.isArray(subject) ? subject[0] : subject);
-    const query = encodeURIComponent(String(queryStr || '').replace(/[^\w\s]/gi, '').trim()).slice(0, 90);
-    const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=12&orientation=vertical`;
-    console.log(`[10C][PIXABAY-PHOTO][${jobId}] Request: ${url}`);
-    const resp = await axios.get(url, { timeout: 12000 });
-    if (resp.data && resp.data.hits && resp.data.hits.length > 0) {
-      let scored = [];
-      for (const hit of resp.data.hits) {
-        if (isDupePixabay(hit.largeImageURL, usedClips)) {
-          console.log(`[10C][PIXABAY-PHOTO][${jobId}] Skipping duplicate photo: ${hit.largeImageURL}`);
-          continue;
-        }
-        const score = scorePixabayPhoto(hit, subject, usedClips);
-        scored.push({ hit, score });
-      }
-      scored.sort((a, b) => b.score - a.score);
-      let best = scored.find(s => s.score > 10) || scored[0];
-      if (!best && scored.length > 0) best = scored[0];
-      if (best) {
-        console.log(`[10C][PIXABAY-PHOTO][${jobId}][PICKED] ${best.hit.largeImageURL} | score=${best.score}`);
-        return best.hit.largeImageURL;
-      }
-    }
-    console.log(`[10C][PIXABAY-PHOTO][${jobId}] No Pixabay photos found for "${subject}"`);
+  if (!q || q.length < 2) {
+    console.warn(`[10C][PIXABAY-PHOTO][${jobId}] Empty/short subject; skipping.`);
     return null;
+  }
+
+  try {
+    const query = encodeURIComponent(q.replace(/[^\w\s]/g, ' ').trim()).slice(0, 100);
+    // Prefer vertical orientation for photos if possible
+    const url = `https://pixabay.com/api/?key=${PIXABAY_API_KEY}&q=${query}&image_type=photo&per_page=30&order=popular${PREFER_VERTICAL ? '&orientation=vertical' : ''}`;
+    console.log(`[10C][PIXABAY-PHOTO][${jobId}] GET ${url}`);
+
+    const resp = await axios.get(url, {
+      timeout: AXIOS_TIMEOUT_MS,
+      headers: { 'User-Agent': USER_AGENT }
+    });
+
+    const hits = resp?.data?.hits || [];
+    if (!hits.length) {
+      console.log(`[10C][PIXABAY-PHOTO][${jobId}] No photo results for "${q}"`);
+      return null;
+    }
+
+    const candidates = [];
+    for (const hit of hits) {
+      const cand = buildPhotoCandidate(hit, q, usedClips);
+      if (cand) candidates.push(cand);
+    }
+
+    if (!candidates.length) {
+      console.log(`[10C][PIXABAY-PHOTO][${jobId}] No viable photo candidates after filtering/dupe check.`);
+      return null;
+    }
+
+    // Sort by score desc; tie-breaker: larger portrait-ish first
+    candidates.sort((a, b) => {
+      const ds = b.score - a.score;
+      if (ds !== 0) return ds;
+      const areaA = (a.width || 0) * (a.height || 0);
+      const areaB = (b.width || 0) * (b.height || 0);
+      return areaB - areaA;
+    });
+
+    candidates.slice(0, 8).forEach((c, i) => {
+      console.log(`[10C][PIXABAY-PHOTO][${jobId}][CANDIDATE][${i + 1}] ${c.file} | score=${c.score} | ${c.width || '?'}x${c.height || '?'}`);
+    });
+
+    const best = candidates.find(c => c.score >= 38) || candidates[0];
+    if (!best) {
+      console.warn(`[10C][PIXABAY-PHOTO][${jobId}] No candidate selected after scoring.`);
+      return null;
+    }
+
+    if (looksUsedPixabay(best.file, usedClips)) {
+      console.warn(`[10C][PIXABAY-PHOTO][${jobId}] Top photo already used; trying alternative...`);
+      const alt = candidates.find(c => !looksUsedPixabay(c.file, usedClips));
+      if (!alt) {
+        console.warn(`[10C][PIXABAY-PHOTO][${jobId}] No alternative photo available post-dedupe.`);
+        return null;
+      }
+      return await downloadPixabayPhoto(alt, workDir, sceneIdx, jobId, usedClips);
+    }
+
+    return await downloadPixabayPhoto(best, workDir, sceneIdx, jobId, usedClips);
   } catch (err) {
-    if (err.response?.data) {
+    if (err?.response?.data) {
       console.error('[10C][PIXABAY-PHOTO][ERR]', JSON.stringify(err.response.data));
     } else {
-      console.error('[10C][PIXABAY-PHOTO][ERR]', err);
+      console.error('[10C][PIXABAY-PHOTO][ERR]', err?.message || err);
     }
     return null;
   }
+}
+
+async function downloadPixabayPhoto(candidate, workDir, sceneIdx, jobId, usedClips) {
+  const unique = uuidv4();
+  // Keep extension .jpg (Pixabay photo URLs are JPEGs)
+  const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-photo-${unique}.jpg`);
+
+  console.log(`[10C][DL][${jobId}] Downloading photo (score=${candidate.score}): ${candidate.file}`);
+  const local = await streamDownload(candidate.file, outPath, jobId);
+  if (!local) return null;
+
+  markUsed(usedClips, candidate.file, local);
+  console.log(`[10C][PIXABAY-PHOTO][${jobId}][SELECTED] ${local} | score=${candidate.score}`);
+  return local;
 }
 
 module.exports = {

@@ -4,6 +4,8 @@
 // MAX LOGGING EVERY STEP, Video-Preferred, Anti-Dupe, Multi-Angle
 // Uses universal scoreSceneCandidate from 10G (topic-aware scoring)
 // Never silent-fails. Smart filters + caching for speed.
+// STRICT: Excludes composed outputs (final/hook/mega/jobs) from candidates.
+// DEDUPE: Blocks by full key, basename, and stem (name without extension).
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
@@ -45,10 +47,22 @@ console.log('[10A][INIT] R2 clip helper (video-first, max logs, multi-angle, cac
 const VIDEO_EXTS = new Set(['.mp4']);            // Pipeline expects mp4
 const MIN_BYTES = 2 * 1024;                      // Sanity clip size
 const LIST_CACHE_TTL_MS = 60 * 1000;             // 60s cache for list calls
-const MAX_LIST_KEYS = 50000;                      // Hard cap to prevent runaway scans
-const PREFILTER_LIMIT = 5000;                     // Limit scoring set
-const TOKEN_PREFILTER_MAX = 8000;                 // safety bound for token prefilter
+const MAX_LIST_KEYS = 50000;                     // Hard cap to prevent runaway scans
+const PREFILTER_LIMIT = 5000;                    // Limit scoring set
+const TOKEN_PREFILTER_MAX = 8000;                // safety bound for token prefilter
 const PREFER_RECENT = (process.env.R2_PREFER_RECENT || '1') === '1';
+
+// Exclude *composed outputs* and any cached concat artifacts from being used as source clips.
+const EXCLUDE_PATTERNS = [
+  '/jobs/',                // any job artifacts
+  'final-with-outro',
+  'with-music',
+  'concat-',
+  'hookmux',
+  'megamux',
+  '-bp-',                  // bulletproofed outputs
+  '-vol',                  // volume-adjusted outro
+];
 
 // ===========================================================
 // SIMPLE UTILS
@@ -69,10 +83,28 @@ function isMp4Key(key) {
   return VIDEO_EXTS.has(path.extname(String(key)).toLowerCase());
 }
 
-function looksUsed(key, usedClips) {
+function keyStem(key) {
+  const base = path.basename(key);
+  return base.replace(/\.[^.]+$/, ''); // remove extension
+}
+
+function looksUsed(key, usedClips = []) {
   if (!key) return false;
   const base = path.basename(key);
-  return usedClips?.some(u => u === key || u === base || key.endsWith(String(u)));
+  const stem = keyStem(key);
+  return usedClips?.some(u => {
+    const uStr = String(u || '');
+    const uBase = path.basename(uStr);
+    const uStem = keyStem(uStr);
+    return (
+      uStr === key ||
+      uStr === base ||
+      uStr === stem ||
+      key.endsWith(uStr) ||
+      base === uBase ||
+      stem === uStem
+    );
+  });
 }
 
 function isValidLocalFile(filePath) {
@@ -85,13 +117,17 @@ function isValidLocalFile(filePath) {
   }
 }
 
+function isExcludedKey(key) {
+  const k = String(key).toLowerCase();
+  return EXCLUDE_PATTERNS.some(p => k.includes(String(p).toLowerCase()));
+}
+
 // ===========================================================
 // LISTING WITH CACHING
 // ===========================================================
 let _listCache = {
   when: 0,
-  keys: /** @type {string[]} */ ([]),
-  objs: /** @type {{Key: string, Size?: number, LastModified?: Date}[]} */ ([])
+  objs: /** @type {{Key: string, Size?: number, LastModified?: Date}[]} */ ([]),
 };
 
 async function listAllObjectsInR2(prefix = '', jobId = '') {
@@ -130,7 +166,7 @@ async function listAllObjectsInR2(prefix = '', jobId = '') {
       console.log(`[10A][R2][${jobId}] Listing round ${round} — running total: ${objs.length}`);
     } while (continuationToken);
 
-    _listCache = { when: now, keys: objs.map(o => o.Key), objs };
+    _listCache = { when: now, objs };
     console.log(`[10A][R2][${jobId}] Listed ${objs.length} objects from R2.`);
     return objs;
   } catch (err) {
@@ -141,8 +177,7 @@ async function listAllObjectsInR2(prefix = '', jobId = '') {
 
 async function listAllFilesInR2(prefix = '', jobId = '') {
   const objs = await listAllObjectsInR2(prefix, jobId);
-  const keys = objs.map(o => o.Key).filter(Boolean);
-  return keys;
+  return objs.map(o => o.Key).filter(Boolean);
 }
 
 // ===========================================================
@@ -214,7 +249,36 @@ async function downloadAndValidate(r2Key, workDir, sceneIdx, jobId, usedClips) {
 }
 
 // ===========================================================
-// MAIN MATCHER (VIDEO-FIRST)
+// CATEGORY INFERENCE FROM KEY (folder naming heuristic)
+// ===========================================================
+function inferCategoryFromKey(key = '') {
+  const k = String(key);
+  const cats = [
+    'lore_history_mystery_horror',
+    'sports_fitness',
+    'cars_vehicles',
+    'animals_primates',
+    'food_cooking',
+    'health_wellness',
+    'holidays_events',
+    'human_emotion_social',
+    'kids_family',
+    'love_relationships',
+    'money_business_success',
+    'motivation_success',
+    'music_dance',
+    'science_nature',
+    'technology_innovation',
+    'travel_adventure',
+    'viral_trendy_content',
+    'misc'
+  ];
+  const found = cats.find(c => k.includes(`/${c}/`) || k.startsWith(`${c}/`) || k.includes(`/${c}/jobs/`));
+  return found || 'misc';
+}
+
+// ===========================================================
+// MAIN MATCHER (VIDEO-FIRST, STRICT FILTERS)
 // ===========================================================
 async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
   const { subject, matchPhrases } = extractSubjectAndPhrases(scene);
@@ -227,8 +291,8 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
   console.log(`[10A][R2][${jobId}] findR2ClipForScene | subject="${subject}" (norm="${normalizedSubject}") | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
 
   try {
-    // 1) Pull all objects (cached 60s) then keep only mp4 not used
-    const objs = await listAllObjectsInR2('', jobId);
+    // 1) Pull all objects (cached 60s) then keep only mp4 not used and not excluded
+    let objs = await listAllObjectsInR2('', jobId);
     if (!objs.length) {
       console.warn(`[10A][R2][${jobId}][WARN] No objects found in R2 bucket!`);
       return null;
@@ -240,15 +304,21 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       return null;
     }
 
-    // Filter out used
-    mp4Objs = mp4Objs.filter(o => !looksUsed(o.Key, usedClips));
+    // Exclude composed outputs and job artifacts
+    mp4Objs = mp4Objs.filter(o => !isExcludedKey(o.Key));
+    if (!mp4Objs.length) {
+      console.warn(`[10A][R2][${jobId}] All mp4 objects are excluded by pattern filters.`);
+      return null;
+    }
 
+    // Filter out used (by key, basename and stem)
+    mp4Objs = mp4Objs.filter(o => !looksUsed(o.Key, usedClips));
     if (!mp4Objs.length) {
       console.warn(`[10A][R2][${jobId}] After dedupe, no mp4 candidates remain.`);
       return null;
     }
 
-    // 2) Optional recent-first bias to improve perceived freshness
+    // 2) Optional recent-first bias only as *secondary* tie-breaker
     if (PREFER_RECENT) {
       mp4Objs.sort((a, b) => {
         const ta = new Date(a.LastModified || 0).getTime();
@@ -257,7 +327,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       });
     }
 
-    // 3) Token prefilter to reduce heavy scoring load
+    // 3) Token prefilter to reduce heavy scoring load (keeps subject-related only)
     const subjTokens = tokenize(subject);
     const phraseTokens = (matchPhrases || []).flatMap(tokenize);
     const allTokens = [...new Set([...subjTokens, ...phraseTokens])];
@@ -282,7 +352,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       console.log(`[10A][R2][${jobId}] Prefilter trimmed to ${TOKEN_PREFILTER_MAX} for safety.`);
     }
 
-    // If prefiltering is too aggressive and we lost everything, fall back to mp4Objs (top N recent)
+    // If prefiltering is too aggressive and we lost everything, fall back to a capped recent set
     if (!prefiltered.length) {
       prefiltered = mp4Objs.slice(0, PREFILTER_LIMIT);
       console.log(`[10A][R2][${jobId}] Prefilter empty — falling back to top ${prefiltered.length} recent mp4s.`);
@@ -317,10 +387,17 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       };
     });
 
-    let scored = candidates.map(c => ({
-      ...c,
-      score: scoreSceneCandidate(c, c.scene, usedClips, /*realVideoExists=*/true)
-    }));
+    // Hard preference bonus if filename stem contains the full normalizedSubject
+    const normalizedSubjectStem = normalize(subject);
+    let scored = candidates.map(c => {
+      const stem = normalize(c.filename.replace(/\.mp4$/i, ''));
+      const containsFull = stem.includes(normalizedSubjectStem);
+      const subjectBonus = containsFull ? 12 : 0; // small nudge toward literal matches
+      return {
+        ...c,
+        score: scoreSceneCandidate(c, c.scene, usedClips, /*realVideoExists=*/true) + subjectBonus
+      };
+    });
 
     if (!scored.length) {
       console.log(`[10A][R2][${jobId}][CANDIDATE] No candidates to score.`);
@@ -329,7 +406,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
 
     // Log top 12 scored
     scored
-      .slice() // copy
+      .slice()
       .sort((a, b) => b.score - a.score)
       .slice(0, 12)
       .forEach((s, i) => {
@@ -340,7 +417,9 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
     const targetTopic = normalize(subject);
     const multiAngle = scored.filter(s => s.topic && s.topic === targetTopic);
     if (multiAngle.length) {
-      multiAngle.sort((a, b) => b.score - a.score);
+      multiAngle.sort((a, b) => b.score - a.score || (PREFER_RECENT
+        ? (new Date(b.lastModified || 0) - new Date(a.lastModified || 0))
+        : 0));
       const bestAngle = multiAngle[0];
       if (bestAngle && bestAngle.score >= 35 && !looksUsed(bestAngle.path, usedClips)) {
         console.log(`[10A][R2][${jobId}][MULTIANGLE][SELECTED] ${bestAngle.path} | score=${bestAngle.score}`);
@@ -374,24 +453,15 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       return 0;
     });
 
-    const best = eligible[0];
+    // 8) Pick best that isn't used (by key/basename/stem)
+    let best = eligible.find(e => !looksUsed(e.path, usedClips));
+    if (!best) {
+      console.warn(`[10A][R2][${jobId}] All eligible were already used — allowing lowest-risk fallback.`);
+      best = eligible[0];
+    }
     if (!best) {
       console.warn(`[10A][R2][${jobId}] [FALLBACK][FATAL] No suitable candidates for subject "${subject}".`);
       return null;
-    }
-
-    // Dedup guard
-    if (looksUsed(best.path, usedClips)) {
-      console.warn(`[10A][R2][${jobId}][DEDUPE_BLOCK] Top candidate already used: ${best.path}`);
-      // try next eligible
-      const alt = eligible.find(e => !looksUsed(e.path, usedClips));
-      if (!alt) {
-        console.warn(`[10A][R2][${jobId}][DEDUPE_BLOCK] No alternative candidate available after dedupe.`);
-        return null;
-      }
-      console.log(`[10A][R2][${jobId}][DEDUPE_ALT] Switching to alternative: ${alt.path} (score=${alt.score})`);
-      const outAlt = await downloadAndValidate(alt.path, workDir, sceneIdx, jobId, usedClips);
-      return outAlt || null;
     }
 
     // Decision logs
@@ -407,7 +477,7 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
       console.warn(`[10A][R2][${jobId}][FALLBACK][LAST_RESORT] Using best available: ${best.path} | score=${best.score}`);
     }
 
-    // 8) Download and return local path
+    // 9) Download and return local path
     const out = await downloadAndValidate(best.path, workDir, sceneIdx, jobId, usedClips);
     return out || null;
 
@@ -418,42 +488,16 @@ async function findR2ClipForScene(scene, workDir, sceneIdx = 0, jobId = '', used
 }
 
 // ===========================================================
-// CATEGORY INFERENCE FROM KEY (folder naming heuristic)
-// ===========================================================
-function inferCategoryFromKey(key = '') {
-  const k = String(key);
-  const cats = [
-    'lore_history_mystery_horror',
-    'sports_fitness',
-    'cars_vehicles',
-    'animals_primates',
-    'food_cooking',
-    'health_wellness',
-    'holidays_events',
-    'human_emotion_social',
-    'kids_family',
-    'love_relationships',
-    'money_business_success',
-    'motivation_success',
-    'music_dance',
-    'science_nature',
-    'technology_innovation',
-    'travel_adventure',
-    'viral_trendy_content',
-    'misc'
-  ];
-  const found = cats.find(c => k.includes(`/${c}/`) || k.startsWith(`${c}/`) || k.includes(`/${c}/jobs/`));
-  return found || 'misc';
-}
-
-// ===========================================================
 // STATIC EXPORT: getAllFiles (used by 5D for scans)
 // Returns an array of mp4 keys (strings), cached for 60s.
 // ===========================================================
 findR2ClipForScene.getAllFiles = async function() {
   try {
     const objs = await listAllObjectsInR2('', 'STATIC');
-    const mp4s = objs.map(o => o.Key).filter(k => isMp4Key(k));
+    const mp4s = objs
+      .map(o => o.Key)
+      .filter(k => isMp4Key(k))
+      .filter(k => !isExcludedKey(k)); // do not expose composed outputs to scanners
     console.log(`[10A][STATIC] getAllFiles: Found ${mp4s.length} mp4s in R2 (cached=${Date.now() - _listCache.when < LIST_CACHE_TTL_MS}).`);
     return mp4s;
   } catch (err) {
