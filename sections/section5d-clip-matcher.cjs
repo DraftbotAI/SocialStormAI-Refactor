@@ -1,14 +1,16 @@
 // ============================================================
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR (Deterministic, Bulletproof)
 // R2-FIRST short-circuit: if R2 returns a clip, we take it immediately.
-// Always returns something: R2 video, provider video, Unsplash image, or Ken Burns.
+// Always returns something: R2 video, provider video, or Ken Burns video.
 // Max logging at each step. No infinite loops.
+// HARD DEDUPE across scenes (path, basename, url, originalName, dupe-ish keys).
+// NOTE: We NEVER return a raw image path (prevents ffmpeg decode errors).
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
 const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
-const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
+// const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs'); // not used directly to avoid raw images
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
@@ -21,6 +23,9 @@ console.log('[5D][INIT] Clip matcher orchestrator (R2-first, deterministic) load
 const GENERIC_SUBJECTS = [
   'face','person','man','woman','it','thing','someone','something','body','eyes','kid','boy','girl','they','we','people','scene','child','children'
 ];
+
+// Env toggles
+const ALLOW_RAW_IMAGE = String(process.env.MATCHER_ALLOW_RAW_IMAGE || '').toLowerCase() !== 'false'; // default true, but our pipeline still converts to KB video
 
 // ---------- Small utils ----------
 function assertFileExists(file, label = 'FILE', minSize = 10240) {
@@ -41,23 +46,38 @@ function assertFileExists(file, label = 'FILE', minSize = 10240) {
   }
 }
 
+function _usedAdd(usedClips, v) {
+  if (!v) return;
+  if (usedClips instanceof Set) usedClips.add(v);
+  else if (Array.isArray(usedClips)) { if (!usedClips.includes(v)) usedClips.push(v); }
+}
+function _usedHas(usedClips, v) {
+  if (!v) return false;
+  if (usedClips instanceof Set) return usedClips.has(v);
+  if (Array.isArray(usedClips)) return usedClips.includes(v);
+  return false;
+}
+
 function markUsedInPlace(usedClips, candidate = {}) {
   try {
-    if (!Array.isArray(usedClips)) return;
     const p = candidate.path || candidate.filePath || '';
     const b = p ? path.basename(p) : '';
     const u = candidate.meta?.url || candidate.url || '';
     const n = candidate.meta?.originalName || candidate.filename || '';
-    const add = v => { if (v && !usedClips.includes(v)) usedClips.push(v); };
-    add(p); add(b); add(u); add(n);
+    _usedAdd(usedClips, p);
+    _usedAdd(usedClips, b);
+    _usedAdd(usedClips, u);
+    _usedAdd(usedClips, n);
+    // also add a normalized stem-ish key for stronger dedupe
+    if (b) _usedAdd(usedClips, b.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
   } catch {}
 }
 
 function isUsed(usedClips, candidatePath, meta = {}) {
-  if (!Array.isArray(usedClips)) return false;
   const base = candidatePath ? path.basename(candidatePath) : '';
   const url  = meta?.url || '';
-  return usedClips.includes(candidatePath) || (base && usedClips.includes(base)) || (url && usedClips.includes(url));
+  const stem = base.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return _usedHas(usedClips, candidatePath) || (base && _usedHas(usedClips, base)) || (url && _usedHas(usedClips, url)) || (_usedHas(usedClips, stem));
 }
 
 function normalizeGeneric(subject) {
@@ -124,7 +144,7 @@ async function findClipForScene({
     return null;
   }
 
-  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !findUnsplashImageForScene || !fallbackKenBurnsVideo) {
+  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !fallbackKenBurnsVideo) {
     console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
     return null;
   }
@@ -133,6 +153,9 @@ async function findClipForScene({
   let prioritizedSubjects = [];
   try {
     prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
+    if (!Array.isArray(prioritizedSubjects) || !prioritizedSubjects.length) {
+      prioritizedSubjects = [searchSubject, mainTopic].filter(Boolean);
+    }
     console.log(`[5D][SUBJECTS][${jobId}] Prioritized:`, prioritizedSubjects);
   } catch (err) {
     console.error(`[5D][SUBJECTS][${jobId}][ERR]`, err);
@@ -229,16 +252,8 @@ async function findClipForScene({
       return winner.path;
     }
 
-    // ---- 4c. Image → Ken Burns
-    try {
-      const unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
-      if (unsplashResult && !isUsed(usedClips, unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
-        console.log(`[5D][PICK][${jobId}] Unsplash image for "${subjectOption}": ${unsplashResult}`);
-        markUsedInPlace(usedClips, { path: unsplashResult, filename: path.basename(unsplashResult) });
-        return unsplashResult;
-      }
-    } catch (e) { console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e); }
-
+    // ---- 4c. Image → Ken Burns (we avoid returning raw images to keep ffmpeg happy)
+    // If ALLOW_RAW_IMAGE were true, we'd still produce a VIDEO via Ken Burns instead of raw image.
     try {
       const kb = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (kb && !isUsed(usedClips, kb) && assertFileExists(kb, 'KENBURNS_RESULT')) {
