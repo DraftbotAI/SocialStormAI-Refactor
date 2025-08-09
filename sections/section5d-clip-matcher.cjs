@@ -109,7 +109,7 @@ async function findClipForScene({
 }) {
   let searchSubject = subject;
 
-  // Anchor logic
+  // Anchor logic: for the hook/mega scene, lock to the true topic.
   if (isMegaScene || sceneIdx === 0) {
     if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())) {
       searchSubject = megaSubject;
@@ -118,7 +118,7 @@ async function findClipForScene({
       searchSubject = mainTopic;
       console.log(`[5D][ANCHOR][${jobId}] Fallback to mainTopic for mega-scene: "${searchSubject}"`);
     } else {
-      searchSubject = allSceneTexts[0];
+      searchSubject = allSceneTexts?.[0] || subject;
       console.log(`[5D][ANCHOR][${jobId}] Final fallback to first scene text: "${searchSubject}"`);
     }
   }
@@ -149,25 +149,25 @@ async function findClipForScene({
     return null;
   }
 
+  // Extract prioritized subjects (strict → symbolic → general)
   let prioritizedSubjects = [];
   try {
     prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
     console.log(`[5D][GPT][${jobId}] Prioritized visual subjects for scene ${sceneIdx + 1}:`, prioritizedSubjects);
   } catch (err) {
     console.error(`[5D][GPT][${jobId}][ERR] Error extracting prioritized subjects:`, err);
-    prioritizedSubjects = [searchSubject, mainTopic];
+    prioritizedSubjects = [searchSubject, mainTopic].filter(Boolean);
   }
 
-  // Try all prioritized subjects, loose mode
+  // Try each prioritized subject once (no recursion; no loops)
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // Collect candidates from all sources, then pick the best by 10G.
     const scoredCandidates = [];
 
-    // === 1. R2 (download + score) ===
+    // === 1) R2 (download + score) ===
     try {
-      // NOTE: pass the array directly (not a Set)
+      // R2 helper downloads best match for the subject and returns local path
       const r2Local = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (r2Local && assertFileExists(r2Local, 'R2_RESULT')) {
         if (isUsed(usedClips, r2Local)) {
@@ -194,7 +194,7 @@ async function findClipForScene({
       console.error(`[5D][R2][ERR][${jobId}]`, err);
     }
 
-    // --- 2. Pexels ---
+    // === 2) Pexels ===
     try {
       const pxRes = await findPexelsClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       const pxPath = (pxRes && pxRes.path) ? pxRes.path : pxRes;
@@ -233,7 +233,7 @@ async function findClipForScene({
       console.error(`[5D][PEXELS][ERR][${jobId}]`, e);
     }
 
-    // --- 3. Pixabay ---
+    // === 3) Pixabay ===
     try {
       const pbRes = await findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       const pbPath = (pbRes && pbRes.path) ? pbRes.path : pbRes;
@@ -274,18 +274,19 @@ async function findClipForScene({
 
     // === Decide winner across sources ===
     if (scoredCandidates.length) {
-      // small tiebreak so equal scores don't always pick the first
+      // Small tiebreak so equal scores don't always pick the first
       scoredCandidates.sort((a, b) => (b.score - a.score) || (Math.random() - 0.5));
       const winner = scoredCandidates[0];
       console.log(`[5D][PICK][${jobId}] Winner across sources for "${subjectOption}" => ${winner.source.toUpperCase()} | score=${winner.score} | path=${winner.path}`);
 
       // ✅ mark as used IN PLACE (prevents repeats incl. mega-scene next line)
-      markUsedInPlace(usedClips, { 
-        path: winner.path, 
-        meta: winner.meta || {}, 
+      markUsedInPlace(usedClips, {
+        path: winner.path,
+        meta: winner.meta || {},
         filename: path.basename(winner.path)
       });
 
+      // Track for ingestion if caller wants to archive raw provider assets
       if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
         jobContext.clipsToIngest.push({
           localPath: winner.path,
@@ -300,7 +301,7 @@ async function findClipForScene({
 
     // --- If nothing from video sources, try Unsplash then Ken Burns ---
     try {
-      let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
+      const unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
       if (unsplashResult && !isUsed(usedClips, unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
         console.log(`[5D][PICK][${jobId}] Unsplash image (loose): ${unsplashResult}`);
         markUsedInPlace(usedClips, { path: unsplashResult, filename: path.basename(unsplashResult) });
@@ -311,7 +312,7 @@ async function findClipForScene({
     }
 
     try {
-      let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
+      const kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (kenBurnsResult && !isUsed(usedClips, kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
         console.log(`[5D][PICK][${jobId}] KenBurns fallback (loose): ${kenBurnsResult}`);
         markUsedInPlace(usedClips, { path: kenBurnsResult, filename: path.basename(kenBurnsResult) });
@@ -322,25 +323,25 @@ async function findClipForScene({
     }
   }
 
-  // === Absolute R2 fallback ===
+  // === Safe R2 fallback (no remote->local assumption) ===
+  // Try one last R2 pull with the mainTopic or the original searchSubject.
   try {
-    if (findR2ClipForScene.getAllFiles) {
-      const r2Files = await findR2ClipForScene.getAllFiles();
-      for (const fname of r2Files) {
-        if (!isUsed(usedClips, fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
-          console.warn(`[5D][FINALFALLBACK][${jobId}] ABSOLUTE fallback, picking any available R2: ${fname}`);
-          markUsedInPlace(usedClips, { path: fname, filename: path.basename(fname) });
-          return fname;
-        }
-      }
+    const hailMarySubject = mainTopic || searchSubject || 'landmark';
+    console.warn(`[5D][FINALFALLBACK][${jobId}] Attempting final R2 pull with subject="${hailMarySubject}"`);
+    const r2Local = await findR2ClipForScene(hailMarySubject, workDir, sceneIdx, jobId, usedClips);
+    if (r2Local && assertFileExists(r2Local, 'R2_FINAL')) {
+      markUsedInPlace(usedClips, { path: r2Local, filename: path.basename(r2Local) });
+      console.warn(`[5D][FINALFALLBACK][${jobId}] Using R2 fallback: ${r2Local}`);
+      return r2Local;
     }
   } catch (e) {
-    console.error(`[5D][FINALFALLBACK][${jobId}] Error during final R2 fallback:`, e);
+    console.error(`[5D][FINALFALLBACK][R2][${jobId}] Error during final R2 attempt:`, e);
   }
 
-  console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
+  // === Ken Burns generic last resort ===
+  console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for scene ${sceneIdx + 1} after all fallbacks.`);
   try {
-    let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
+    const kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
       console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic fallback: ${kenBurnsResult}`);
       markUsedInPlace(usedClips, { path: kenBurnsResult, filename: path.basename(kenBurnsResult) });
