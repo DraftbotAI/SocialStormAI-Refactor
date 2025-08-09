@@ -22,6 +22,13 @@ const GENERIC_SUBJECTS = [
   'face','person','man','woman','it','thing','someone','something','body','eyes','kid','boy','girl','they','we','people','scene','child','children'
 ];
 
+// Minimal animal guard to avoid off-topic wildlife unless requested in subject
+const ANIMALS = [
+  'dog','cat','bird','birds','eagle','hawk','lion','tiger','bear','shark','whale','dolphin','seal','otter',
+  'wolf','fox','deer','elephant','giraffe','zebra','horse','cow','sheep','goat','monkey','gorilla','chimp',
+  'panda','penguin','octopus','squid','jellyfish','fish','insect','butterfly'
+];
+
 // ---------- Small utils ----------
 function assertFileExists(file, label = 'FILE', minSize = 10240) {
   try {
@@ -69,6 +76,22 @@ function getMajorWords(subject) {
     .split(/\s+/)
     .map(w => w.toLowerCase())
     .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
+}
+
+// Build a lowercase text blob from provider metadata to use for simple filtering
+function candidateTextFromMeta(candidatePath, meta) {
+  const parts = [];
+  if (candidatePath) parts.push(path.basename(candidatePath));
+  if (meta) {
+    if (meta.originalName) parts.push(meta.originalName);
+    if (meta.filename) parts.push(meta.filename);
+    if (meta.title) parts.push(meta.title);
+    if (meta.description) parts.push(meta.description);
+    if (Array.isArray(meta.tags)) parts.push(meta.tags.join(' '));
+    if (Array.isArray(meta.keywords)) parts.push(meta.keywords.join(' '));
+    if (meta.url) parts.push(meta.url);
+  }
+  return parts.join(' ').toLowerCase();
 }
 
 // ---------- Main ----------
@@ -143,6 +166,11 @@ async function findClipForScene({
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
+    // Determine if animals were explicitly requested in the subject (for filtering providers)
+    const subjectText = (subjectOption || '').toLowerCase();
+    const animalsRequested = ANIMALS.some(a => subjectText.includes(a));
+    const subjectTokens = getMajorWords(subjectOption);
+
     // ---- 4a. R2 FIRST (short-circuit if found)
     try {
       const r2Local = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
@@ -214,19 +242,40 @@ async function findClipForScene({
       }
     } catch (e) { console.error(`[5D][PIXABAY][ERR][${jobId}]`, e); }
 
-    // Pick best provider candidate
+    // --- Provider relevance & animal guard (only what's needed) ---
     if (scoredCandidates.length) {
-      scoredCandidates.sort((a, b) => (b.score - a.score) || (Math.random() - 0.5));
-      const winner = scoredCandidates[0];
-      console.log(`[5D][PICK][${jobId}] Provider winner for "${subjectOption}": ${winner.source} (${winner.score}) -> ${winner.path}`);
-      markUsedInPlace(usedClips, { path: winner.path, meta: winner.meta || {}, filename: path.basename(winner.path) });
-
-      if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
-        jobContext.clipsToIngest.push({
-          localPath: winner.path, subject: subjectOption, sceneIdx, source: winner.source, categoryFolder
-        });
+      const filtered = [];
+      for (const c of scoredCandidates) {
+        const text = candidateTextFromMeta(c.path, c.meta);
+        const isAnimal = ANIMALS.some(a => text.includes(a));
+        if (!animalsRequested && isAnimal) {
+          console.log(`[5D][FILTER][ANIMAL-SKIP][${jobId}] Off-topic animal clip: ${path.basename(c.path)}`);
+          continue;
+        }
+        // Require at least 1 overlap with subject major tokens to avoid random scenery
+        const overlap = subjectTokens.some(t => text.includes(t));
+        if (!overlap) {
+          console.log(`[5D][FILTER][WEAK][${jobId}] No subject token overlap: ${path.basename(c.path)}`);
+          continue;
+        }
+        filtered.push(c);
       }
-      return winner.path;
+
+      if (filtered.length) {
+        filtered.sort((a, b) => (b.score - a.score) || (Math.random() - 0.5));
+        const winner = filtered[0];
+        console.log(`[5D][PICK][${jobId}] Provider winner for "${subjectOption}": ${winner.source} (${winner.score}) -> ${winner.path}`);
+        markUsedInPlace(usedClips, { path: winner.path, meta: winner.meta || {}, filename: path.basename(winner.path) });
+
+        if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
+          jobContext.clipsToIngest.push({
+            localPath: winner.path, subject: subjectOption, sceneIdx, source: winner.source, categoryFolder
+          });
+        }
+        return winner.path;
+      } else {
+        console.log(`[5D][PICK][${jobId}] All provider candidates filtered out for "${subjectOption}".`);
+      }
     }
 
     // ---- 4c. Image → Ken Burns
