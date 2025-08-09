@@ -1,4 +1,4 @@
-// ===========================================================
+// ============================================================
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR (Loosest, Bulletproof)
 // Always returns something: video, image, Ken Burns, or any available.
 // Never loops forever. Max logs at each fallback step.
