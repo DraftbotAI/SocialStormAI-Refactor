@@ -11,6 +11,7 @@ const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helpe
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
+const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs'); // <-- Added
 const fs = require('fs');
 const path = require('path');
 
@@ -193,26 +194,33 @@ async function findClipForScene({
       console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
     }
 
-    // --- Try Pexels, Pixabay, Unsplash with loose match ---
+    // --- Try Pexels, Pixabay ---
     let sources = [
-      { fn: findPexelsClipForScene, label: 'PEXELS', meta: 'meta' },
-      { fn: findPixabayClipForScene, label: 'PIXABAY', meta: 'meta' }
+      { fn: findPexelsClipForScene, label: 'PEXELS' },
+      { fn: findPixabayClipForScene, label: 'PIXABAY' }
     ];
 
     for (const src of sources) {
       try {
         let result = await src.fn(subjectOption, workDir, sceneIdx, jobId, usedClips);
         const candidatePath = (result && result.path) ? result.path : result;
+
         if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, src.label + '_RESULT')) {
-          // Loose match: accept if ANY major word from subject appears in filename/tags
-          let valid = false;
-          if (result.meta && Array.isArray(result.meta.tags)) {
-            valid = result.meta.tags.some(tag => getMajorWords(subjectOption).some(word => tag.toLowerCase().includes(word)));
-          } else if (typeof candidatePath === 'string') {
-            valid = looseSubjectMatch(candidatePath, subjectOption);
-          }
-          // **KEY IMPROVEMENT**: accept first available even if not a perfect tag match
-          if (valid || true) {
+          // **IMPROVED**: score with 10G for better subject match using synonyms
+          const candidateMeta = result && result.meta ? result.meta : {};
+          const score = scoreSceneCandidate(
+            {
+              filename: path.basename(candidatePath),
+              filePath: candidatePath,
+              tags: candidateMeta.tags || [],
+              title: candidateMeta.title || '',
+              description: candidateMeta.description || '',
+            },
+            subjectOption,
+            usedClips
+          );
+          console.log(`[5D][${src.label}][${jobId}] Candidate score for "${subjectOption}": ${score}`);
+          if (score >= 50) { // threshold to keep loose match feel
             console.log(`[5D][PICK][${jobId}] ${src.label} subject match: ${candidatePath}`);
             if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
               jobContext.clipsToIngest.push({
@@ -225,7 +233,7 @@ async function findClipForScene({
             }
             return candidatePath;
           } else {
-            console.warn(`[5D][${src.label}][${jobId}] ${src.label} clip rejected (no subject match): ${candidatePath}`);
+            console.warn(`[5D][${src.label}][${jobId}] Rejected (score too low): ${candidatePath}`);
           }
         }
       } catch (e) {
@@ -233,7 +241,7 @@ async function findClipForScene({
       }
     }
 
-    // --- Unsplash: always loose, just check for unused image
+    // --- Unsplash ---
     try {
       let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
       if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
@@ -244,7 +252,7 @@ async function findClipForScene({
       console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
     }
 
-    // --- Ken Burns (final fallback, always returns an image)
+    // --- Ken Burns ---
     try {
       let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (kenBurnsResult && !usedClips.includes(kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
@@ -256,7 +264,7 @@ async function findClipForScene({
     }
   }
 
-  // === If absolutely nothing was found, pick any unused R2 file ===
+  // === Absolute R2 fallback ===
   try {
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
@@ -271,9 +279,7 @@ async function findClipForScene({
     console.error(`[5D][FINALFALLBACK][${jobId}] Error during final R2 fallback:`, e);
   }
 
-  // Still nothing!
   console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
-  // Instead of returning null, let's try one last Ken Burns with a generic prompt:
   try {
     let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
@@ -284,7 +290,6 @@ async function findClipForScene({
     console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}] Error during generic KenBurns fallback:`, e);
   }
 
-  // If literally nothing, return null
   return null;
 }
 
