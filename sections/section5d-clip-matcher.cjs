@@ -11,7 +11,7 @@ const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helpe
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
-const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs'); // <-- Added
+const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 const fs = require('fs');
 const path = require('path');
 
@@ -140,108 +140,123 @@ async function findClipForScene({
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // === 1. Try R2, loose mode ===
-    async function findDedupedR2ClipLoose(searchPhrase, usedClipsArr) {
-      try {
-        const r2Files = await findR2ClipForScene.getAllFiles
-          ? await findR2ClipForScene.getAllFiles()
-          : [];
-        let found = null;
-        // a) Strict match first
-        for (const fname of r2Files) {
-          if (usedClipsArr.includes(fname)) continue;
-          if (strictSubjectMatch(fname, searchPhrase)) {
-            found = fname;
-            console.log(`[5D][R2][${jobId}] STRICT MATCH: "${fname}"`);
-            break;
-          }
-        }
-        // b) Loose match: any major word or substring
-        if (!found) {
-          for (const fname of r2Files) {
-            if (usedClipsArr.includes(fname)) continue;
-            if (looseSubjectMatch(fname, searchPhrase)) {
-              found = fname;
-              console.log(`[5D][R2][${jobId}] LOOSE MATCH: "${fname}"`);
-              break;
-            }
-          }
-        }
-        // c) Any unused file as last resort
-        if (!found && r2Files.length) {
-          for (const fname of r2Files) {
-            if (usedClipsArr.includes(fname)) continue;
-            found = fname;
-            console.log(`[5D][R2][${jobId}] FALLBACK: Picking random available: "${fname}"`);
-            break;
-          }
-        }
-        if (found && assertFileExists(found, 'R2_RESULT')) return found;
-        return null;
-      } catch (err) {
-        console.error(`[5D][R2][ERR][${jobId}] Error during R2 matching:`, err);
-        return null;
+    // Collect candidates from all sources, then pick the best by 10G.
+    const scoredCandidates = [];
+
+    // === 1. R2 (download + score) ===
+    try {
+      // Use the smarter 10A to select & download best R2 candidate for the subject
+      const r2Local = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId, new Set(usedClips));
+      if (r2Local && assertFileExists(r2Local, 'R2_RESULT')) {
+        const r2Score = scoreSceneCandidate(
+          {
+            filename: path.basename(r2Local),
+            filePath: r2Local,
+            tags: [], // filenames in R2 usually contain the subject tokens
+            title: path.basename(r2Local),
+            description: ''
+          },
+          subjectOption,
+          usedClips
+        );
+        console.log(`[5D][R2][${jobId}] Candidate score for "${subjectOption}": ${r2Score}`);
+        scoredCandidates.push({ source: 'r2', path: r2Local, score: r2Score });
+      } else {
+        console.log(`[5D][R2][${jobId}] No local R2 candidate for "${subjectOption}"`);
       }
+    } catch (err) {
+      console.error(`[5D][R2][ERR][${jobId}]`, err);
     }
 
-    let r2Result = null;
-    if (findR2ClipForScene.getAllFiles) {
-      r2Result = await findDedupedR2ClipLoose(subjectOption, usedClips);
-      if (r2Result) {
-        console.log(`[5D][PICK][${jobId}] R2 subject match: ${r2Result}`);
-        return r2Result;
+    // --- 2. Pexels ---
+    try {
+      const pxRes = await findPexelsClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
+      const pxPath = (pxRes && pxRes.path) ? pxRes.path : pxRes;
+      const pxMeta = (pxRes && pxRes.meta) ? pxRes.meta : {};
+
+      if (pxPath && !usedClips.includes(pxPath) && assertFileExists(pxPath, 'PEXELS_RESULT')) {
+        const filenameForScoring =
+          pxMeta.originalName || pxMeta.filename || pxMeta.url || path.basename(pxPath);
+
+        const score10G = scoreSceneCandidate(
+          {
+            filename: filenameForScoring,
+            filePath: pxPath,
+            tags: pxMeta.tags || pxMeta.keywords || [],
+            title: pxMeta.title || '',
+            description: pxMeta.description || '',
+          },
+          subjectOption,
+          usedClips
+        );
+
+        const providerScore = typeof pxRes?.score === 'number'
+          ? pxRes.score
+          : (typeof pxMeta.score === 'number' ? pxMeta.score : null);
+
+        const finalScore = providerScore !== null ? Math.max(score10G, providerScore) : score10G;
+
+        console.log(`[5D][PEXELS][${jobId}] Scores -> 10G:${score10G}${providerScore !== null ? ` | Provider:${providerScore}` : ''} | file="${filenameForScoring}"`);
+        scoredCandidates.push({ source: 'pexels', path: pxPath, score: finalScore, meta: pxMeta });
       }
-      console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
+    } catch (e) {
+      console.error(`[5D][PEXELS][ERR][${jobId}]`, e);
     }
 
-    // --- Try Pexels, Pixabay ---
-    let sources = [
-      { fn: findPexelsClipForScene, label: 'PEXELS' },
-      { fn: findPixabayClipForScene, label: 'PIXABAY' }
-    ];
+    // --- 3. Pixabay ---
+    try {
+      const pbRes = await findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
+      const pbPath = (pbRes && pbRes.path) ? pbRes.path : pbRes;
+      const pbMeta = (pbRes && pbRes.meta) ? pbRes.meta : {};
 
-    for (const src of sources) {
-      try {
-        let result = await src.fn(subjectOption, workDir, sceneIdx, jobId, usedClips);
-        const candidatePath = (result && result.path) ? result.path : result;
+      if (pbPath && !usedClips.includes(pbPath) && assertFileExists(pbPath, 'PIXABAY_RESULT')) {
+        const filenameForScoring =
+          pbMeta.originalName || pbMeta.filename || pbMeta.url || path.basename(pbPath);
 
-        if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, src.label + '_RESULT')) {
-          // **IMPROVED**: score with 10G for better subject match using synonyms
-          const candidateMeta = result && result.meta ? result.meta : {};
-          const score = scoreSceneCandidate(
-            {
-              filename: path.basename(candidatePath),
-              filePath: candidatePath,
-              tags: candidateMeta.tags || [],
-              title: candidateMeta.title || '',
-              description: candidateMeta.description || '',
-            },
-            subjectOption,
-            usedClips
-          );
-          console.log(`[5D][${src.label}][${jobId}] Candidate score for "${subjectOption}": ${score}`);
-          if (score >= 50) { // threshold to keep loose match feel
-            console.log(`[5D][PICK][${jobId}] ${src.label} subject match: ${candidatePath}`);
-            if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
-              jobContext.clipsToIngest.push({
-                localPath: candidatePath,
-                subject: subjectOption,
-                sceneIdx,
-                source: src.label.toLowerCase(),
-                categoryFolder
-              });
-            }
-            return candidatePath;
-          } else {
-            console.warn(`[5D][${src.label}][${jobId}] Rejected (score too low): ${candidatePath}`);
-          }
-        }
-      } catch (e) {
-        console.error(`[5D][${src.label}][ERR][${jobId}]`, e);
+        const score10G = scoreSceneCandidate(
+          {
+            filename: filenameForScoring,
+            filePath: pbPath,
+            tags: pbMeta.tags || pbMeta.keywords || [],
+            title: pbMeta.title || '',
+            description: pbMeta.description || '',
+          },
+          subjectOption,
+          usedClips
+        );
+
+        const providerScore = typeof pbRes?.score === 'number'
+          ? pbRes.score
+          : (typeof pbMeta.score === 'number' ? pbMeta.score : null);
+
+        const finalScore = providerScore !== null ? Math.max(score10G, providerScore) : score10G;
+
+        console.log(`[5D][PIXABAY][${jobId}] Scores -> 10G:${score10G}${providerScore !== null ? ` | Provider:${providerScore}` : ''} | file="${filenameForScoring}"`);
+        scoredCandidates.push({ source: 'pixabay', path: pbPath, score: finalScore, meta: pbMeta });
       }
+    } catch (e) {
+      console.error(`[5D][PIXABAY][ERR][${jobId}]`, e);
     }
 
-    // --- Unsplash ---
+    // === Decide winner across sources ===
+    if (scoredCandidates.length) {
+      scoredCandidates.sort((a, b) => b.score - a.score);
+      const winner = scoredCandidates[0];
+      console.log(`[5D][PICK][${jobId}] Winner across sources for "${subjectOption}" => ${winner.source.toUpperCase()} | score=${winner.score} | path=${winner.path}`);
+
+      if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
+        jobContext.clipsToIngest.push({
+          localPath: winner.path,
+          subject: subjectOption,
+          sceneIdx,
+          source: winner.source,
+          categoryFolder
+        });
+      }
+      return winner.path;
+    }
+
+    // --- If nothing from video sources, try Unsplash then Ken Burns ---
     try {
       let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
       if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
@@ -252,7 +267,6 @@ async function findClipForScene({
       console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
     }
 
-    // --- Ken Burns ---
     try {
       let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (kenBurnsResult && !usedClips.includes(kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
