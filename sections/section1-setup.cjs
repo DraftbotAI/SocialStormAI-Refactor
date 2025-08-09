@@ -1,6 +1,6 @@
 /* =============================================================
    SECTION 1: SETUP & DEPENDENCIES (Modular)
-   -----------------------------------------------------------
+   ------------------------------------------------------------
    - Loads env, modules, API keys, and paths
    - Configures AWS, Cloudflare R2, OpenAI, FFmpeg
    - Exports helpers, configs, and global state
