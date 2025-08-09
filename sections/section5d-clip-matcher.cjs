@@ -71,6 +71,28 @@ function assertFileExists(file, label = 'FILE', minSize = 10240) {
   }
 }
 
+// --- NEW: mark winners as used (path, basename, provider url/name) IN PLACE ---
+function markUsedInPlace(usedClips, candidate = {}) {
+  try {
+    if (!Array.isArray(usedClips)) return;
+    const p = candidate.path || candidate.filePath || '';
+    const b = p ? path.basename(p) : '';
+    const u = candidate.meta?.url || candidate.url || '';
+    const n = candidate.meta?.originalName || candidate.filename || '';
+
+    const add = v => { if (v && !usedClips.includes(v)) usedClips.push(v); };
+    add(p); add(b); add(u); add(n);
+  } catch (_) {}
+}
+
+// --- NEW: helper to check if candidate already used ---
+function isUsed(usedClips, candidatePath, meta = {}) {
+  if (!Array.isArray(usedClips)) return false;
+  const base = candidatePath ? path.basename(candidatePath) : '';
+  const url  = meta?.url || '';
+  return usedClips.includes(candidatePath) || (base && usedClips.includes(base)) || (url && usedClips.includes(url));
+}
+
 async function findClipForScene({
   subject,
   sceneIdx,
@@ -145,22 +167,26 @@ async function findClipForScene({
 
     // === 1. R2 (download + score) ===
     try {
-      // Use the smarter 10A to select & download best R2 candidate for the subject
-      const r2Local = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId, new Set(usedClips));
+      // NOTE: pass the array directly (not a Set)
+      const r2Local = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (r2Local && assertFileExists(r2Local, 'R2_RESULT')) {
-        const r2Score = scoreSceneCandidate(
-          {
-            filename: path.basename(r2Local),
-            filePath: r2Local,
-            tags: [], // filenames in R2 usually contain the subject tokens
-            title: path.basename(r2Local),
-            description: ''
-          },
-          subjectOption,
-          usedClips
-        );
-        console.log(`[5D][R2][${jobId}] Candidate score for "${subjectOption}": ${r2Score}`);
-        scoredCandidates.push({ source: 'r2', path: r2Local, score: r2Score });
+        if (isUsed(usedClips, r2Local)) {
+          console.log(`[5D][R2][${jobId}] Skipping used R2 candidate: ${path.basename(r2Local)}`);
+        } else {
+          const r2Score = scoreSceneCandidate(
+            {
+              filename: path.basename(r2Local),
+              filePath: r2Local,
+              tags: [],
+              title: path.basename(r2Local),
+              description: ''
+            },
+            subjectOption,
+            usedClips
+          );
+          console.log(`[5D][R2][${jobId}] Candidate score for "${subjectOption}": ${r2Score}`);
+          scoredCandidates.push({ source: 'r2', path: r2Local, score: r2Score, meta: {} });
+        }
       } else {
         console.log(`[5D][R2][${jobId}] No local R2 candidate for "${subjectOption}"`);
       }
@@ -174,30 +200,34 @@ async function findClipForScene({
       const pxPath = (pxRes && pxRes.path) ? pxRes.path : pxRes;
       const pxMeta = (pxRes && pxRes.meta) ? pxRes.meta : {};
 
-      if (pxPath && !usedClips.includes(pxPath) && assertFileExists(pxPath, 'PEXELS_RESULT')) {
-        const filenameForScoring =
-          pxMeta.originalName || pxMeta.filename || pxMeta.url || path.basename(pxPath);
+      if (pxPath && assertFileExists(pxPath, 'PEXELS_RESULT')) {
+        if (isUsed(usedClips, pxPath, pxMeta)) {
+          console.log(`[5D][PEXELS][${jobId}] Skipping used Pexels candidate: ${path.basename(pxPath)}`);
+        } else {
+          const filenameForScoring =
+            pxMeta.originalName || pxMeta.filename || pxMeta.url || path.basename(pxPath);
 
-        const score10G = scoreSceneCandidate(
-          {
-            filename: filenameForScoring,
-            filePath: pxPath,
-            tags: pxMeta.tags || pxMeta.keywords || [],
-            title: pxMeta.title || '',
-            description: pxMeta.description || '',
-          },
-          subjectOption,
-          usedClips
-        );
+          const score10G = scoreSceneCandidate(
+            {
+              filename: filenameForScoring,
+              filePath: pxPath,
+              tags: pxMeta.tags || pxMeta.keywords || [],
+              title: pxMeta.title || '',
+              description: pxMeta.description || '',
+            },
+            subjectOption,
+            usedClips
+          );
 
-        const providerScore = typeof pxRes?.score === 'number'
-          ? pxRes.score
-          : (typeof pxMeta.score === 'number' ? pxMeta.score : null);
+          const providerScore = typeof pxRes?.score === 'number'
+            ? pxRes.score
+            : (typeof pxMeta.score === 'number' ? pxMeta.score : null);
 
-        const finalScore = providerScore !== null ? Math.max(score10G, providerScore) : score10G;
+          const finalScore = providerScore !== null ? Math.max(score10G, providerScore) : score10G;
 
-        console.log(`[5D][PEXELS][${jobId}] Scores -> 10G:${score10G}${providerScore !== null ? ` | Provider:${providerScore}` : ''} | file="${filenameForScoring}"`);
-        scoredCandidates.push({ source: 'pexels', path: pxPath, score: finalScore, meta: pxMeta });
+          console.log(`[5D][PEXELS][${jobId}] Scores -> 10G:${score10G}${providerScore !== null ? ` | Provider:${providerScore}` : ''} | file="${filenameForScoring}"`);
+          scoredCandidates.push({ source: 'pexels', path: pxPath, score: finalScore, meta: pxMeta });
+        }
       }
     } catch (e) {
       console.error(`[5D][PEXELS][ERR][${jobId}]`, e);
@@ -209,30 +239,34 @@ async function findClipForScene({
       const pbPath = (pbRes && pbRes.path) ? pbRes.path : pbRes;
       const pbMeta = (pbRes && pbRes.meta) ? pbRes.meta : {};
 
-      if (pbPath && !usedClips.includes(pbPath) && assertFileExists(pbPath, 'PIXABAY_RESULT')) {
-        const filenameForScoring =
-          pbMeta.originalName || pbMeta.filename || pbMeta.url || path.basename(pbPath);
+      if (pbPath && assertFileExists(pbPath, 'PIXABAY_RESULT')) {
+        if (isUsed(usedClips, pbPath, pbMeta)) {
+          console.log(`[5D][PIXABAY][${jobId}] Skipping used Pixabay candidate: ${path.basename(pbPath)}`);
+        } else {
+          const filenameForScoring =
+            pbMeta.originalName || pbMeta.filename || pbMeta.url || path.basename(pbPath);
 
-        const score10G = scoreSceneCandidate(
-          {
-            filename: filenameForScoring,
-            filePath: pbPath,
-            tags: pbMeta.tags || pbMeta.keywords || [],
-            title: pbMeta.title || '',
-            description: pbMeta.description || '',
-          },
-          subjectOption,
-          usedClips
-        );
+          const score10G = scoreSceneCandidate(
+            {
+              filename: filenameForScoring,
+              filePath: pbPath,
+              tags: pbMeta.tags || pbMeta.keywords || [],
+              title: pbMeta.title || '',
+              description: pbMeta.description || '',
+            },
+            subjectOption,
+            usedClips
+          );
 
-        const providerScore = typeof pbRes?.score === 'number'
-          ? pbRes.score
-          : (typeof pbMeta.score === 'number' ? pbMeta.score : null);
+          const providerScore = typeof pbRes?.score === 'number'
+            ? pbRes.score
+            : (typeof pbMeta.score === 'number' ? pbMeta.score : null);
 
-        const finalScore = providerScore !== null ? Math.max(score10G, providerScore) : score10G;
+          const finalScore = providerScore !== null ? Math.max(score10G, providerScore) : score10G;
 
-        console.log(`[5D][PIXABAY][${jobId}] Scores -> 10G:${score10G}${providerScore !== null ? ` | Provider:${providerScore}` : ''} | file="${filenameForScoring}"`);
-        scoredCandidates.push({ source: 'pixabay', path: pbPath, score: finalScore, meta: pbMeta });
+          console.log(`[5D][PIXABAY][${jobId}] Scores -> 10G:${score10G}${providerScore !== null ? ` | Provider:${providerScore}` : ''} | file="${filenameForScoring}"`);
+          scoredCandidates.push({ source: 'pixabay', path: pbPath, score: finalScore, meta: pbMeta });
+        }
       }
     } catch (e) {
       console.error(`[5D][PIXABAY][ERR][${jobId}]`, e);
@@ -240,9 +274,17 @@ async function findClipForScene({
 
     // === Decide winner across sources ===
     if (scoredCandidates.length) {
-      scoredCandidates.sort((a, b) => b.score - a.score);
+      // small tiebreak so equal scores don't always pick the first
+      scoredCandidates.sort((a, b) => (b.score - a.score) || (Math.random() - 0.5));
       const winner = scoredCandidates[0];
       console.log(`[5D][PICK][${jobId}] Winner across sources for "${subjectOption}" => ${winner.source.toUpperCase()} | score=${winner.score} | path=${winner.path}`);
+
+      // ✅ mark as used IN PLACE (prevents repeats incl. mega-scene next line)
+      markUsedInPlace(usedClips, { 
+        path: winner.path, 
+        meta: winner.meta || {}, 
+        filename: path.basename(winner.path)
+      });
 
       if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
         jobContext.clipsToIngest.push({
@@ -259,8 +301,9 @@ async function findClipForScene({
     // --- If nothing from video sources, try Unsplash then Ken Burns ---
     try {
       let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
-      if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
+      if (unsplashResult && !isUsed(usedClips, unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
         console.log(`[5D][PICK][${jobId}] Unsplash image (loose): ${unsplashResult}`);
+        markUsedInPlace(usedClips, { path: unsplashResult, filename: path.basename(unsplashResult) });
         return unsplashResult;
       }
     } catch (e) {
@@ -269,8 +312,9 @@ async function findClipForScene({
 
     try {
       let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
-      if (kenBurnsResult && !usedClips.includes(kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+      if (kenBurnsResult && !isUsed(usedClips, kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
         console.log(`[5D][PICK][${jobId}] KenBurns fallback (loose): ${kenBurnsResult}`);
+        markUsedInPlace(usedClips, { path: kenBurnsResult, filename: path.basename(kenBurnsResult) });
         return kenBurnsResult;
       }
     } catch (e) {
@@ -283,8 +327,9 @@ async function findClipForScene({
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
       for (const fname of r2Files) {
-        if (!usedClips.includes(fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
+        if (!isUsed(usedClips, fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
           console.warn(`[5D][FINALFALLBACK][${jobId}] ABSOLUTE fallback, picking any available R2: ${fname}`);
+          markUsedInPlace(usedClips, { path: fname, filename: path.basename(fname) });
           return fname;
         }
       }
@@ -298,6 +343,7 @@ async function findClipForScene({
     let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
       console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic fallback: ${kenBurnsResult}`);
+      markUsedInPlace(usedClips, { path: kenBurnsResult, filename: path.basename(kenBurnsResult) });
       return kenBurnsResult;
     }
   } catch (e) {
