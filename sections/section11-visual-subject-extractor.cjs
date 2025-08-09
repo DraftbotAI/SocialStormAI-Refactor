@@ -1,558 +1,250 @@
 // ===========================================================
-// SECTION 11: GPT VISUAL SUBJECT EXTRACTOR (STRICT V5+)
-// Purpose: Return the strongest visual subject for a script line,
-//          with a canonical subject + optional feature/action + type,
-//          plus a backward-compatible list of 4 concrete options.
-//
-// Upgrades:
-// - 10M canonical normalization (aliases → canonical; features/actions).
-// - STRICT structured object for downstream precision:
-//     { primary, featureOrAction, parent, alternates[], type }
-// - Detects and prefers EXACT landmark/object/animal matches.
-// - Extracts visual FEATURES/ACTIONS when present (e.g., "crown", "drinking milk").
-// - Entity typing: landmark | animal | object | food | person | other.
-// - Hard culls generic/abstract/off-topic; landmark-mode bans animals/people.
-// - Deterministic JSON from GPT with resilient parsing & heuristic merge.
-// - Backward compatibility: extractVisualSubjects() → [4 strings].
-// - MAX LOGGING, retries/backoff, time-budgeting, no placeholders.
-// ===========================================================
+// SECTION 11: GPT VISUAL SUBJECT EXTRACTOR (PROD VERSION)
+// Returns the top 4 visual subject candidates for any script line.
+// Order: Exact > Contextual > Symbolic > General Fallback
+// Bulletproof: Handles blank, weird, or failed GPT cases.
+// Super max logging, deterministic, no silent failures.
+// ============================================================
 
-'use strict';
+const { ChatGPTAPI } = require('chatgpt'); // You can swap this to your preferred OpenAI SDK
+const path = require('path');
+const fs = require('fs');
 
-const axios = require('axios');
+const apiKey = process.env.OPENAI_API_KEY;
+if (!apiKey) throw new Error('[11][FATAL] OPENAI_API_KEY not set in env!');
 
-// ==== ENV / MODEL ====
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-if (!OPENAI_API_KEY) {
-  console.error('[11][BOOT][WARN] OPENAI_API_KEY not set — will use heuristic-only mode.');
-}
-const DEFAULT_MODEL =
-  (process.env.VISUAL_SUBJECT_MODEL || process.env.OPENAI_MODEL_11 || 'gpt-4o').trim();
+const gpt = new ChatGPTAPI({ apiKey });
 
-// ==== 10M CANONICAL SUBJECTS ====
-let resolveCanonicalSubject = null;
-try {
-  ({ resolveCanonicalSubject } = require('./section10m-canonical-subjects.cjs'));
-  console.log('[11][INIT] 10M canonical subject resolver connected.');
-} catch (e) {
-  console.warn('[11][INIT][WARN] 10M canonical resolver not found. Using internal soft normalizer.');
-  resolveCanonicalSubject = (input) => {
-    const s = (typeof input === 'string' ? input : (input?.primary || '')).toLowerCase().trim();
-    const feature = (input?.featureOrAction || input?.feature || input?.action || '').toLowerCase().trim();
-    const type = (input?.type || guessTypeFromText(s)).toLowerCase();
-    return {
-      canonical: s,
-      type,
-      featureOrAction: feature,
-      parent: s,
-      alternates: Array.isArray(input?.alternates) ? input.alternates : [],
-      synonyms: [],
-      languageVariants: [],
-      features: [],
-      actions: [],
-    };
-  };
-}
+console.log('[11][INIT] Visual Subject Extractor module loaded');
 
-// ===========================================================
-// Constants / Heuristics
-// ===========================================================
-const MAX_RETRIES = 1;
-const INITIAL_BACKOFF_MS = 600;
-const DEFAULT_AXIOS_TIMEOUT_MS = 22000;
-const DEFAULT_TIME_BUDGET_MS = 18000; // overall helper budget
-
-const GENERIC_SUBJECTS = [
-  'face','person','man','woman','it','thing','someone','something','body','eyes',
-  'kid','boy','girl','they','we','people','scene','sign','logo','text',
-  'view','image','photo','background','object','shape','figure','stuff'
-];
-
-const ANIMAL_TERMS = [
-  'dog','cat','monkey','orangutan','ape','gorilla','chimp','chimpanzee','lion','tiger','bear','elephant','giraffe',
-  'wolf','fox','deer','rabbit','horse','cow','sheep','goat','pig','bird','eagle','hawk','owl','panda','kitten','puppy'
-];
-
-const PERSON_TERMS = [
-  'man','woman','boy','girl','child','person','people','couple','tourist','tourists','crowd','dancer','runner'
-];
-
-const LANDMARK_KEYWORDS = [
-  'castle','wall','tower','bridge','cathedral','basilica','church','mosque','temple','pagoda','synagogue','monument',
-  'statue','pyramid','palace','fort','fortress','acropolis','colosseum','amphitheatre','arena',
-  'mount','mountain','peak','summit','canyon','gorge','valley','desert','dune','oasis','volcano',
-  'falls','waterfall','lake','river','glacier','fjord','coast','beach','shore','harbor','harbour','bay',
-  'park','national park','forest','rainforest','reserve','island','archipelago','peninsula',
-  'museum','gallery','library','university','campus','garden','plaza','square','market','bazaar'
-];
-
-// Known-landmark expansions / typo corrections (extend over time)
-const LANDMARK_CORRECTIONS = [
-  { re: /\bedinboro\b/gi, fix: 'Edinburgh' },
-  { re: /\bgreat\s*wall\b/gi, fix: 'Great Wall of China' },
-  { re: /\bpyrimids\b/gi, fix: 'Pyramids' },
-  { re: /\bgiza\s*pyramids?\b/gi, fix: 'Giza Pyramids' },
-  { re: /\bstonehenge\b/gi, fix: 'Stonehenge' },
-  { re: /\beifel\b/gi, fix: 'Eiffel' },
-  { re: /\beiffel\s*tower\b/gi, fix: 'Eiffel Tower' },
-  { re: /\bmachu\s*piccu\b/gi, fix: 'Machu Picchu' },
-  { re: /\bchichen\s*itza\b/gi, fix: 'Chichen Itza' },
-  { re: /\bburj\s*khalifa\b/gi, fix: 'Burj Khalifa' },
-];
-
-const PLACE_HINTS = [
-  'edinburgh','scotland','china','beijing','paris','france','rome','italy','london','england','egypt','giza','peru','cuzco','mexico','new york','usa','united states','united kingdom','uk'
-];
-
-const FEATURE_WORDS = [
-  'crown','torch','clock face','summit','top','base','arches','interior','entrance','pedestal','tablet','face','facade'
-];
-const ACTION_WORDS = [
-  'drinking milk','drinking','pouring milk','pouring','fainting','grazing','climbing','running','sleeping','purring',
-  'eating','swinging','time-lapse','timelapse','fireworks','light show','aerial','close-up','close up'
-];
-
-// ===========================================================
-// Utilities
-// ===========================================================
-function nowMs() { return Date.now(); }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function cleanString(s) { return String(s || '').trim(); }
-
-function _normLower(s) {
-  return cleanString(s)
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '') // strip diacritics
-    .toLowerCase();
-}
-
-function toAlphaNumLower(s) { return _normLower(s).replace(/[^a-z0-9]+/g, ' ').trim(); }
-
-function isGeneric(phrase) {
-  const base = toAlphaNumLower(phrase);
-  if (!base) return true;
-  return GENERIC_SUBJECTS.some(g => base.includes(toAlphaNumLower(g)));
-}
-
-function containsAny(list, s) {
-  const L = _normLower(s);
-  return (list || []).some(t => L.includes(_normLower(String(t))));
-}
-function containsAnimalWord(s) { return containsAny(ANIMAL_TERMS, s); }
-function containsPersonWord(s) { return containsAny(PERSON_TERMS, s); }
-function containsLandmarkKeyword(s) { return containsAny(LANDMARK_KEYWORDS, s); }
-
-function titleCase(s) {
-  const raw = cleanString(s);
-  return raw
-    .split(/\s+/)
-    .map(w => w.match(/^[A-Za-z]/) ? (w[0].toUpperCase() + w.slice(1)) : w)
-    .join(' ');
-}
-
-function applyLandmarkCorrections(s) {
-  let out = s;
-  for (const { re, fix } of LANDMARK_CORRECTIONS) out = out.replace(re, fix);
-  return out;
-}
-
-function extractQuotedPhrases(s) {
-  const res = [];
-  const re = /"([^"]+)"|'([^']+)'/g;
-  let m;
-  while ((m = re.exec(s)) !== null) res.push(m[1] || m[2]);
-  return res;
-}
-
-function extractProperNounSequences(s) {
-  const tokens = s.split(/(\s+|[.,!?;:()"'])/).filter(Boolean);
-  const out = [];
-  let curr = [];
-  for (const t of tokens) {
-    if (/^[A-Z][a-zA-Z'-]*$/.test(t)) curr.push(t);
-    else { if (curr.length >= 2) out.push(curr.join(' ')); curr = []; }
-  }
-  if (curr.length >= 2) out.push(curr.join(' '));
-  return out;
-}
-
-function maybeLandmarkFromKeywords(s) {
-  const words = s.split(/\s+/);
-  let best = null;
-  for (let i = 0; i < words.length; i++) {
-    const wLow = words[i].toLowerCase();
-    if (LANDMARK_KEYWORDS.some(k => wLow === k || wLow.endsWith(k))) {
-      const start = Math.max(0, i - 3);
-      const end = Math.min(words.length - 1, i + 3);
-      const phrase = words.slice(start, end + 1).join(' ');
-      if (!best || phrase.length > best.length) best = phrase;
-    }
-  }
-  return best ? titleCase(best) : null;
-}
-
-function boostPlaceHints(s) {
-  const low = _normLower(s);
-  return PLACE_HINTS.filter(h => low.includes(h));
-}
-
-function uniqueKeepOrder(arr) {
-  const seen = new Set();
-  const out = [];
-  for (const x of (arr || [])) {
-    const key = toAlphaNumLower(x);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(x);
-  }
-  return out;
-}
-
-function shouldForceLandmarkMode(itemsOrText) {
-  if (Array.isArray(itemsOrText)) return itemsOrText.some(containsLandmarkKeyword);
-  return containsLandmarkKeyword(itemsOrText);
-}
-
-function strongCull(items) {
-  return (items || [])
-    .map(x => x && String(x).trim())
-    .filter(Boolean)
-    .filter(x => x.length > 2)
-    .filter(x => !isGeneric(x));
-}
-
-function guessTypeFromText(s) {
-  const L = _normLower(s);
-  if (containsAny(LANDMARK_KEYWORDS, L)) return 'landmark';
-  if (containsAny(ANIMAL_TERMS, L)) return 'animal';
-  if (/\b(milk|bread|pizza|burger|coffee|tea|drink|food)\b/.test(L)) return 'food';
-  if (containsAny(PERSON_TERMS, L)) return 'person';
-  return 'other';
-}
-
-function extractFeatureOrAction(text) {
-  const L = _normLower(text);
-  const hits = [];
-  FEATURE_WORDS.forEach(f => { if (L.includes(_normLower(f))) hits.push(f); });
-  ACTION_WORDS.forEach(a => { if (L.includes(_normLower(a))) hits.push(a); });
-  hits.sort((a, b) => b.split(' ').length - a.split(' ').length); // prefer multi-word
-  return hits[0] || '';
-}
-
-function combineAndCullLandmarkMode(items, landmarkMode) {
-  let merged = uniqueKeepOrder(items);
-  merged = strongCull(merged);
-  if (landmarkMode) {
-    const before = merged.length;
-    merged = merged.filter(x => !containsAnimalWord(x) && !containsPersonWord(x));
-    const after = merged.length;
-    if (after < before) {
-      console.log(`[11][FILTER] Landmark mode culled ${before - after} animal/person items`);
-    }
-  }
-  return merged;
-}
-
-function toFourStrings(primary, alternates, mainTopic) {
-  const base = [];
-  if (primary?.featureOrAction) base.push(`${primary.primary} ${primary.featureOrAction}`.trim());
-  base.push(primary.primary);
-  (alternates || []).forEach(a => base.push(a));
-  const final = strongCull(uniqueKeepOrder(base));
-  while (final.length < 4) {
-    const filler = final.length === 0 ? mainTopic : `${primary.primary} close-up`;
-    if (!final.includes(filler)) final.push(filler);
-    else final.push(`${primary.primary} view`);
-  }
-  return final.slice(0, 4);
-}
-
-// ===========================================================
-// GPT Prompting (JSON enforced, resilient parsing)
-// ===========================================================
-function buildSystemPrompt(genericBlacklistCSV) {
-  return [
-    'You are a senior editor for viral short-form videos (TikTok/Reels/Shorts).',
-    'Given a script line and main topic, produce a single STRICT visual subject with optional feature/action and type.',
-    'Rules:',
-    '- Only return visuals that can literally appear on screen (objects/places/landmarks/animals/actions).',
-    '- Ignore metaphors, jokes, emotions, or abstract concepts.',
-    '- Prefer PROPER NOUNS and famous landmarks/objects/animals when present.',
-    '- If the line names a landmark/place, DO NOT return animals/people unless they are part of the landmark (e.g., guards at Buckingham Palace).',
-    `- NEVER use: ${genericBlacklistCSV}.`,
-    '- No duplicates. No vague words like “scene”, “view”, “image”, “photo”, “text”, “logo”.',
-    '',
-    'Output MUST be strict JSON with this shape:',
-    '{ "primary": "string", "featureOrAction": "string", "type": "landmark|animal|object|food|person|other", "alternates": ["string", "string"] }',
-    'No explanations. No extra fields.',
-  ].join('\n');
-}
-
-function buildUserPrompt(line, mainTopic, heuristicHints) {
-  const hints = heuristicHints && heuristicHints.length
-    ? `Heuristic hints detected: ${heuristicHints.join('; ')}`
-    : 'Heuristic hints: none';
-  return [
-    `Line: "${line}"`,
-    `Main topic: "${mainTopic}"`,
-    hints,
-    'Return the JSON object now.'
-  ].join('\n');
-}
-
-async function callOpenAIForStrict(line, mainTopic, heuristicHints, timeLeftMs) {
-  const system = buildSystemPrompt(GENERIC_SUBJECTS.join(', '));
-  const user = buildUserPrompt(line, mainTopic, heuristicHints);
-
-  const reqBody = {
-    model: DEFAULT_MODEL,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ],
-    temperature: 0.1,
-    max_tokens: 180
-  };
-
-  const timeoutMs = Math.min(DEFAULT_AXIOS_TIMEOUT_MS, Math.max(2500, timeLeftMs));
-  console.log(`[11][HTTP][POST] /chat/completions model=${DEFAULT_MODEL} timeoutMs=${timeoutMs}`);
-
-  const res = await axios.post(
-    'https://api.openai.com/v1/chat/completions',
-    reqBody,
-    {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: timeoutMs,
-      validateStatus: () => true,
-    }
-  );
-
-  const status = res?.status;
-  if (!status || status < 200 || status >= 300) {
-    console.error('[11][GPT][HTTP_ERR]', status, res?.data);
-    return null;
-  }
-
-  const raw = res?.data?.choices?.[0]?.message?.content?.trim() || '';
-  console.log('[11][GPT][RAW]', raw);
-
-  // Parse strict JSON defensively
-  let obj = null;
+async function extractVisualSubjects(line, mainTopic) {
   try {
-    obj = JSON.parse(raw);
-  } catch {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m) {
-      try { obj = JSON.parse(m[0]); } catch { /* ignore */ }
-    }
-  }
+    console.log(`[11][INPUT] Script line: "${line}"`);
+    console.log(`[11][INPUT] Main topic: "${mainTopic}"`);
 
-  if (obj && typeof obj === 'object') {
-    const primary = cleanString(obj.primary || '');
-    const featureOrAction = cleanString(obj.featureOrAction || obj.feature || obj.action || '');
-    const type = cleanString(obj.type || '');
-    const alternates = Array.isArray(obj.alternates) ? obj.alternates.map(cleanString).filter(Boolean) : [];
-    return { primary, featureOrAction, type, alternates };
-  }
-
-  return null;
-}
-
-// ===========================================================
-// Public API (STRICT object) + Back-compat array of 4 strings
-// ===========================================================
-async function extractVisualSubjectStrict(line, mainTopic, opts = {}) {
-  const started = nowMs();
-  const timeBudgetMs = Math.max(4000, Number(opts.timeBudgetMs) || DEFAULT_TIME_BUDGET_MS);
-
-  try {
-    const rawLine = cleanString(line);
-    const rawTopic = cleanString(mainTopic || 'misc');
-    console.log(`[11][INPUT] Line="${rawLine}" | Topic="${rawTopic}" | model=${DEFAULT_MODEL}`);
-
-    if (!rawLine) {
-      console.warn('[11][WARN] Blank/invalid line. Returning topic-based filler.');
-      const fallbackObj = resolveCanonicalSubject({ primary: rawTopic, type: guessTypeFromText(rawTopic) });
-      const normalized = {
-        primary: titleCase(fallbackObj.canonical || rawTopic),
-        featureOrAction: '',
-        parent: titleCase(fallbackObj.canonical || rawTopic),
-        alternates: [],
-        type: fallbackObj.type || 'other',
-      };
-      console.log('[11][RESULT][STRICT][FALLBACK_EMPTY]', normalized);
-      return normalized;
+    if (!line || typeof line !== 'string' || !line.trim()) {
+      console.warn('[11][WARN] Blank/invalid line. Returning main topic as fallback.');
+      return [mainTopic, mainTopic, mainTopic, mainTopic];
     }
 
-    // ---------- Heuristic Pre-pass ----------
-    let preCandidates = [];
+    // === The prompt ===
+    const prompt = `
+You are a world-class viral video editor for TikTok, Reels, and Shorts. For each line of a script, your ONLY job is to pick the 4 best possible VISUAL subjects to show in that scene.
 
-    let correctedLine = applyLandmarkCorrections(rawLine);
-    if (correctedLine !== rawLine) {
-      console.log(`[11][HEUR][CORRECT] "${rawLine}" -> "${correctedLine}"`);
+RULES:
+- Only return objects, places, people, or actions that can be LITERALLY SHOWN ON SCREEN.
+- Ignore all metaphors, jokes, emotions, abstract concepts, or invisible things.
+- If a line is not visually showable, use the main topic as fallback.
+- Each answer should be concrete, visual, and unambiguous.
+- No duplicate items, no vague generalities.
+
+Return **EXACTLY** 4, in order: primary, context, fallback, general.
+Output ONLY a numbered list. No intro, no explanation, no extra info.
+
+EXAMPLES:
+
+Line: "You’ll never believe what’s hidden inside the Statue of Liberty’s basement..."
+Main topic: "Statue of Liberty"
+1. Statue of Liberty
+2. Statue of Liberty basement
+3. Underground storage room
+4. Old artifacts in storage
+
+Line: "The Eiffel Tower isn't just for views—it's a labyrinth of secrets"
+Main topic: "Eiffel Tower"
+1. Eiffel Tower
+2. Aerial view of the Eiffel Tower
+3. Paris skyline from the tower
+4. Close-up of Eiffel Tower structure
+
+Line: "First, chop the onions and garlic."
+Main topic: "Cooking"
+1. Chopped onions
+2. Garlic cloves
+3. Chef chopping vegetables
+4. Cutting board with vegetables
+
+Line: "Now sauté everything until golden brown."
+Main topic: "Cooking"
+1. Sauté pan on stove
+2. Onions and garlic in pan
+3. Wooden spatula stirring food
+4. Pan with golden-brown food
+
+Line: "Steph Curry pulls up from deep."
+Main topic: "NBA basketball"
+1. Steph Curry shooting a 3-pointer
+2. Golden State Warriors court
+3. Crowd watching basketball game
+4. Basketball in mid-air
+
+Line: "Check your credit card statement for these charges."
+Main topic: "Personal finance"
+1. Credit card statement paper
+2. Hand holding credit card
+3. Online banking screen
+4. Calculator and bills on table
+
+Line: "Always wear sunscreen, even on cloudy days."
+Main topic: "Skin care"
+1. Person applying sunscreen to face
+2. Sunscreen bottle
+3. Sun shining behind clouds
+4. Close-up of skin
+
+Line: "Let's hike to the top of Angel's Landing."
+Main topic: "Travel"
+1. Angel's Landing mountain
+2. People hiking on a trail
+3. Panoramic view from summit
+4. National park landscape
+
+Line: "Tie the scarf with a simple knot for a classic look."
+Main topic: "Fashion"
+1. Person tying a scarf
+2. Close-up of scarf knot
+3. Scarf draped on mannequin
+4. Various scarf styles
+
+Line: "Plug the HDMI cable into your laptop and TV."
+Main topic: "Tech tutorial"
+1. HDMI cable
+2. Hand plugging cable into laptop
+3. Laptop and TV side-by-side
+4. HDMI ports on devices
+
+Line: "Fold the paper in half and crease firmly."
+Main topic: "DIY crafts"
+1. Hands folding paper
+2. Paper being creased
+3. Close-up of origami fold
+4. Stack of folded papers
+
+Line: "Whisk the eggs and sugar until fluffy."
+Main topic: "Baking"
+1. Whisk in bowl with eggs and sugar
+2. Fluffy egg mixture
+3. Hand whisking ingredients
+4. Baking setup on kitchen counter
+
+Line: "Decorate the Christmas tree with lights."
+Main topic: "Christmas"
+1. Christmas tree with lights
+2. Person hanging ornaments
+3. Box of decorations
+4. Living room decorated for holidays
+
+Line: "Do 10 pushups to finish strong."
+Main topic: "Home workout"
+1. Person doing pushups
+2. Fitness mat on floor
+3. Trainer demonstrating exercise
+4. Close-up of hands on mat
+
+Line: "Pour the coffee and enjoy your morning."
+Main topic: "Morning routine"
+1. Coffee being poured into mug
+2. Steaming cup of coffee
+3. Breakfast table setup
+4. Sunlight through kitchen window
+
+Line: "Click the subscribe button to stay updated."
+Main topic: "YouTube channel"
+1. Mouse cursor on subscribe button
+2. YouTube page on laptop
+3. Notification bell icon
+4. Person watching video on phone
+
+Line: "Slice the avocado and remove the pit."
+Main topic: "Healthy eating"
+1. Sliced avocado
+2. Knife removing avocado pit
+3. Cutting board with avocado halves
+4. Bowl of fresh avocado slices
+
+Line: "The puppy wags its tail when it sees you."
+Main topic: "Cute animals"
+1. Puppy wagging tail
+2. Dog looking up at person
+3. Owner petting puppy
+4. Dog park scene
+
+Line: "Pour the cement and smooth it out."
+Main topic: "Home improvement"
+1. Wet cement being poured
+2. Worker smoothing cement with trowel
+3. Construction site foundation
+4. Finished smooth cement floor
+
+Line: "Scan the QR code to join."
+Main topic: "Event sign-up"
+1. QR code on screen
+2. Person scanning with phone
+3. Event invitation flyer
+4. Group of people at event
+
+Line: "Add chili flakes for a spicy kick."
+Main topic: "Cooking"
+1. Chili flakes being sprinkled
+2. Spicy dish in bowl
+3. Red chili peppers
+4. Close-up of food with spices
+
+NOW RETURN:
+Line: "${line}"
+Main topic: "${mainTopic}"
+`;
+
+    // ========== MAIN GPT CALL ==========
+    const res = await gpt.sendMessage(prompt);
+
+    // ========== Parse GPT response (numbered list) ==========
+    let list = [];
+    if (res && typeof res.text === 'string') {
+      list = res.text
+        .trim()
+        .split('\n')
+        .map(l => l.replace(/^\d+[\.\)]\s*/, '').replace(/^- /, '').trim())
+        .map(l => l.replace(/[^A-Za-z0-9,\-\'\"\.\!\(\)\:\&\s\/]/g, '')) // strip any emoji or GPT weirdness
+        .filter(Boolean);
     }
 
-    const quoted = extractQuotedPhrases(correctedLine);
-    if (quoted.length) console.log('[11][HEUR][QUOTED]', quoted);
-    preCandidates.push(...quoted);
-
-    const pn = extractProperNounSequences(correctedLine);
-    if (pn.length) console.log('[11][HEUR][PROPER]', pn);
-    preCandidates.push(...pn);
-
-    const lm = maybeLandmarkFromKeywords(correctedLine);
-    if (lm) {
-      console.log('[11][HEUR][LANDMARK]', lm);
-      preCandidates.push(lm);
-    }
-
-    const hints = boostPlaceHints(correctedLine);
-    if (hints.length) console.log('[11][HEUR][PLACE_HINTS]', hints);
-
-    const landmarkMode = shouldForceLandmarkMode(preCandidates) || shouldForceLandmarkMode(correctedLine);
-    if (landmarkMode) console.log('[11][MODE] Landmark mode is ON');
-
-    // ---------- GPT STRICT (with tiny retry/backoff) ----------
-    let gptStrict = null;
-    if (OPENAI_API_KEY) {
-      let attempt = 0;
-      while (attempt <= MAX_RETRIES) {
-        const used = nowMs() - started;
-        const left = timeBudgetMs - used;
-        if (left <= 300) {
-          console.warn(`[11][TIMEOUT][ATTEMPT=${attempt}] Budget exhausted; skipping GPT.`);
-          break;
-        }
-
-        if (attempt > 0) {
-          const backoff = Math.min(INITIAL_BACKOFF_MS * (2 ** (attempt - 1)), 1500);
-          console.log(`[11][RETRY][ATTEMPT=${attempt}] Backing off ${backoff}ms (left=${left}ms)`);
-          await sleep(Math.min(backoff, Math.max(0, left - 150)));
-        }
-
-        try {
-          gptStrict = await callOpenAIForStrict(correctedLine, rawTopic, preCandidates, left);
-          if (gptStrict) break;
-        } catch (e) {
-          console.error('[11][GPT][ERR]', e?.response?.data || e?.message || e);
-        }
-
-        attempt++;
+    // ========== Deduplicate, validate, enforce exactly 4 ==========
+    const seen = new Set();
+    let finalList = [];
+    for (let item of list) {
+      if (item && !seen.has(item.toLowerCase()) && item.length > 2) {
+        seen.add(item.toLowerCase());
+        finalList.push(item);
       }
-    } else {
-      console.warn('[11][NO_API] Skipping GPT; using heuristics only.');
+      if (finalList.length === 4) break;
     }
+    // Always return 4 items, padding with mainTopic if needed
+    while (finalList.length < 4) finalList.push(mainTopic);
+    if (finalList.length > 4) finalList = finalList.slice(0, 4);
 
-    // ---------- Heuristic feature/action ----------
-    const heuristicFeature = extractFeatureOrAction(correctedLine);
-
-    // Decide primary candidate
-    const mergedPre = uniqueKeepOrder(preCandidates);
-    let primaryGuess = gptStrict?.primary || mergedPre[0] || correctedLine;
-    primaryGuess = titleCase(applyLandmarkCorrections(primaryGuess));
-
-    if (isGeneric(primaryGuess)) {
-      const alt = mergedPre.find(x => !isGeneric(x)) || rawTopic;
-      console.log(`[11][HEUR][PRIMARY_REPLACE] "${primaryGuess}" -> "${alt}"`);
-      primaryGuess = titleCase(alt);
-    }
-
-    // Feature/action merge
-    let featureOrAction = cleanString(gptStrict?.featureOrAction || heuristicFeature || '');
-    if (_normLower(featureOrAction) === 'close up') featureOrAction = 'close-up';
-
-    // Type
-    const validTypes = new Set(['landmark','animal','object','food','person','other']);
-    let type = (gptStrict?.type && validTypes.has(_normLower(gptStrict.type))) ? _normLower(gptStrict.type) : guessTypeFromText(primaryGuess);
-
-    // Alternates
-    let alternates = Array.isArray(gptStrict?.alternates) ? gptStrict.alternates : [];
-    alternates = uniqueKeepOrder([...alternates, ...mergedPre.slice(1)]).filter(x => !isGeneric(x));
-
-    // Landmark-mode cull alternates containing animals/people
-    if (type === 'landmark' || landmarkMode) {
-      const before = alternates.length;
-      alternates = alternates.filter(x => !containsAnimalWord(x) && !containsPersonWord(x));
-      if (before !== alternates.length) {
-        console.log(`[11][ALT][CULL] Removed ${before - alternates.length} off-topic alternates in landmark mode`);
-      }
-    }
-
-    // ---------- Canonical normalization via 10M ----------
-    const normalized10M = resolveCanonicalSubject({
-      primary: primaryGuess,
-      featureOrAction,
-      parent: primaryGuess, // parent collapses to canonical in 10M
-      alternates,
-      type,
-    });
-
-    // Final strict object
-    const strictObj = {
-      primary: titleCase(normalized10M.canonical || primaryGuess),
-      featureOrAction: normalized10M.featureOrAction || '',
-      parent: titleCase(normalized10M.canonical || primaryGuess),
-      alternates: (normalized10M.alternates || []).map(titleCase).slice(0, 6),
-      type: normalized10M.type || type || 'other',
-    };
-
-    console.log('[11][RESULT][STRICT]', strictObj);
-    return strictObj;
+    console.log('[11][RESULT] Visual subjects:', finalList);
+    return finalList;
   } catch (err) {
-    console.error('[11][FATAL]', err);
-    const topic = cleanString(mainTopic || 'misc') || 'misc';
-    const fallbackObj = {
-      primary: titleCase(topic),
-      featureOrAction: '',
-      parent: titleCase(topic),
-      alternates: [],
-      type: guessTypeFromText(topic),
-    };
-    console.log('[11][RESULT][STRICT][FALLBACK2]', fallbackObj);
-    return fallbackObj;
+    console.error('[11][ERROR] GPT visual extraction failed:', err);
+    return [mainTopic, mainTopic, mainTopic, mainTopic]; // Ultimate fallback
   }
 }
 
-/**
- * Backward-compatible helper used by 5D (returns 4 strings).
- * Internally uses STRICT to get primary/feature/alternates and expands to 4.
- */
-async function extractVisualSubjects(line, mainTopic, opts = {}) {
-  const strict = await extractVisualSubjectStrict(line, mainTopic, opts);
-  const arr4 = toFourStrings(strict, strict.alternates, cleanString(mainTopic || 'misc'));
-  console.log('[11][RESULT][ARRAY4]', arr4);
-  return arr4;
-}
-
-// ===========================================================
-// CLI Test Utility
-// Usage: node section11-visual-subject-extractor.cjs "<line>" "<topic>"
-// ===========================================================
+// === UTILITY: Test single line from CLI ===
 if (require.main === module) {
-  const testLine = process.argv[2] || 'Inside the Statue of Liberty’s crown, visitors peer through the windows.';
-  const mainTopic = process.argv[3] || 'World Landmarks';
-  (async () => {
-    const strict = await extractVisualSubjectStrict(testLine, mainTopic);
-    console.log('[11][CLI][STRICT]', strict);
-    const arr = await extractVisualSubjects(testLine, mainTopic);
-    console.log('[11][CLI][ARRAY4]', arr);
-  })().catch(err => {
-    console.error('[11][CLI][ERR]', err);
-    process.exit(1);
-  });
+  // Allow quick CLI testing for debugging
+  const testLine = process.argv[2] || 'The pyramids were built over 20 years.';
+  const mainTopic = process.argv[3] || 'Egypt';
+  extractVisualSubjects(testLine, mainTopic)
+    .then(subjects => {
+      console.log('Extracted subjects:', subjects);
+      process.exit(0);
+    })
+    .catch(err => {
+      console.error('Test error:', err);
+      process.exit(1);
+    });
 }
 
-// ===========================================================
-// Exports
-// ===========================================================
-module.exports = {
-  extractVisualSubjects,
-  extractVisualSubjectStrict,
-  LANDMARK_KEYWORDS,
-  ANIMAL_TERMS,
-  PERSON_TERMS,
-};
+module.exports = { extractVisualSubjects };

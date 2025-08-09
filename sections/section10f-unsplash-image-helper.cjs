@@ -27,11 +27,9 @@ function cleanForFilename(str) {
     .replace(/^-|-$/g, '')
     .slice(0, 70);
 }
-
 function getKeywords(str) {
   return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
 }
-
 function majorWords(subject) {
   return (subject || '')
     .toLowerCase()
@@ -39,7 +37,6 @@ function majorWords(subject) {
     .split(/\s+/)
     .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
 }
-
 function normalizeForMatch(str) {
   return (str || '')
     .toLowerCase()
@@ -101,17 +98,8 @@ function scoreUnsplashImage(result, subject, usedClips = []) {
   // Bonus for popularity
   if (result.likes && result.likes > 100) score += 4;
 
-  // Penalize used: check url, id, and basename for bulletproof dedupe
-  if (
-    usedClips.some(u =>
-      (typeof u === 'string') &&
-      (
-        (result.urls?.full && u.includes(result.urls.full)) ||
-        (result.id && u.includes(result.id)) ||
-        (u.endsWith('.jpg') && path.basename(u).includes(result.id))
-      )
-    )
-  ) score -= 100;
+  // Penalize used
+  if (usedClips && usedClips.some(u => result.urls?.full && u.includes(result.urls.full))) score -= 100;
 
   // Recent images (higher ID, slight bump)
   if (result.id && Number(result.id) > 1000000) score += 1;
@@ -128,11 +116,10 @@ function scoreUnsplashImage(result, subject, usedClips = []) {
  * @param {string} workDir - Directory to save downloaded image
  * @param {number} sceneIdx - Scene index (for filename uniqueness)
  * @param {string} jobId - For logging
- * @param {Array<string>} usedClips - List of used image URLs, IDs, filenames to prevent dupes
- * @param {Object} jobContext - Job-wide context for image tracking
+ * @param {Array<string>} usedClips - List of used image URLs to prevent dupes
  * @returns {Promise<string|null>} Local file path if successful, else null
  */
-async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId = 'nojob', usedClips = [], jobContext = {}) {
+async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId = 'nojob', usedClips = []) {
   if (!UNSPLASH_ACCESS_KEY) {
     console.error('[10F][NO_API_KEY][%s] Unsplash API key missing.', jobId);
     return null;
@@ -143,7 +130,7 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
   }
 
   const query = encodeURIComponent(subject);
-  const apiUrl = `https://api.unsplash.com/search/photos?query=${query}&orientation=portrait&per_page=15&client_id=${UNSPLASH_ACCESS_KEY}`;
+  const apiUrl = `https://api.unsplash.com/search/photos?query=${query}&orientation=portrait&per_page=10&client_id=${UNSPLASH_ACCESS_KEY}`;
 
   console.log(`[10F][REQ][${jobId}] Searching Unsplash: "${subject}"`);
 
@@ -152,6 +139,7 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
     const response = await axios.get(apiUrl, { timeout: 15000 });
     json = response.data;
   } catch (err) {
+    // Log 401, key missing, and other errors but NEVER block or loop
     if (err?.response?.status === 401) {
       console.error(`[10F][API_ERR][${jobId}] Unsplash 401 Unauthorized: Invalid API key or quota exceeded.`);
     } else {
@@ -165,32 +153,21 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
     return null;
   }
 
-  // Score all results, skip any in usedClips (by url, id, or basename)
+  // Score all results, skip used
   let scored = json.results.map(result => ({
     result,
     score: scoreUnsplashImage(result, subject, usedClips),
-    url: result.urls.full,
-    id: result.id
-  })).filter(item =>
-    item.url &&
-    !usedClips.some(u =>
-      (typeof u === 'string') &&
-      (
-        (item.url && u.includes(item.url)) ||
-        (item.id && u.includes(item.id)) ||
-        (u.endsWith('.jpg') && path.basename(u).includes(item.id))
-      )
-    )
-  );
+    url: result.urls.full
+  })).filter(item => item.url && !usedClips.some(u => u.includes(item.url)));
 
   scored.sort((a, b) => b.score - a.score);
 
-  // Log top candidates
+  // Log top candidates (always show if any)
   scored.slice(0, 5).forEach((s, i) => {
-    console.log(`[10F][CANDIDATE][${jobId}] [${i + 1}] url=${s.url} | id=${s.id} | score=${s.score} | desc="${s.result.alt_description || ''}"`);
+    console.log(`[10F][CANDIDATE][${jobId}] [${i + 1}] url=${s.url} | score=${s.score} | desc="${s.result.alt_description || ''}"`);
   });
 
-  // Always pick the best available (score > 15 if possible, else fallback to top)
+  // === KEY IMPROVEMENT: Always pick the best available, even if weak match ===
   let best = scored.find(s => s.score > 15) || scored[0];
   if (!best && scored.length > 0) best = scored[0];
   if (!best || !best.url) {
@@ -199,15 +176,12 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
   }
 
   // Download image to local job dir
-  const filename = `unsplash_${cleanForFilename(subject)}_${sceneIdx}_${best.id}.jpg`;
+  const filename = `unsplash_${cleanForFilename(subject)}_${sceneIdx}.jpg`;
   const outPath = path.join(workDir, filename);
 
   // If file already exists and is >10KB, skip download
   if (fs.existsSync(outPath) && fs.statSync(outPath).size > 10 * 1024) {
     console.log(`[10F][CACHE][${jobId}] HIT: ${outPath}`);
-    if (jobContext && Array.isArray(jobContext.imagesUsed)) {
-      jobContext.imagesUsed.push({ localPath: outPath, url: best.url, subject, id: best.id, sceneIdx });
-    }
     return outPath;
   }
 
@@ -230,9 +204,6 @@ async function findUnsplashImageForScene(subject, workDir, sceneIdx = 0, jobId =
 
     if (fs.existsSync(outPath) && fs.statSync(outPath).size > 10 * 1024) {
       console.log(`[10F][DOWNLOAD][${jobId}] OK: Saved Unsplash image to ${outPath}`);
-      if (jobContext && Array.isArray(jobContext.imagesUsed)) {
-        jobContext.imagesUsed.push({ localPath: outPath, url: best.url, subject, id: best.id, sceneIdx });
-      }
       return outPath;
     } else {
       throw new Error('Downloaded file is too small or missing');

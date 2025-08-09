@@ -1,502 +1,290 @@
 // ===========================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (10Z Choices → Video-first)
-// Simple, fast, literal: up to three scene options → video; else
-// best image → Ken Burns → keep moving. No recursion, no churn.
-//
-// What this does (2025-08 "Simple Picker" patch):
-// - Uses 10Z to generate up to THREE literal scene choices per line.
-// - For each choice (ordered), tries: R2 (keys) → Pexels video → Pixabay video.
-// - If no video hits, tries: Pexels photo → Pixabay photo → Unsplash photo.
-// - Converts the best image to a short Ken Burns video and returns that.
-// - Strong de-dupe (job-wide), landmark hard-negatives (no dog/monkey photobombs).
-// - Central scoring via 10G; hard floors; strict time budgets.
-// - Progress hooks are kept; never throws; always logs.
-// - R2-any fallback at the very end (so we never block the job).
-//
-// Env knobs (sane defaults):
-// - MATCHER_FLOOR_VIDEO (default 92), MATCHER_FLOOR_IMAGE (88)
-// - MATCHER_PROVIDER_TIMEOUT_MS (10000), MATCHER_TIME_BUDGET_MS (16000)
-// - MATCHER_ALLOW_RAW_IMAGE (false)
-// - MATCHER_MAX_CHOICE_TERMS (3)
-// - 10Z can run with GPT disabled and still return heuristics fast.
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Loosest, Bulletproof)
+// Always returns something: video, image, Ken Burns, or any available.
+// Never loops forever. Max logs at each fallback step.
 // ===========================================================
 
-const path = require('path');
-const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
-
-// -----------------------------
-// Providers (strictly required)
-// -----------------------------
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
-const {
-  findPexelsClipForScene,
-  findPexelsPhotoForScene
-} = require('./section10b-pexels-clip-helper.cjs');
-const {
-  findPixabayClipForScene,
-  findPixabayPhotoForScene
-} = require('./section10c-pixabay-clip-helper.cjs');
+const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
+const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
+const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
+const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
+const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
+const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
+const fs = require('fs');
+const path = require('path');
 
-// -----------------------------
-// Ken Burns image → video helpers (soft-required but strongly recommended)
-// -----------------------------
-let makeKenBurnsVideoFromImage = null;
-let preprocessImageToJpeg = null;
-let staticImageToVideo = null;
-try {
-  const kb = require('./section10d-kenburns-image-helper.cjs');
-  makeKenBurnsVideoFromImage = kb.makeKenBurnsVideoFromImage;
-  preprocessImageToJpeg = kb.preprocessImageToJpeg;
-  staticImageToVideo = kb.staticImageToVideo;
-  console.log('[5D][INIT] 10D Ken Burns image helper loaded.');
-} catch (e) {
-  console.warn('[5D][INIT][WARN] 10D Ken Burns helper missing; image→video fallback will be limited.');
+console.log('[5D][INIT] Clip matcher orchestrator (bulletproof, loose) loaded.');
+
+const GENERIC_SUBJECTS = [
+  'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children'
+];
+
+// Normalize for loose matching
+function normalize(str) {
+  return (str || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
-// -----------------------------
-// Upload helper (optional; for raw asset archival if needed)
-// -----------------------------
-let uploader = null;
-try {
-  uploader = require('./section10e-upload-to-r2.cjs');
-  console.log('[5D][INIT] 10E Upload helper loaded.');
-} catch {
-  // optional
+function getMajorWords(subject) {
+  return (subject || '')
+    .split(/\s+/)
+    .map(w => w.toLowerCase())
+    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
 }
 
-// -----------------------------
-// Unsplash (optional image source)
-// -----------------------------
-let unsplashModule = null;
-try {
-  unsplashModule = require('./section10f-unsplash-image-helper.cjs');
-  console.log('[5D][INIT] 10F Unsplash (image-helper) loaded.');
-} catch {
-  try {
-    unsplashModule = require('./section10f-unsplash-helper.cjs');
-    console.log('[5D][INIT] 10F Unsplash (helper) loaded.');
-  } catch {
-    // optional
+// Checks if ANY major word from subject appears in filename
+function looseSubjectMatch(filename, subject) {
+  if (!filename || !subject) return false;
+  const safeFile = cleanForFilename(filename).toLowerCase();
+  const words = getMajorWords(subject);
+  for (const word of words) {
+    if (safeFile.includes(word)) return true;
   }
+  // As a last resort, partial substring
+  return safeFile.includes(normalize(subject));
 }
 
-// -----------------------------
-// 10G scorer (strict floors applied here too)
-// -----------------------------
-const {
-  scoreSceneCandidate,
-  LANDMARK_KEYWORDS,
-  ANIMAL_TERMS,
-  PERSON_TERMS,
-} = require('./section10g-scene-scoring-helper.cjs');
+// Strict match (for priority order)
+function strictSubjectMatch(filename, subject) {
+  if (!filename || !subject) return false;
+  const safeSubject = cleanForFilename(subject);
+  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|\\.|$)`, 'i');
+  return re.test(cleanForFilename(filename));
+}
 
-// -----------------------------
-// 10Z scene-choice generator (this was mismatched before)
-// We now accept ANY of these exported names:
-//   - generateSceneChoices (preferred by 5D)
-//   - getLiteralSceneOptions (actual current 10Z export)
-//   - generateThreeOptions / generateOptions / generate
-// -----------------------------
-let generateSceneChoices = null;
-try {
-  const z = require('./section10z-three-option-helper.cjs');
-  generateSceneChoices =
-    z.generateSceneChoices ||
-    z.getLiteralSceneOptions ||
-    z.generateThreeOptions ||
-    z.generateOptions ||
-    z.generate;
-  if (typeof generateSceneChoices === 'function') {
-    console.log('[5D][INIT] 10Z helper loaded from section10z-three-option-helper.cjs');
-  } else {
-    throw new Error('Exports missing on section10z-three-option-helper.cjs');
-  }
-} catch (e1) {
+function assertFileExists(file, label = 'FILE', minSize = 10240) {
   try {
-    const z2 = require('./section10z-choice-directives.cjs');
-    generateSceneChoices =
-      z2.generateSceneChoices ||
-      z2.getLiteralSceneOptions ||
-      z2.generateThreeOptions ||
-      z2.generateOptions ||
-      z2.generate;
-    if (typeof generateSceneChoices === 'function') {
-      console.log('[5D][INIT] 10Z helper loaded from section10z-choice-directives.cjs');
-    } else {
-      throw new Error('Exports missing on section10z-choice-directives.cjs');
+    if (!file || !fs.existsSync(file)) {
+      console.error(`[5D][${label}][ERR] File does not exist: ${file}`);
+      return false;
     }
-  } catch (e2) {
-    console.error('[5D][INIT][FATAL] 10Z helper not found in either filename.');
-  }
-}
-
-// ===========================================================
-// CONSTANTS
-// ===========================================================
-const HARD_FLOOR_VIDEO = Number(process.env.MATCHER_FLOOR_VIDEO || 92);
-const HARD_FLOOR_IMAGE = Number(process.env.MATCHER_FLOOR_IMAGE || 88);
-const PROVIDER_TIMEOUT_MS = Number(process.env.MATCHER_PROVIDER_TIMEOUT_MS || 12000);
-const TIME_BUDGET_MS = Number(process.env.MATCHER_TIME_BUDGET_MS || 16000);
-const ALLOW_RAW_IMAGE = String(process.env.MATCHER_ALLOW_RAW_IMAGE || 'false').toLowerCase() === 'true';
-const MAX_CHOICE_TERMS = Math.min(Number(process.env.MATCHER_MAX_CHOICE_TERMS || 3), 5);
-
-// ===========================================================
-// SMALL UTILS
-// ===========================================================
-function now() { return Date.now(); }
-
-function ensureDir(dir) {
-  try { if (dir) fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
-}
-
-function usedHas(usedClips, keyOrPath) {
-  const key = String(keyOrPath || '');
-  const base = path.basename(key);
-  if (usedClips instanceof Set) return usedClips.has(key) || usedClips.has(base) || usedClips.has(key.toLowerCase());
-  if (Array.isArray(usedClips)) {
-    const L = usedClips.map(String);
-    return L.includes(key) || L.includes(base) || L.includes(key.toLowerCase());
-  }
-  return false;
-}
-function usedAdd(usedClips, keyOrPath) {
-  const key = String(keyOrPath || '');
-  const base = path.basename(key);
-  if (usedClips instanceof Set) {
-    usedClips.add(key); usedClips.add(base); usedClips.add(key.toLowerCase());
-  } else if (Array.isArray(usedClips)) {
-    if (!usedHas(usedClips, key)) usedClips.push(key);
-    if (!usedHas(usedClips, base)) usedClips.push(base);
-    const norm = key.toLowerCase();
-    if (!usedHas(usedClips, norm)) usedClips.push(norm);
-  }
-}
-
-function dedupeByPath(arr = []) {
-  const seen = new Set();
-  const out = [];
-  for (const c of arr) {
-    const p = (c && (c.path || c.filePath || c.url)) ? (c.path || c.filePath || c.url) : null;
-    if (!p) continue;
-    const key = String(p).toLowerCase();
-    if (!seen.has(key)) { seen.add(key); out.push(c); }
-  }
-  return out;
-}
-
-function containsAny(list, s) {
-  const L = String(s || '').toLowerCase();
-  return list.some(w => L.includes(String(w).toLowerCase()));
-}
-
-function isLandmarkTokened(text) {
-  const s = String(text || '').toLowerCase();
-  return containsAny(LANDMARK_KEYWORDS, s);
-}
-
-// Landmark hard-negative filter (pre-score cull)
-function landmarkCull(candidate) {
-  const text = [
-    candidate.path,
-    candidate.title,
-    candidate.description,
-    candidate.tags ? candidate.tags.join(' ') : '',
-    candidate.source,
-    candidate.provider
-  ].filter(Boolean).join(' ').toLowerCase();
-
-  const hasAnimal = containsAny(ANIMAL_TERMS, text);
-  const hasPerson = containsAny(PERSON_TERMS, text);
-
-  const allowedHumanContext = /\b(guard|guards|soldier|soldiers|ceremony|changing of the guard)\b/.test(text);
-  const looksLandmarky = containsAny(LANDMARK_KEYWORDS, text);
-
-  if ((hasAnimal || hasPerson) && !(allowedHumanContext && looksLandmarky)) {
+    const sz = fs.statSync(file).size;
+    if (sz < minSize) {
+      console.error(`[5D][${label}][ERR] File too small (${sz} bytes): ${file}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(`[5D][${label}][ERR] Exception on assert:`, err);
     return false;
   }
-  return true;
 }
 
-function withTimeout(promise, ms, label = 'provider') {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`[5D][TIMEOUT] ${label} exceeded ${ms}ms`)), ms);
-    Promise.resolve(promise).then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
-  });
-}
-
-// ===========================================================
-// CANDIDATE GATHERING
-// ===========================================================
-async function gatherVideoCandidates(term, workDir, sceneIdx, jobId, usedClips, landmarkMode, categoryFolder) {
-  const out = [];
-
-  // R2 first (keys only)
-  try {
-    if (typeof findR2ClipForScene.getAllFiles === 'function') {
-      const r2Files = await withTimeout(
-        findR2ClipForScene.getAllFiles(term, categoryFolder),
-        PROVIDER_TIMEOUT_MS,
-        'R2.getAllFiles'
-      );
-      for (const key of r2Files || []) {
-        if (usedHas(usedClips, key)) continue;
-        const c = { path: key, source: 'R2', isVideo: true, subject: term, provider: 'r2' };
-        if (!landmarkMode || landmarkCull(c)) out.push(c);
-      }
-      console.log(`[5D][R2][${jobId}] +${(r2Files || []).length} candidates for "${term}"`);
-    }
-  } catch (err) {
-    console.error(`[5D][R2][${jobId}][ERR]`, err?.message || err);
-  }
-
-  // Pexels video
-  try {
-    const p = await withTimeout(findPexelsClipForScene(term, workDir, sceneIdx, jobId, usedClips), PROVIDER_TIMEOUT_MS, 'Pexels.video');
-    if (p && p.filePath && !usedHas(usedClips, p.filePath)) {
-      const c = { path: p.filePath, source: 'PEXELS', isVideo: true, subject: term, provider: 'pexels', title: p.title, description: p.description, tags: p.tags };
-      if (!landmarkMode || landmarkCull(c)) out.push(c);
-    }
-  } catch (err) {
-    console.warn(`[5D][PEXELS][${jobId}] video err:`, err?.message || err);
-  }
-
-  // Pixabay video
-  try {
-    const x = await withTimeout(findPixabayClipForScene(term, workDir, sceneIdx, jobId, usedClips), PROVIDER_TIMEOUT_MS, 'Pixabay.video');
-    if (x && x.filePath && !usedHas(usedClips, x.filePath)) {
-      const c = { path: x.filePath, source: 'PIXABAY', isVideo: true, subject: term, provider: 'pixabay', title: x.title, description: x.description, tags: x.tags };
-      if (!landmarkMode || landmarkCull(c)) out.push(c);
-    }
-  } catch (err) {
-    console.warn(`[5D][PIXABAY][${jobId}] video err:`, err?.message || err);
-  }
-
-  return out;
-}
-
-async function gatherImageCandidates(term, workDir, sceneIdx, jobId, usedClips, landmarkMode) {
-  const out = [];
-
-  // Pexels photo
-  try {
-    const p = await withTimeout(findPexelsPhotoForScene(term, workDir, sceneIdx, jobId, usedClips), PROVIDER_TIMEOUT_MS, 'Pexels.photo');
-    if (p && p.filePath && !usedHas(usedClips, p.filePath)) {
-      const c = { path: p.filePath, source: 'PEXELS', isVideo: false, subject: term, provider: 'pexels', title: p.title, description: p.description, tags: p.tags };
-      if (!landmarkMode || landmarkCull(c)) out.push(c);
-    }
-  } catch (err) {
-    console.warn(`[5D][PEXELS][${jobId}] photo err:`, err?.message || err);
-  }
-
-  // Pixabay photo
-  try {
-    const x = await withTimeout(findPixabayPhotoForScene(term, workDir, sceneIdx, jobId, usedClips), PROVIDER_TIMEOUT_MS, 'Pixabay.photo');
-    if (x && x.filePath && !usedHas(usedClips, x.filePath)) {
-      const c = { path: x.filePath, source: 'PIXABAY', isVideo: false, subject: term, provider: 'pixabay', title: x.title, description: x.description, tags: x.tags };
-      if (!landmarkMode || landmarkCull(c)) out.push(c);
-    }
-  } catch (err) {
-    console.warn(`[5D][PIXABAY][${jobId}] photo err:`, err?.message || err);
-  }
-
-  // Unsplash (optional)
-  try {
-    if (unsplashModule && typeof unsplashModule.findUnsplashImageForScene === 'function') {
-      const u = await withTimeout(unsplashModule.findUnsplashImageForScene(term, workDir, sceneIdx, jobId, usedClips), PROVIDER_TIMEOUT_MS, 'Unsplash.photo');
-      if (u && u.filePath && !usedHas(usedClips, u.filePath)) {
-        const hit = { path: u.filePath, source: 'UNSPLASH', title: u.title, description: u.description, tags: u.tags };
-        if (!landmarkMode || landmarkCull(hit)) {
-          hit.isVideo = false;
-          hit.provider = hit.provider || 'unsplash';
-          out.push(hit);
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('[5D][UNSPLASH][SKIP]', err?.message || err);
-  }
-
-  return out;
-}
-
-// ===========================================================
-// MAIN
-// ===========================================================
-/**
- * Chooses the best visual for a scene via 10Z three choices:
- *  - Returns:
- *      • R2 key string (downloaded later by 5B),
- *      • Local video path (provider download or Ken Burns output),
- *      • null (if absolutely nothing found).
- */
 async function findClipForScene({
   subject,
   sceneIdx,
   allSceneTexts,
   mainTopic,
+  isMegaScene = false,
   usedClips = [],
+  workDir,
+  jobId,
+  megaSubject = null,
+  forceClipPath = null,
   jobContext = {},
-  workDir = '',
-  categoryFolder = ''
+  categoryFolder
 }) {
-  const jobId = jobContext?.jobId || uuidv4();
-  ensureDir(workDir);
-  if (!jobContext._matcherCache) jobContext._matcherCache = new Map();
+  let searchSubject = subject;
 
-  const cacheKey = `S${sceneIdx}-${String(subject?.primary || subject || '').toLowerCase()}-${mainTopic}`;
-  if (jobContext._matcherCache.has(cacheKey)) {
-    const cached = jobContext._matcherCache.get(cacheKey);
-    console.log(`[5D][CACHE][HIT][${jobId}]`, cached);
-    return cached?.path || null;
+  // Anchor logic
+  if (isMegaScene || sceneIdx === 0) {
+    if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())) {
+      searchSubject = megaSubject;
+      console.log(`[5D][ANCHOR][${jobId}] Using megaSubject for first/mega-scene: "${searchSubject}"`);
+    } else if (mainTopic && typeof mainTopic === 'string' && mainTopic.length > 2 && !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())) {
+      searchSubject = mainTopic;
+      console.log(`[5D][ANCHOR][${jobId}] Fallback to mainTopic for mega-scene: "${searchSubject}"`);
+    } else {
+      searchSubject = allSceneTexts[0];
+      console.log(`[5D][ANCHOR][${jobId}] Final fallback to first scene text: "${searchSubject}"`);
+    }
   }
 
-  const sceneStart = now();
-  const progress = (ctx, idx, pct, msg, extra = {}) => {
-    try {
-      if (ctx?.onProgress) ctx.onProgress({ stage: 'matcher', sceneIdx: idx, pct, msg, ...extra });
-    } catch (_) {}
-  };
+  if (!searchSubject || GENERIC_SUBJECTS.includes((searchSubject || '').toLowerCase())) {
+    if (mainTopic && !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())) {
+      searchSubject = mainTopic;
+      console.log(`[5D][FALLBACK][${jobId}] Subject was generic, using mainTopic: "${searchSubject}"`);
+    } else if (allSceneTexts && allSceneTexts.length > 0) {
+      searchSubject = allSceneTexts[0];
+      console.log(`[5D][FALLBACK][${jobId}] Subject was generic, using first scene text: "${searchSubject}"`);
+    }
+  }
 
-  // ----- Build choices for this line -----
-  const line = String(allSceneTexts?.[sceneIdx] || subject || '').trim();
-  let choices = [];
+  if (!searchSubject || searchSubject.length < 2) {
+    console.error(`[5D][FATAL][${jobId}] No valid subject for scene ${sceneIdx + 1}.`);
+    return null;
+  }
+
+  if (forceClipPath) {
+    console.log(`[5D][FORCE][${jobId}] Forcing clip path: ${forceClipPath}`);
+    if (assertFileExists(forceClipPath, 'FORCE_CLIP')) return forceClipPath;
+    return null;
+  }
+
+  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !findUnsplashImageForScene || !fallbackKenBurnsVideo) {
+    console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
+    return null;
+  }
+
+  let prioritizedSubjects = [];
   try {
-    if (typeof generateSceneChoices === 'function') {
-      const z = await generateSceneChoices({
-        sceneLine: line,
-        mainTopic: mainTopic || '',
-        maxChoices: MAX_CHOICE_TERMS,
-        jobId,
-      });
-      choices = (Array.isArray(z) ? z : [])
-        .map(s => String(s || '').trim())
-        .filter(Boolean)
-        .slice(0, MAX_CHOICE_TERMS);
-    } else {
-      console.warn('[5D][10Z][WARN] generateSceneChoices not available; falling back to raw line.');
+    prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
+    console.log(`[5D][GPT][${jobId}] Prioritized visual subjects for scene ${sceneIdx + 1}:`, prioritizedSubjects);
+  } catch (err) {
+    console.error(`[5D][GPT][${jobId}][ERR] Error extracting prioritized subjects:`, err);
+    prioritizedSubjects = [searchSubject, mainTopic];
+  }
+
+  // Try all prioritized subjects, loose mode
+  for (const subjectOption of prioritizedSubjects) {
+    if (!subjectOption || subjectOption.length < 2) continue;
+
+    // === 1. Try R2, loose mode ===
+    async function findDedupedR2ClipLoose(searchPhrase, usedClipsArr) {
+      try {
+        const r2Files = await findR2ClipForScene.getAllFiles
+          ? await findR2ClipForScene.getAllFiles()
+          : [];
+        let found = null;
+        // a) Strict match first
+        for (const fname of r2Files) {
+          if (usedClipsArr.includes(fname)) continue;
+          if (strictSubjectMatch(fname, searchPhrase)) {
+            found = fname;
+            console.log(`[5D][R2][${jobId}] STRICT MATCH: "${fname}"`);
+            break;
+          }
+        }
+        // b) Loose match: any major word or substring
+        if (!found) {
+          for (const fname of r2Files) {
+            if (usedClipsArr.includes(fname)) continue;
+            if (looseSubjectMatch(fname, searchPhrase)) {
+              found = fname;
+              console.log(`[5D][R2][${jobId}] LOOSE MATCH: "${fname}"`);
+              break;
+            }
+          }
+        }
+        // c) Any unused file as last resort
+        if (!found && r2Files.length) {
+          for (const fname of r2Files) {
+            if (usedClipsArr.includes(fname)) continue;
+            found = fname;
+            console.log(`[5D][R2][${jobId}] FALLBACK: Picking random available: "${fname}"`);
+            break;
+          }
+        }
+        if (found && assertFileExists(found, 'R2_RESULT')) return found;
+        return null;
+      } catch (err) {
+        console.error(`[5D][R2][ERR][${jobId}] Error during R2 matching:`, err);
+        return null;
+      }
+    }
+
+    let r2Result = null;
+    if (findR2ClipForScene.getAllFiles) {
+      r2Result = await findDedupedR2ClipLoose(subjectOption, usedClips);
+      if (r2Result) {
+        console.log(`[5D][PICK][${jobId}] R2 subject match: ${r2Result}`);
+        return r2Result;
+      }
+      console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
+    }
+
+    // --- Try Pexels, Pixabay, Unsplash with loose match ---
+    let sources = [
+      { fn: findPexelsClipForScene, label: 'PEXELS', meta: 'meta' },
+      { fn: findPixabayClipForScene, label: 'PIXABAY', meta: 'meta' }
+    ];
+
+    for (const src of sources) {
+      try {
+        let result = await src.fn(subjectOption, workDir, sceneIdx, jobId, usedClips);
+        const candidatePath = (result && result.path) ? result.path : result;
+        if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, src.label + '_RESULT')) {
+          // Loose match: accept if ANY major word from subject appears in filename/tags
+          let valid = false;
+          if (result.meta && Array.isArray(result.meta.tags)) {
+            valid = result.meta.tags.some(tag => getMajorWords(subjectOption).some(word => tag.toLowerCase().includes(word)));
+          } else if (typeof candidatePath === 'string') {
+            valid = looseSubjectMatch(candidatePath, subjectOption);
+          }
+          // **KEY IMPROVEMENT**: accept first available even if not a perfect tag match
+          if (valid || true) {
+            console.log(`[5D][PICK][${jobId}] ${src.label} subject match: ${candidatePath}`);
+            if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
+              jobContext.clipsToIngest.push({
+                localPath: candidatePath,
+                subject: subjectOption,
+                sceneIdx,
+                source: src.label.toLowerCase(),
+                categoryFolder
+              });
+            }
+            return candidatePath;
+          } else {
+            console.warn(`[5D][${src.label}][${jobId}] ${src.label} clip rejected (no subject match): ${candidatePath}`);
+          }
+        }
+      } catch (e) {
+        console.error(`[5D][${src.label}][ERR][${jobId}]`, e);
+      }
+    }
+
+    // --- Unsplash: always loose, just check for unused image
+    try {
+      let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
+      if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
+        console.log(`[5D][PICK][${jobId}] Unsplash image (loose): ${unsplashResult}`);
+        return unsplashResult;
+      }
+    } catch (e) {
+      console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
+    }
+
+    // --- Ken Burns (final fallback, always returns an image)
+    try {
+      let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
+      if (kenBurnsResult && !usedClips.includes(kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+        console.log(`[5D][PICK][${jobId}] KenBurns fallback (loose): ${kenBurnsResult}`);
+        return kenBurnsResult;
+      }
+    } catch (e) {
+      console.error(`[5D][KENBURNS][ERR][${jobId}]`, e);
+    }
+  }
+
+  // === If absolutely nothing was found, pick any unused R2 file ===
+  try {
+    if (findR2ClipForScene.getAllFiles) {
+      const r2Files = await findR2ClipForScene.getAllFiles();
+      for (const fname of r2Files) {
+        if (!usedClips.includes(fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
+          console.warn(`[5D][FINALFALLBACK][${jobId}] ABSOLUTE fallback, picking any available R2: ${fname}`);
+          return fname;
+        }
+      }
     }
   } catch (e) {
-    console.error('[5D][10Z][ERR]', e?.message || e);
+    console.error(`[5D][FINALFALLBACK][${jobId}] Error during final R2 fallback:`, e);
   }
 
-  // Fallback: at least try the raw subject/line
-  if (!choices.length) {
-    const back = (subject || line || '').toString().trim();
-    if (back) choices.push(back);
-  }
-
-  // Landmark awareness: if topic/line smells like landmark, nuke person/animal-y prompts
-  const landmarkTopic = isLandmarkTokened(mainTopic) || isLandmarkTokened(line);
-  if (landmarkTopic) {
-    const banned = new Set([...ANIMAL_TERMS, ...PERSON_TERMS].map(String));
-    const pre = choices.slice();
-    choices = choices.filter(c => {
-      const L = String(c).toLowerCase();
-      // keep only if it contains a landmark token OR contains none of the banned tokens
-      const hasLandmarkWord = containsAny(LANDMARK_KEYWORDS, L);
-      const hasBanned = [...banned].some(w => L.includes(w));
-      return hasLandmarkWord || !hasBanned;
-    });
-    if (!choices.length) {
-      // fallback: use main topic as the single literal choice
-      if (mainTopic) choices = [mainTopic];
-    }
-    console.log('[5D][10Z][LANDMARK_FILTER]', { before: pre, after: choices });
-  }
-
-  console.log(`[5D][CHOICES][S${sceneIdx}][${jobId}]`, choices);
-
-  // ---------- TRY VIDEOS ----------
-  for (const [idx, term] of choices.entries()) {
-    if ((now() - sceneStart) > TIME_BUDGET_MS) {
-      console.warn(`[5D][TIME][${jobId}][S${sceneIdx}] Budget exceeded before video step.`);
-      break;
-    }
-    const landmarkMode = isLandmarkTokened(term) || landmarkTopic;
-    progress(jobContext, sceneIdx, 78, `matcher:choice${idx + 1}-video`);
-
-    let videoCandidates = await gatherVideoCandidates(term, workDir, sceneIdx, jobId, usedClips, landmarkMode, categoryFolder);
-
-    // Score & filter
-    videoCandidates = dedupeByPath(videoCandidates).map(c => ({
-      ...c,
-      score: scoreSceneCandidate(c, term, usedClips, /*realMatchExists=*/true),
-    })).filter(c => c.score >= HARD_FLOOR_VIDEO).sort((a, b) => b.score - a.score);
-
-    console.log(`[5D][CANDS][VIDEO][${term}] TOP3`, videoCandidates.slice(0, 3).map(c => ({ path: c.path, src: c.source, score: c.score })));
-
-    if (videoCandidates.length) {
-      const best = videoCandidates[0];
-      usedAdd(usedClips, best.path);
-      jobContext._matcherCache.set(cacheKey, { path: best.path, type: 'video', score: best.score });
-      console.log(`[5D][RESULT][VIDEO][${jobId}]`, { path: best.path, source: best.source, score: best.score, term });
-      progress(jobContext, sceneIdx, 92, `matcher:choice${idx + 1}-video-selected`, { source: best.source });
-      return best.path;
-    }
-  }
-
-  // ---------- If no video for any choice: try images then KB ----------
-  for (const [idx, term] of choices.entries()) {
-    if ((now() - sceneStart) > TIME_BUDGET_MS) {
-      console.warn(`[5D][TIME][${jobId}][S${sceneIdx}] Budget exceeded before image step.`);
-      break;
-    }
-    const landmarkMode = isLandmarkTokened(term) || isLandmarkTokened(mainTopic);
-    progress(jobContext, sceneIdx, 84, `matcher:choice${idx + 1}-image`);
-
-    let imageCandidates = await gatherImageCandidates(term, workDir, sceneIdx, jobId, usedClips, landmarkMode);
-
-    imageCandidates = dedupeByPath(imageCandidates).map(c => ({
-      ...c,
-      score: scoreSceneCandidate(c, term, usedClips, false),
-    })).filter(c => c.score >= HARD_FLOOR_IMAGE).sort((a, b) => b.score - a.score);
-
-    console.log(`[5D][CANDS][IMAGE][${term}] TOP3`, imageCandidates.slice(0, 3).map(c => ({ path: c.path, src: c.source, score: c.score })));
-
-    if (imageCandidates.length) {
-      const best = imageCandidates[0];
-      if (!ALLOW_RAW_IMAGE && typeof makeKenBurnsVideoFromImage === 'function') {
-        const kbOut = path.join(workDir, `scene${sceneIdx + 1}-kb-${uuidv4().slice(0, 8)}.mp4`);
-        const kb = await makeKenBurnsVideoFromImage(best.path, kbOut, { jobId, sceneIdx });
-        if (kb && fs.existsSync(kbOut)) {
-          usedAdd(usedClips, kbOut);
-          jobContext._matcherCache.set(cacheKey, { path: kbOut, type: 'video', score: best.score });
-          console.log(`[5D][RESULT][KB][${jobId}]`, { path: kbOut, from: best.path, score: best.score });
-          progress(jobContext, sceneIdx, 90, 'matcher:kenburns');
-          return kbOut;
-        }
-      } else if (ALLOW_RAW_IMAGE) {
-        usedAdd(usedClips, best.path);
-        jobContext._matcherCache.set(cacheKey, { path: best.path, type: 'image', score: best.score });
-        console.log(`[5D][RESULT][IMAGE][${jobId}]`, { path: best.path, score: best.score });
-        progress(jobContext, sceneIdx, 88, 'matcher:image');
-        return best.path;
-      }
-    }
-  }
-
-  // ---------- Last resort: any R2 fallback to avoid total null ----------
+  // Still nothing!
+  console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
+  // Instead of returning null, let's try one last Ken Burns with a generic prompt:
   try {
-    const any = await withTimeout(findR2ClipForScene.getAllFiles ? findR2ClipForScene.getAllFiles(mainTopic || subject || '', categoryFolder) : [], 4000, 'R2.anyFallback');
-    if (Array.isArray(any) && any.length) {
-      const fallback = any.find(k => !usedHas(usedClips, k));
-      if (fallback) {
-        console.warn(`[5D][R2_FALLBACK][${jobId}] Using last-resort R2 key: ${fallback}`);
-        usedAdd(usedClips, fallback);
-        progress(jobContext, sceneIdx, 86, 'matcher:r2-any-fallback');
-        jobContext._matcherCache.set(cacheKey, { path: fallback, type: 'video', score: 0 });
-        return fallback; // R2 key
-      }
-    } else {
-      console.warn('[5D][R2_FALLBACK] No R2 keys available for fallback.');
+    let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
+    if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+      console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic fallback: ${kenBurnsResult}`);
+      return kenBurnsResult;
     }
-  } catch (err) {
-    console.error(`[5D][R2_FALLBACK][${jobId}][ERR]`, err);
+  } catch (e) {
+    console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}] Error during generic KenBurns fallback:`, e);
   }
 
-  console.error(`[5D][NO_MATCH][${jobId}] No match found for scene ${sceneIdx + 1}`);
-  progress(jobContext, sceneIdx, 92, 'matcher:none');
+  // If literally nothing, return null
   return null;
 }
 

@@ -6,16 +6,12 @@
 // BulletproofScenes for size/audio normalization
 // Never repeats same song twice! AI mood detection fallback!
 // 2024-08: PRO — Always 9:16 output, validated output, logging
-// Upgraded: Library upload happens ONLY after final video is complete
 // ===========================================================
 
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { v4: uuidv4 } = require('uuid');
-
-// === Library upload helper (10E) ===
-const { uploadSceneClipToR2, cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 
 // === Load music moods (if available) ===
 let musicMoods = null;
@@ -231,6 +227,13 @@ async function bulletproofFile(inputPath, workDir, label) {
 // ============================================
 // MAIN CONCAT: Output is 1080x1920 (portrait, shorts format)
 // ============================================
+/**
+ * Concat scenes, returns final concat file path.
+ * @param {string[]} sceneFiles - Array of scene .mp4s
+ * @param {string} workDir
+ * @param {Object[]} sceneClipMetaList - [NEW] Optional: Array of metadata for each scene (for archiving)
+ * @returns {Promise<string>}
+ */
 async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
   sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i + 1}: ${file}`));
@@ -306,7 +309,12 @@ async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
   });
 }
 
-// === Async Scene Clip Archiver Hook (call this from 5H job cleanup if you ever want to background-archive scenes after video done) ===
+// === Async Scene Clip Archiver Hook (call this from 5H job cleanup) ===
+/**
+ * Called after video is finished. Kick off archiving scene clips to R2.
+ * @param {Object[]} sceneClipMetaList - Array of scene meta: { localFilePath, subject, sceneIdx, source, category }
+ * @param {Function} asyncArchiveFn - Function to call for each scene ({ localFilePath, subject, sceneIdx, source, category })
+ */
 async function postProcessSceneClipArchiving(sceneClipMetaList, asyncArchiveFn) {
   if (!Array.isArray(sceneClipMetaList) || !sceneClipMetaList.length) {
     console.warn('[5G][ARCHIVE][WARN] No sceneClipMetaList provided.');
@@ -346,38 +354,11 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
   const bpMain = await bulletproofFile(mainPath, workDir, 'BP_MAIN');
   const bpOutro = await bulletproofFile(outroPath, workDir, 'BP_OUTRO');
 
-  // Lower outro volume to 80% (0.8) and concatenate
-  const tempOutroVol = path.join(workDir, `${path.basename(bpOutro, '.mp4')}-vol80.mp4`);
-  await new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(bpOutro)
-      .outputOptions([
-        '-c:v copy',
-        '-filter:a volume=0.8',
-        '-c:a aac',
-        '-ar 44100',
-        '-ac 2',
-        '-b:a 128k',
-        '-y'
-      ])
-      .save(tempOutroVol)
-      .on('end', () => {
-        console.log(`[5G][OUTRO][VOLUME] Outro volume set to 80%: ${tempOutroVol}`);
-        resolve();
-      })
-      .on('error', (err, stdout, stderr) => {
-        console.error(`[5G][OUTRO][VOLUME][ERR]`, err);
-        if (stderr) console.error(`[5G][OUTRO][VOLUME][STDERR]\n${stderr}`);
-        if (stdout) console.log(`[5G][OUTRO][VOLUME][STDOUT]\n${stdout}`);
-        reject(err);
-      });
-  });
-
   // Always use a fresh concat list for FFmpeg concat demuxer
   const listFile = path.resolve(workDir, 'list2.txt');
   fs.writeFileSync(listFile, [
     `file '${bpMain.replace(/'/g, "'\\''")}'`,
-    `file '${tempOutroVol.replace(/'/g, "'\\''")}'`
+    `file '${bpOutro.replace(/'/g, "'\\''")}'`
   ].join('\n'), { encoding: 'utf8' });
 
   return new Promise((resolve, reject) => {
@@ -468,6 +449,12 @@ async function overlayMusic(videoPath, musicPath, outPath) {
 
 // === Main Mood Picker (non-repeating/random) ===
 let _lastTrack = null;
+/**
+ * pickMusicForMood: Detects mood (via music-moods if present, else fallback), then randomizes and prevents repeats.
+ * @param {string} script - Full script text for mood detection
+ * @param {string} workDir - Work directory for job (for logging/future)
+ * @returns {string} Full path to music file, or null
+ */
 async function pickMusicForMood(script, workDir) {
   let detectedMood;
   try {
@@ -630,49 +617,6 @@ async function create9x16FromInput(inputPath, outputPath) {
 }
 
 // ============================================
-// FINAL LIBRARY UPLOAD (AFTER VIDEO COMPLETE)
-// ============================================
-/**
- * Uploads the completed final video to R2 library (in correct folder, named by subject/category).
- * @param {string} localFilePath - Path to the finished video (should be final, fully rendered file)
- * @param {string} mainSubject - Main subject/topic of the video (for naming/folder)
- * @param {string} categoryFolder - Library folder to upload into (e.g. "food_cooking")
- * @param {string} [source] - "socialstorm" or user/system name
- * @returns {Promise<string|false>} - R2 path if successful, false if fail
- */
-async function uploadFinalVideoToLibrary(localFilePath, mainSubject, categoryFolder, source = 'socialstorm') {
-  console.log(`[5G][LIBRARY-UPLOAD][START] Uploading final video to library: ${localFilePath}`);
-  if (!localFilePath || !fs.existsSync(localFilePath)) {
-    console.error('[5G][LIBRARY-UPLOAD][ERR] Local file missing for upload:', localFilePath);
-    return false;
-  }
-  if (!mainSubject || !categoryFolder) {
-    console.error('[5G][LIBRARY-UPLOAD][ERR] mainSubject or categoryFolder not provided!');
-    return false;
-  }
-  try {
-    const sceneIdx = 'final'; // For library, use 'final' so filenames are unique and clear
-    const r2Path = await uploadSceneClipToR2(
-      localFilePath,
-      mainSubject,
-      sceneIdx,
-      source,
-      categoryFolder
-    );
-    if (r2Path) {
-      console.log(`[5G][LIBRARY-UPLOAD][OK] Uploaded final video to library: ${r2Path}`);
-      return r2Path;
-    } else {
-      console.error('[5G][LIBRARY-UPLOAD][FAIL] Upload returned false');
-      return false;
-    }
-  } catch (err) {
-    console.error('[5G][LIBRARY-UPLOAD][ERR]', err);
-    return false;
-  }
-}
-
-// ============================================
 // MODULE EXPORTS
 // ============================================
 module.exports = {
@@ -688,6 +632,5 @@ module.exports = {
   simpleDetectMood,
   create16x9FromInput,
   create9x16FromInput,
-  postProcessSceneClipArchiving,
-  uploadFinalVideoToLibrary // <-- NEW!
+  postProcessSceneClipArchiving // NEW: bulk-archive scene clips after job
 };
