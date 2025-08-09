@@ -2,7 +2,7 @@
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR (Loosest, Bulletproof)
 // Always returns something: video, image, Ken Burns, or any available.
 // Never loops forever. Max logs at each fallback step.
-// ===========================================================
+// ============================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
