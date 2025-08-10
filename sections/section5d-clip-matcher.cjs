@@ -2,11 +2,15 @@
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR (Deterministic, Bulletproof)
 // R2-FIRST short-circuit: if R2 returns a clip, we take it immediately
 //   *but only if it matches the primary subject* (subject gate).
-// Always returns something: R2 video, provider video, or Ken Burns (Pexels/Pixabay photos).
+// Always returns something: R2 video, provider video, or Ken Burns.
 // Max logging at each step. No infinite loops.
-// Policy: Ken Burns never on scene 1, max 2 per job.
-// Plus: One-time on-subject R2 reuse when providers fail and KB is disallowed.
+// Policy: Prefer not to use Ken Burns on scene 1 and cap KBs per job,
+//         but at the very end we OVERRIDE those caps to guarantee output.
+// De-dupe rule: NO duplicate clip within the current video (job).
+// Cross-job reuse is allowed (providers/R2 are NOT penalized).
 // ============================================================
+
+'use strict';
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
@@ -17,14 +21,11 @@ const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs')
 const fs = require('fs');
 const path = require('path');
 
-console.log('[5D][INIT] Clip matcher orchestrator loaded. v-2025-08-10c');
+console.log('[5D][INIT] Clip matcher orchestrator loaded. v-2025-08-10-final');
 
 const GENERIC_SUBJECTS = [
   'face','person','man','woman','it','thing','someone','something','body','eyes','kid','boy','girl','they','we','people','scene','child','children'
 ];
-
-// --- One-time reuse budget per job (strict, non-adjacent) ---
-const _reuseBudget = new Map(); // jobId -> count used (max 1)
 
 // ---------- Small utils ----------
 function assertFileExists(file, label = 'FILE', minSize = 10240) {
@@ -64,17 +65,6 @@ function isUsed(usedClips, candidatePath, meta = {}) {
   return usedClips.includes(candidatePath) || (base && usedClips.includes(base)) || (url && usedClips.includes(url));
 }
 
-function getPathLikeEntries(usedClips = []) {
-  if (!Array.isArray(usedClips)) return [];
-  return usedClips
-    .filter(v => typeof v === 'string' && (v.endsWith('.mp4') || v.endsWith('.mov') || v.includes(path.sep)));
-}
-
-function getLastUsedPath(usedClips = []) {
-  const paths = getPathLikeEntries(usedClips);
-  return paths.length ? paths[paths.length - 1] : null;
-}
-
 function normalizeGeneric(subject) {
   return (subject || '').toLowerCase();
 }
@@ -103,10 +93,12 @@ function subjectPresentInMeta(pathOrName, meta, subject) {
   const tags = meta?.tags || meta?.keywords || [];
   const title = meta?.title || '';
   const desc = meta?.description || '';
+  // Phrase check first
   if (wordBoundaryIncludes(fn, s) || wordBoundaryIncludes((tags||[]).join(' '), s) ||
       wordBoundaryIncludes(title, s) || wordBoundaryIncludes(desc, s)) {
     return true;
   }
+  // Token fallback (any major word)
   const majors = getMajorWords(s);
   if (!majors.length) return false;
   const hay = `${fn} ${(tags||[]).join(' ')} ${title} ${desc}`.toLowerCase();
@@ -123,116 +115,6 @@ function getMaxKbPerJob() {
   return isNaN(n) ? 2 : Math.max(0, n);
 }
 
-// --- local non-adjacent, on-subject reuse from already-used paths ---
-function pickLocalOnSubjectReuse({ usedClips = [], primarySubject, prevBase }) {
-  const paths = getPathLikeEntries(usedClips);
-  // Prefer earlier (non-adjacent) manatee clips used this job
-  for (let i = paths.length - 1; i >= 0; i--) {
-    const p = paths[i];
-    const base = path.basename(p);
-    if (prevBase && base === prevBase) continue; // non-adjacent guard
-    if (!assertFileExists(p, 'REUSE_LOCAL')) continue;
-    if (primarySubject && !subjectPresentInMeta(p, {}, primarySubject)) continue;
-    return p;
-  }
-  return null;
-}
-
-// --- internal: attempt a one-time on-subject R2 reuse (non-adjacent) ---
-async function attemptOnSubjectReuse({ primarySubject, sceneIdx, jobId, workDir, usedClips }) {
-  try {
-    const used = _reuseBudget.get(jobId) || 0;
-    if (used >= 1) {
-      console.log(`[5D][REUSE][SKIP][${jobId}] Reuse budget exhausted.`);
-      return null;
-    }
-
-    const prevPath = getLastUsedPath(usedClips);
-    const prevBase = prevPath ? path.basename(prevPath) : null;
-
-    console.log(`[5D][REUSE][TRY][${jobId}] Providers empty and KB blocked. Attempting on-subject reuse.`);
-
-    // 1) Try 10A object signature (new)
-    let rPath = null, rMeta = {};
-    try {
-      const resObj = await findR2ClipForScene({
-        subject: primarySubject,
-        sceneIdx,
-        jobId,
-        workDir,
-        opts: { allowReuse: true }
-      });
-      rPath = (resObj && resObj.path) ? resObj.path : resObj;
-      rMeta = (resObj && resObj.meta) ? resObj.meta : {};
-    } catch (e) {
-      console.log(`[5D][REUSE][INFO][${jobId}] 10A object-signature not supported: ${e?.message || e}`);
-    }
-
-    // 2) If no result, try 10A positional signature (legacy). Note: legacy 10A will still skip "used".
-    if (!rPath) {
-      try {
-        const resPos = await findR2ClipForScene(primarySubject, workDir, sceneIdx, jobId, usedClips);
-        rPath = (resPos && resPos.path) ? resPos.path : resPos;
-        rMeta = (resPos && resPos.meta) ? resPos.meta : {};
-        if (rPath) console.log(`[5D][REUSE][INFO][${jobId}] 10A positional returned a path (may still be filtered by "used").`);
-      } catch (e) {
-        console.log(`[5D][REUSE][INFO][${jobId}] 10A positional call failed: ${e?.message || e}`);
-      }
-    }
-
-    // 3) If still no result, do a local reuse from previously used on-subject clips (non-adjacent)
-    if (!rPath) {
-      const local = pickLocalOnSubjectReuse({ usedClips, primarySubject, prevBase });
-      if (local) {
-        _reuseBudget.set(jobId, used + 1);
-        console.log(`[5D][REUSE][HIT][LOCAL][${jobId}] ${path.basename(local)}`);
-        markUsedInPlace(usedClips, { path: local, filename: path.basename(local) });
-        return local;
-      }
-      console.log(`[5D][REUSE][NONE][${jobId}] No safe on-subject reuse available (local scan).`);
-      return null;
-    }
-
-    // Guard against adjacent repeat
-    const base = path.basename(rPath);
-    if (prevBase && base === prevBase) {
-      console.log(`[5D][REUSE][ADJACENT][${jobId}] Rejecting adjacent reuse of ${base}`);
-      // try local alternative before giving up
-      const local = pickLocalOnSubjectReuse({ usedClips, primarySubject, prevBase });
-      if (local) {
-        _reuseBudget.set(jobId, used + 1);
-        console.log(`[5D][REUSE][HIT][LOCAL-ALT][${jobId}] ${path.basename(local)}`);
-        markUsedInPlace(usedClips, { path: local, filename: path.basename(local) });
-        return local;
-      }
-      return null;
-    }
-
-    // Subject gate on the picked path name/meta
-    if (primarySubject && !subjectPresentInMeta(rPath, rMeta, primarySubject)) {
-      console.log(`[5D][REUSE][OFFSUBJ][${jobId}] Candidate fails subject gate: ${base}`);
-      // last try: local on-subject
-      const local = pickLocalOnSubjectReuse({ usedClips, primarySubject, prevBase });
-      if (local) {
-        _reuseBudget.set(jobId, used + 1);
-        console.log(`[5D][REUSE][HIT][LOCAL-SUBJ][${jobId}] ${path.basename(local)}`);
-        markUsedInPlace(usedClips, { path: local, filename: path.basename(local) });
-        return local;
-      }
-      return null;
-    }
-
-    _reuseBudget.set(jobId, used + 1);
-    console.log(`[5D][REUSE][HIT][${jobId}] ${base}`);
-    markUsedInPlace(usedClips, { path: rPath, filename: base, meta: rMeta });
-    return rPath;
-
-  } catch (e) {
-    console.log(`[5D][REUSE][ERR][${jobId}] ${e?.message || e}`);
-    return null;
-  }
-}
-
 // ---------- Main ----------
 async function findClipForScene({
   subject,
@@ -246,7 +128,7 @@ async function findClipForScene({
   megaSubject = null,
   forceClipPath = null,
   jobContext = {},
-  categoryFolder
+  categoryFolder // not used here, but preserved for compatibility with ingest elsewhere
 }) {
   // 0) Primary subject (for gating / fallback)
   const primarySubject = pickPrimarySubject({ jobContext, megaSubject, mainTopic, subject, fallback: allSceneTexts?.[0] });
@@ -254,7 +136,7 @@ async function findClipForScene({
     console.log(`[5D][PRIMARY][${jobId}] Primary subject = "${primarySubject}"`);
   }
 
-  // Ken Burns policy controls
+  // Ken Burns policy controls (soft caps; overridden at the very end)
   if (typeof jobContext.kbUsedCount !== 'number') jobContext.kbUsedCount = 0;
   const maxKb = getMaxKbPerJob();
 
@@ -286,6 +168,12 @@ async function findClipForScene({
 
   if (!searchSubject || searchSubject.length < 2) {
     console.error(`[5D][FATAL][${jobId}] No valid subject for scene ${sceneIdx + 1}.`);
+    // Final override: unconditional KB on a generic term so we *still* return something
+    const kbEmergency = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
+    if (kbEmergency && assertFileExists(kbEmergency, 'KB_EMERGENCY')) {
+      console.warn(`[5D][EMERGENCY][${jobId}] Used generic KenBurns due to missing subject: ${kbEmergency}`);
+      return kbEmergency;
+    }
     return null;
   }
 
@@ -298,14 +186,17 @@ async function findClipForScene({
 
   if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !fallbackKenBurnsVideo) {
     console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
+    // Final override attempt
+    const kbEmergency = await fallbackKenBurnsVideo(primarySubject || searchSubject || 'landmark', workDir, sceneIdx, jobId, usedClips);
+    if (kbEmergency && assertFileExists(kbEmergency, 'KB_EMERGENCY')) return kbEmergency;
     return null;
   }
 
-  // 3) Visual subject extraction (ordered list)
+  // 3) Visual subject extraction (ordered list) — ensure primarySubject is included first
   let prioritizedSubjects = [];
   try {
-    prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
-    const set = new Set([primarySubject, ...prioritizedSubjects.filter(Boolean)]);
+    const extracted = await extractVisualSubjects(searchSubject, mainTopic);
+    const set = new Set([primarySubject, ...extracted.filter(Boolean)]);
     prioritizedSubjects = Array.from(set).filter(Boolean);
     console.log(`[5D][SUBJECTS][${jobId}] Prioritized:`, prioritizedSubjects);
   } catch (err) {
@@ -318,7 +209,7 @@ async function findClipForScene({
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // ---- 4a. R2 FIRST (short-circuit if found) — now gated by primary subject
+    // ---- 4a. R2 FIRST (short-circuit if found) — gated by primary subject, de-duped within this video
     try {
       const r2Res = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       const r2Path = (r2Res && r2Res.path) ? r2Res.path : r2Res;
@@ -327,12 +218,12 @@ async function findClipForScene({
         if (primarySubject && !subjectPresentInMeta(r2Path, r2Meta, primarySubject)) {
           console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject R2 off-subject (need "${primarySubject}") -> ${path.basename(r2Path)}`);
         } else if (isUsed(usedClips, r2Path)) {
-          console.log(`[5D][R2][${jobId}] R2 candidate already used: ${path.basename(r2Path)}`);
+          console.log(`[5D][R2][${jobId}] R2 candidate already used in this video: ${path.basename(r2Path)}`);
         } else {
           console.log(`[5D][R2][${jobId}] Taking R2 winner for "${subjectOption}": ${r2Path}`);
           markUsedInPlace(usedClips, { path: r2Path, filename: path.basename(r2Path) });
           if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
-            jobContext.clipsToIngest.push({ localPath: r2Path, subject: subjectOption, sceneIdx, source: 'r2' });
+            jobContext.clipsToIngest.push({ localPath: r2Path, subject: subjectOption, sceneIdx, source: 'r2', categoryFolder });
           }
           return r2Path;
         }
@@ -357,8 +248,9 @@ async function findClipForScene({
         const pxMeta = (pxRes && pxRes.meta) ? pxRes.meta : {};
         if (pxPath && assertFileExists(pxPath, 'PEXELS_RESULT')) {
           if (isUsed(usedClips, pxPath, pxMeta)) {
-            console.log(`[5D][PEXELS][${jobId}] Used before: ${path.basename(pxPath)}`);
+            console.log(`[5D][PEXELS][${jobId}] Already used in this video: ${path.basename(pxPath)}`);
           } else {
+            // SUBJECT GATE (videos only)
             if (primarySubject && !subjectPresentInMeta(pxPath, pxMeta, primarySubject)) {
               console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pexels off-subject (need "${primarySubject}") -> ${pxPath}`);
             } else {
@@ -388,8 +280,9 @@ async function findClipForScene({
         const pbMeta = (pbRes && pbRes.meta) ? pbRes.meta : {};
         if (pbPath && assertFileExists(pbPath, 'PIXABAY_RESULT')) {
           if (isUsed(usedClips, pbPath, pbMeta)) {
-            console.log(`[5D][PIXABAY][${jobId}] Used before: ${path.basename(pbPath)}`);
+            console.log(`[5D][PIXABAY][${jobId}] Already used in this video: ${path.basename(pbPath)}`);
           } else {
+            // SUBJECT GATE (videos only)
             if (primarySubject && !subjectPresentInMeta(pbPath, pbMeta, primarySubject)) {
               console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pixabay off-subject (need "${primarySubject}") -> ${pbPath}`);
             } else {
@@ -414,23 +307,19 @@ async function findClipForScene({
       const winner = scoredCandidates[0];
       console.log(`[5D][PICK][${jobId}] Provider winner for "${subjectOption}": ${winner.source} (${winner.score}) -> ${winner.path}`);
       markUsedInPlace(usedClips, { path: winner.path, meta: winner.meta || {}, filename: path.basename(winner.path) });
+
       if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
-        jobContext.clipsToIngest.push({ localPath: winner.path, subject: subjectOption, sceneIdx, source: winner.source });
+        jobContext.clipsToIngest.push({ localPath: winner.path, subject: subjectOption, sceneIdx, source: winner.source, categoryFolder });
       }
       return winner.path;
     }
 
-    // ---- 4c. Photo → Ken Burns (respect policy)
-    const canUseKB = sceneIdx > 0 && jobContext.kbUsedCount < getMaxKbPerJob();
+    // ---- 4c. Photo → Ken Burns (respect policy now; final override later)
+    const canUseKB = sceneIdx > 0 && jobContext.kbUsedCount < maxKb;
     if (!canUseKB) {
       if (sceneIdx === 0) console.warn(`[5D][KB][${jobId}] Skipping KB on scene 1 by policy.`);
-      if (jobContext.kbUsedCount >= getMaxKbPerJob()) console.warn(`[5D][KB][${jobId}] KB cap reached (${jobContext.kbUsedCount}/${getMaxKbPerJob()}).`);
-
-      // LAST-RESORT here: if providers returned nothing and KB is disallowed, try on-subject reuse
-      if (primarySubject) {
-        const reuseHit = await attemptOnSubjectReuse({ primarySubject, sceneIdx, jobId, workDir, usedClips });
-        if (reuseHit) return reuseHit;
-      }
+      if (jobContext.kbUsedCount >= maxKb) console.warn(`[5D][KB][${jobId}] KB cap reached (${jobContext.kbUsedCount}/${maxKb}).`);
+      // No reuse attempt here; final section will override if needed.
     } else {
       try {
         const kb = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
@@ -444,11 +333,11 @@ async function findClipForScene({
     }
   }
 
-  // 4d) SUBJECT-ONLY FINAL SEARCH (before generic hail-mary)
+  // 4d) SUBJECT-ONLY FINAL SEARCH (try one more time by primarySubject)
   if (primarySubject) {
     console.log(`[5D][SUBJECT-FALLBACK][${jobId}] Forcing subject-only search: "${primarySubject}"`);
 
-    // R2 subject-only (still gated)
+    // R2 subject-only (gated, de-duped)
     try {
       const r2OnlyRes = await findR2ClipForScene(primarySubject, workDir, sceneIdx, jobId, usedClips);
       const r2OnlyPath = (r2OnlyRes && r2OnlyRes.path) ? r2OnlyRes.path : r2OnlyRes;
@@ -456,6 +345,8 @@ async function findClipForScene({
       if (r2OnlyPath && assertFileExists(r2OnlyPath, 'R2_SUBJECT_ONLY')) {
         if (primarySubject && !subjectPresentInMeta(r2OnlyPath, r2OnlyMeta, primarySubject)) {
           console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject R2 subject-only (off-subject) -> ${path.basename(r2OnlyPath)}`);
+        } else if (isUsed(usedClips, r2OnlyPath)) {
+          console.log(`[5D][R2][${jobId}] Subject-only R2 already used in this video: ${path.basename(r2OnlyPath)}`);
         } else {
           markUsedInPlace(usedClips, { path: r2OnlyPath, filename: path.basename(r2OnlyPath) });
           console.log(`[5D][SUBJECT-FALLBACK][${jobId}] R2 subject-only hit: ${r2OnlyPath}`);
@@ -468,14 +359,14 @@ async function findClipForScene({
     try {
       console.log(`[5D][PEXELS][TRY][${jobId}] "${primarySubject}" (subject-only, sceneIdx=${sceneIdx})`);
       const pxRes = await findPexelsClipForScene(primarySubject, workDir, sceneIdx, jobId, usedClips);
-      if (!pxRes) {
-        console.log(`[5D][PEXELS][NONE][${jobId}] No acceptable video candidate (subject-only).`);
-      } else {
+      if (pxRes) {
         const pxPath = (pxRes && pxRes.path) ? pxRes.path : pxRes;
         const pxMeta = (pxRes && pxRes.meta) ? pxRes.meta : {};
         if (pxPath && assertFileExists(pxPath, 'PEXELS_RESULT_SUBJECT_ONLY')) {
           if (primarySubject && !subjectPresentInMeta(pxPath, pxMeta, primarySubject)) {
             console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pexels off-subject (subject-only) -> ${pxPath}`);
+          } else if (isUsed(usedClips, pxPath, pxMeta)) {
+            console.log(`[5D][PEXELS][${jobId}] Already used in this video: ${path.basename(pxPath)}`);
           } else {
             const filenameForScoring = pxMeta.originalName || pxMeta.filename || pxMeta.url || path.basename(pxPath);
             const s10 = scoreSceneCandidate(
@@ -487,25 +378,27 @@ async function findClipForScene({
             console.log(`[5D][PEXELS][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pxPath}`);
             markUsedInPlace(usedClips, { path: pxPath, meta: pxMeta || {}, filename: path.basename(pxPath) });
             if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
-              jobContext.clipsToIngest.push({ localPath: pxPath, subject: primarySubject, sceneIdx, source: 'pexels' });
+              jobContext.clipsToIngest.push({ localPath: pxPath, subject: primarySubject, sceneIdx, source: 'pexels', categoryFolder });
             }
             return pxPath;
           }
         }
+      } else {
+        console.log(`[5D][PEXELS][NONE][${jobId}] No acceptable video candidate (subject-only).`);
       }
     } catch (e) { console.error(`[5D][PEXELS][ERR][${jobId}]`, e); }
 
     try {
       console.log(`[5D][PIXABAY][TRY][${jobId}] "${primarySubject}" (subject-only, sceneIdx=${sceneIdx})`);
       const pbRes = await findPixabayClipForScene(primarySubject, workDir, sceneIdx, jobId, usedClips);
-      if (!pbRes) {
-        console.log(`[5D][PIXABAY][NONE][${jobId}] No acceptable video candidate (subject-only).`);
-      } else {
+      if (pbRes) {
         const pbPath = (pbRes && pbRes.path) ? pbRes.path : pbRes;
         const pbMeta = (pbRes && pbRes.meta) ? pbRes.meta : {};
         if (pbPath && assertFileExists(pbPath, 'PIXABAY_RESULT_SUBJECT_ONLY')) {
           if (primarySubject && !subjectPresentInMeta(pbPath, pbMeta, primarySubject)) {
             console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pixabay off-subject (subject-only) -> ${pbPath}`);
+          } else if (isUsed(usedClips, pbPath, pbMeta)) {
+            console.log(`[5D][PIXABAY][${jobId}] Already used in this video: ${path.basename(pbPath)}`);
           } else {
             const filenameForScoring = pbMeta.originalName || pbMeta.filename || pbMeta.url || path.basename(pbPath);
             const s10 = scoreSceneCandidate(
@@ -517,87 +410,78 @@ async function findClipForScene({
             console.log(`[5D][PIXABAY][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pbPath}`);
             markUsedInPlace(usedClips, { path: pbPath, meta: pbMeta || {}, filename: path.basename(pbPath) });
             if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
-              jobContext.clipsToIngest.push({ localPath: pbPath, subject: primarySubject, sceneIdx, source: 'pixabay' });
+              jobContext.clipsToIngest.push({ localPath: pbPath, subject: primarySubject, sceneIdx, source: 'pixabay', categoryFolder });
             }
             return pbPath;
           }
         }
+      } else {
+        console.log(`[5D][PIXABAY][NONE][${jobId}] No acceptable video candidate (subject-only).`);
       }
     } catch (e) { console.error(`[5D][PIXABAY][ERR][${jobId}]`, e); }
 
-    // KB subject-only (respect policy). If KB disallowed, try reuse once.
-    const canUseKB = sceneIdx > 0 && jobContext.kbUsedCount < getMaxKbPerJob();
+    // KB subject-only (respect policy; final override later)
+    const canUseKB = sceneIdx > 0 && jobContext.kbUsedCount < maxKb;
     if (canUseKB) {
       try {
         const kbSubj = await fallbackKenBurnsVideo(primarySubject, workDir, sceneIdx, jobId, usedClips);
         if (kbSubj && assertFileExists(kbSubj, 'KENBURNS_SUBJECT_ONLY')) {
           jobContext.kbUsedCount++;
           markUsedInPlace(usedClips, { path: kbSubj, filename: path.basename(kbSubj) });
-          console.log(`[5D][SUBJECT-FALLBACK][${jobId}] KenBurns subject-only: ${kbSubj} (${jobContext.kbUsedCount}/${getMaxKbPerJob()})`);
+          console.log(`[5D][SUBJECT-FALLBACK][${jobId}] KenBurns subject-only: ${kbSubj} (${jobContext.kbUsedCount}/${maxKb})`);
           return kbSubj;
         }
       } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][KENBURNS][${jobId}]`, e); }
     } else {
-      console.warn(`[5D][SUBJECT-FALLBACK][${jobId}] KB fallback disallowed (sceneIdx=${sceneIdx}, used=${jobContext.kbUsedCount}/${getMaxKbPerJob()}).`);
-      const reuseHit = await attemptOnSubjectReuse({ primarySubject, sceneIdx, jobId, workDir, usedClips });
-      if (reuseHit) return reuseHit;
+      console.warn(`[5D][SUBJECT-FALLBACK][${jobId}] KB fallback disallowed by policy (sceneIdx=${sceneIdx}, used=${jobContext.kbUsedCount}/${maxKb}).`);
     }
   }
 
-  // 5) Final hail-mary: try R2 with main topic OR generic KB (respect policy)
+  // 5) Final hail-mary: try R2 with a broad topic — RELAX subject gate here
   try {
     const hm = mainTopic || subject || 'landmark';
-    console.warn(`[5D][FINALFALLBACK][${jobId}] Hail-mary R2 with "${hm}"`);
+    console.warn(`[5D][FINALFALLBACK][${jobId}] Hail-mary R2 (relaxed gate) with "${hm}"`);
     const r2hmRes = await findR2ClipForScene(hm, workDir, sceneIdx, jobId, usedClips);
     const r2hmPath = (r2hmRes && r2hmRes.path) ? r2hmRes.path : r2hmRes;
     const r2hmMeta = (r2hmRes && r2hmRes.meta) ? r2hmRes.meta : {};
     if (r2hmPath && assertFileExists(r2hmPath, 'R2_FINAL')) {
-      if (primarySubject && !subjectPresentInMeta(r2hmPath, r2hmMeta, primarySubject)) {
-        console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject R2 hail-mary off-subject -> ${path.basename(r2hmPath)}`);
+      if (isUsed(usedClips, r2hmPath, r2hmMeta)) {
+        console.warn(`[5D][FINALFALLBACK][${jobId}] Hail-mary R2 candidate is a duplicate within this video: ${path.basename(r2hmPath)}. Ignoring.`);
       } else {
         markUsedInPlace(usedClips, { path: r2hmPath, filename: path.basename(r2hmPath) });
-        console.warn(`[5D][FINALFALLBACK][${jobId}] Using R2 hail-mary: ${r2hmPath}`);
+        console.warn(`[5D][FINALFALLBACK][${jobId}] Using R2 hail-mary (relaxed): ${r2hmPath}`);
         return r2hmPath;
       }
     }
   } catch (e) { console.error(`[5D][FINALFALLBACK][R2][${jobId}]`, e); }
 
-  const canUseKBFinal = sceneIdx > 0 && jobContext.kbUsedCount < getMaxKbPerJob();
-  if (canUseKBFinal) {
-    try {
-      const kb = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
-      if (kb && assertFileExists(kb, 'KENBURNS_RESULT')) {
-        jobContext.kbUsedCount++;
-        console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic: ${kb} (${jobContext.kbUsedCount}/${getMaxKbPerJob()})`);
-        markUsedInPlace(usedClips, { path: kb, filename: path.basename(kb) });
-        return kb;
-      }
-    } catch (e) { console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}]`, e); }
-  } else {
-    console.warn(`[5D][FINALFALLBACK][${jobId}] KB final fallback disallowed (sceneIdx=${sceneIdx}, used=${jobContext.kbUsedCount}/${getMaxKbPerJob()}).`);
-    // Absolute last resort: local on-subject non-adjacent reuse to guarantee a clip.
-    if (primarySubject) {
-      const prevBase = getLastUsedPath(usedClips) ? path.basename(getLastUsedPath(usedClips)) : null;
-      const local = pickLocalOnSubjectReuse({ usedClips, primarySubject, prevBase });
-      if (local) {
-        const used = _reuseBudget.get(jobId) || 0;
-        _reuseBudget.set(jobId, used + 1);
-        console.log(`[5D][FINALFALLBACK][REUSE-LOCAL][${jobId}] Using local on-subject reuse: ${path.basename(local)}`);
-        markUsedInPlace(usedClips, { path: local, filename: path.basename(local) });
-        return local;
+  // 6) UNCONDITIONAL LAST-RESORT: Ken Burns override (ignores scene 1 rule and KB cap)
+  try {
+    const kbSubjects = [
+      primarySubject,
+      mainTopic,
+      subject,
+      'landmark',
+      'nature'
+    ].filter(Boolean);
+
+    for (const sub of kbSubjects) {
+      const kb = await fallbackKenBurnsVideo(sub, workDir, sceneIdx, jobId, usedClips);
+      if (kb && assertFileExists(kb, 'KENBURNS_OVERRIDE')) {
+        // We intentionally do NOT block on kbUsedCount/scene 1 here.
+        if (!isUsed(usedClips, kb)) {
+          console.warn(`[5D][OVERRIDE][${jobId}] Returning KenBurns override with subject "${sub}": ${kb}`);
+          // We can increment kbUsedCount for telemetry but do not enforce it.
+          jobContext.kbUsedCount = (jobContext.kbUsedCount || 0) + 1;
+          markUsedInPlace(usedClips, { path: kb, filename: path.basename(kb) });
+          return kb;
+        }
       }
     }
-  }
+  } catch (e) { console.error(`[5D][OVERRIDE][KENBURNS][${jobId}]`, e); }
 
-  // If we ever land here, return the last non-adjacent used clip even without extra meta (still on-subject by filename check)
-  const prevBase = getLastUsedPath(usedClips) ? path.basename(getLastUsedPath(usedClips)) : null;
-  const desperate = pickLocalOnSubjectReuse({ usedClips, primarySubject: 'manatee', prevBase });
-  if (desperate) {
-    console.warn(`[5D][DESPERATE][${jobId}] Returning best-effort local reuse to avoid failure: ${path.basename(desperate)}`);
-    return desperate;
-  }
-
-  console.error(`[5D][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1}`);
+  // If we ever land here, log and return null (should be practically unreachable now)
+  console.error(`[5D][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1} after all fallbacks (unexpected).`);
   return null;
 }
 

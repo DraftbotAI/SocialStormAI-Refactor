@@ -2,24 +2,29 @@
 // SECTION 10A: R2 CLIP HELPER (Cloudflare R2)
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for scans)
 // MAX LOGGING, parallel-safe, strict/fuzzy/partial scoring,
-// underscore/dash aware, and hard anti-dupe that MUTATES usedClips.
+// underscore/dash aware.
 //
 // 2025-08 (surgical):
-// - Subject gate now detects canonical topic inside long sentences
+// - Subject gate detects canonical topic inside long sentences
 //   (e.g., "Manatees are..." -> adds "manatee" + synonyms).
 // - Exclude our own rendered assets by filename (hookmux/final-with-outro/etc).
-// - Everything else unchanged.
+// - **Used-clip filtering REMOVED** (5D enforces within-job de-dupe).
+//
 // Env knobs:
 //   SS_R2_MIN_SCORE (default: 0)
 //   SS_R2_REQUIRE_SUBJECT (default: true)
+//   R2_BUCKET or R2_LIBRARY_BUCKET, R2_ENDPOINT, R2_KEY, R2_SECRET
+//   R2_LIBRARY_PREFIXES (comma-separated) or R2_LIBRARY_PREFIX
 // ===========================================================
+
+'use strict';
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-console.log('[10A][INIT] R2 clip helper loaded.');
+console.log('[10A][INIT] R2 clip helper loaded. [ALLOW][USED] This helper does NOT filter/mutate usedClips; 5D enforces within-job de-dupe.');
 
 // ---- ENV / CLIENT -----------------------------------------------------------
 const R2_BUCKET =
@@ -54,11 +59,11 @@ const s3Client = new S3Client({
 // ---- CONSTANTS --------------------------------------------------------------
 const VIDEO_EXTS = ['.mp4', '.mov', '.m4v', '.webm'];
 const EXCLUDE_FRAGMENTS = [
-  // path-based blocks (unchanged)
+  // path-based blocks
   '/final/', '/hook/', '/mega/', '/jobs/', '/outro/', '/watermark/', '/temp/', '/thumbnails/', '/videos/'
 ];
 
-// filename-based blocks (new: exclude our own renders wherever they live)
+// filename-based blocks (exclude our own renders wherever they live)
 const NAME_EXCLUDE_RE = /(hookmux|final-with-outro|socialstorm-final|with-outro|watermark)/i;
 
 // Canonical synonyms (extend as needed)
@@ -124,21 +129,15 @@ function keyLooksExcluded(key = '') {
   const lk = key.toLowerCase();
   if (EXCLUDE_FRAGMENTS.some(f => lk.includes(f))) return true;
   const base = path.basename(lk);
-  return NAME_EXCLUDE_RE.test(base); // NEW: block by name (e.g., hookmux)
+  return NAME_EXCLUDE_RE.test(base); // block by name (e.g., hookmux)
 }
 
-function dupeKeyFor(key = '') {
-  const norm = normalizeToken(key);
-  const stem = normalizeToken(path.basename(key, path.extname(key)));
-  return `${norm}|${stem}`;
-}
-
-// --- canonical-aware subject expansion (surgical) ---
+// --- canonical-aware subject expansion ---
 function expandSubject(subject = '') {
   const primary = normalizeToken(subject);
   const set = new Set();
 
-  // If any canonical root or its synonyms appear inside the subject sentence,
+  // If canonical root or its synonyms appear inside the subject sentence,
   // add the root + its synonyms explicitly (ensures "manatee" is present).
   for (const [root, syns] of Object.entries(CANONICAL_SYNONYMS)) {
     const rootHit = primary.includes(root);
@@ -149,13 +148,13 @@ function expandSubject(subject = '') {
     }
   }
 
-  // Also add simple plural/singular for a detected root
+  // plural/singular variants
   for (const v of Array.from(set)) {
     if (v.endsWith('s')) set.add(v.slice(0, -1));
     else set.add(`${v}s`);
   }
 
-  // Minimal majors from the sentence (kept small)
+  // Minimal majors from the sentence
   for (const w of majorWords(subject)) set.add(w);
 
   const result = Array.from(set).filter(Boolean);
@@ -163,7 +162,7 @@ function expandSubject(subject = '') {
   return result;
 }
 
-// NEW: canonical tokens (roots/synonyms only) for strict gating
+// Canonical tokens (roots/synonyms only) for strict gating
 function canonicalTokensFromSubject(subject = '') {
   const primary = normalizeToken(subject);
   const set = new Set();
@@ -313,31 +312,13 @@ function isValidClip(filePath, jobId) {
   }
 }
 
-// ---- usedClips helpers (Array or Set) --------------------------------------
-function usedAdd(usedClips, v) {
-  if (!v) return;
-  if (usedClips instanceof Set) usedClips.add(v);
-  else if (Array.isArray(usedClips)) { if (!usedClips.includes(v)) usedClips.push(v); }
-}
-function usedHas(usedClips, v) {
-  if (!v) return false;
-  if (usedClips instanceof Set) return usedClips.has(v);
-  if (Array.isArray(usedClips)) return usedClips.includes(v);
-  return false;
-}
-function alreadyUsed(usedClips, key) {
-  const base = path.basename(key);
-  const dk = dupeKeyFor(key);
-  return usedHas(usedClips, key) || usedHas(usedClips, base) || usedHas(usedClips, dk);
-}
-
 // ---- CORE -------------------------------------------------------------------
 /**
  * Find and download the best R2 clip for a subject.
- * Mutates usedClips to prevent repeats (adds dupeKey, key, basename).
+ * NOTE: This helper does NOT filter or mutate usedClips. 5D enforces within-job de-dupe.
  * @returns {Promise<string|null>} local file path
  */
-async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', usedClips = []) {
+async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', /* usedClips = [] */) {
   log('START', 'CTX', 'findR2ClipForScene', { subject, sceneIdx, jobId, workDir });
 
   if (!subject || typeof subject !== 'string') {
@@ -368,20 +349,16 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
 
   // 3) Score by strict/fuzzy/partial + synonyms
   const expansions = expandSubject(subject);
-  const canonical = canonicalTokensFromSubject(subject); // NEW: strict gate tokens
+  const canonical = canonicalTokensFromSubject(subject); // strict gate tokens
   const scored = [];
 
   for (const key of candidates) {
-    if (alreadyUsed(usedClips, key)) {
-      log('SKIP', 'USED', 'Key already used this job', { key });
-      continue;
-    }
     const score = scoreR2Match(key, subject, expansions);
     scored.push({ key, score });
   }
 
   if (!scored.length) {
-    log('SCORE', 'EMPTY', 'All candidates filtered out by usedClips or none scored');
+    log('SCORE', 'EMPTY', 'No candidates could be scored');
     return null;
   }
 
@@ -405,7 +382,7 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
 
   if (!filtered.length) {
     log('FILTER', 'NONE', `No acceptable R2 candidates for "${subject}". Handing back to 5D.`);
-    return null; // let 5D try Pexels/Pixabay/KB
+    return null; // let 5D try providers/KB
   }
 
   // Prefer highest score among filtered
@@ -415,14 +392,6 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
     log('SCORE', 'ERR', 'No best candidate after subject/min-score filter');
     return null;
   }
-
-  const base = path.basename(best.key);
-  const dk = dupeKeyFor(best.key);
-
-  // Mark as used immediately (prevents echo repeats across scenes)
-  usedAdd(usedClips, best.key);
-  usedAdd(usedClips, base);
-  usedAdd(usedClips, dk);
 
   // 4) Download (parallel-safe name)
   const unique = uuidv4();
