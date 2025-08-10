@@ -1,14 +1,13 @@
 // ============================================================
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR (Deterministic, Bulletproof)
 // R2-FIRST short-circuit: if R2 returns a clip, we take it immediately.
-// Always returns something: R2 video, provider video, Unsplash image, or Ken Burns.
+// Always returns something: R2 video, provider video, or Ken Burns (Pexels/Pixabay photos).
 // Max logging at each step. No infinite loops.
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
 const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
-const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
@@ -71,6 +70,38 @@ function getMajorWords(subject) {
     .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
 }
 
+// ---- Primary-subject + subject-present helpers (minimal, local) ----
+function escapeRegex(s='') { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function wordBoundaryIncludes(hay = '', needle = '') {
+  const s = (needle || '').trim();
+  if (!s) return false;
+  const re = new RegExp(`\\b${escapeRegex(s)}s?\\b`, 'i'); // allow simple plural
+  return re.test(String(hay));
+}
+function subjectPresentInMeta(pathOrName, meta, subject) {
+  const s = (subject || '').trim();
+  if (!s) return false;
+  const fn = (pathOrName || '').toString();
+  const tags = meta?.tags || meta?.keywords || [];
+  const title = meta?.title || '';
+  const desc = meta?.description || '';
+  // Phrase check first
+  if (wordBoundaryIncludes(fn, s) || wordBoundaryIncludes(tags.join(' '), s) ||
+      wordBoundaryIncludes(title, s) || wordBoundaryIncludes(desc, s)) {
+    return true;
+  }
+  // Token fallback (any major word)
+  const majors = getMajorWords(s);
+  if (!majors.length) return false;
+  const hay = `${fn} ${(tags||[]).join(' ')} ${title} ${desc}`.toLowerCase();
+  return majors.some(t => wordBoundaryIncludes(hay, t));
+}
+function pickPrimarySubject({ jobContext = {}, megaSubject, mainTopic, subject, fallback }) {
+  const fromCtx = (jobContext.primarySubject || '').trim();
+  const candidates = [fromCtx, megaSubject, mainTopic, subject, fallback].filter(Boolean);
+  return candidates.find(v => v && !GENERIC_SUBJECTS.includes(normalizeGeneric(v))) || candidates[0] || '';
+}
+
 // ---------- Main ----------
 async function findClipForScene({
   subject,
@@ -86,6 +117,12 @@ async function findClipForScene({
   jobContext = {},
   categoryFolder
 }) {
+  // 0) Primary subject (for gating / fallback)
+  const primarySubject = pickPrimarySubject({ jobContext, megaSubject, mainTopic, subject, fallback: allSceneTexts?.[0] });
+  if (primarySubject) {
+    console.log(`[5D][PRIMARY][${jobId}] Primary subject = "${primarySubject}"`);
+  }
+
   // 1) Decide the search subject (anchor for hook/mega)
   let searchSubject = subject;
 
@@ -124,7 +161,7 @@ async function findClipForScene({
     return null;
   }
 
-  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !findUnsplashImageForScene || !fallbackKenBurnsVideo) {
+  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !fallbackKenBurnsVideo) {
     console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
     return null;
   }
@@ -167,10 +204,10 @@ async function findClipForScene({
       console.error(`[5D][R2][${jobId}][ERR]`, err);
     }
 
-    // ---- 4b. Providers (only if R2 failed)
+    // ---- 4b. Providers (only if R2 failed) – videos first
     const scoredCandidates = [];
 
-    // PEXELS
+    // PEXELS (video)
     try {
       const pxRes = await findPexelsClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       const pxPath = (pxRes && pxRes.path) ? pxRes.path : pxRes;
@@ -179,20 +216,25 @@ async function findClipForScene({
         if (isUsed(usedClips, pxPath, pxMeta)) {
           console.log(`[5D][PEXELS][${jobId}] Used before: ${path.basename(pxPath)}`);
         } else {
-          const filenameForScoring = pxMeta.originalName || pxMeta.filename || pxMeta.url || path.basename(pxPath);
-          const s10 = scoreSceneCandidate(
-            { filename: filenameForScoring, filePath: pxPath, tags: pxMeta.tags || pxMeta.keywords || [], title: pxMeta.title || '', description: pxMeta.description || '' },
-            subjectOption, usedClips
-          );
-          const providerScore = typeof pxRes?.score === 'number' ? pxRes.score : (typeof pxMeta.score === 'number' ? pxMeta.score : null);
-          const finalScore = providerScore !== null ? Math.max(s10, providerScore) : s10;
-          console.log(`[5D][PEXELS][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pxPath}`);
-          scoredCandidates.push({ source: 'pexels', path: pxPath, score: finalScore, meta: pxMeta });
+          // SUBJECT GATE
+          if (primarySubject && !subjectPresentInMeta(pxPath, pxMeta, primarySubject)) {
+            console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pexels off-subject (need "${primarySubject}") -> ${pxPath}`);
+          } else {
+            const filenameForScoring = pxMeta.originalName || pxMeta.filename || pxMeta.url || path.basename(pxPath);
+            const s10 = scoreSceneCandidate(
+              { filename: filenameForScoring, filePath: pxPath, tags: pxMeta.tags || pxMeta.keywords || [], title: pxMeta.title || '', description: pxMeta.description || '' },
+              subjectOption, usedClips
+            );
+            const providerScore = typeof pxRes?.score === 'number' ? pxRes.score : (typeof pxMeta.score === 'number' ? pxMeta.score : null);
+            const finalScore = providerScore !== null ? Math.max(s10, providerScore) : s10;
+            console.log(`[5D][PEXELS][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pxPath}`);
+            scoredCandidates.push({ source: 'pexels', path: pxPath, score: finalScore, meta: pxMeta });
+          }
         }
       }
     } catch (e) { console.error(`[5D][PEXELS][ERR][${jobId}]`, e); }
 
-    // PIXABAY
+    // PIXABAY (video)
     try {
       const pbRes = await findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
       const pbPath = (pbRes && pbRes.path) ? pbRes.path : pbRes;
@@ -201,20 +243,25 @@ async function findClipForScene({
         if (isUsed(usedClips, pbPath, pbMeta)) {
           console.log(`[5D][PIXABAY][${jobId}] Used before: ${path.basename(pbPath)}`);
         } else {
-          const filenameForScoring = pbMeta.originalName || pbMeta.filename || pbMeta.url || path.basename(pbPath);
-          const s10 = scoreSceneCandidate(
-            { filename: filenameForScoring, filePath: pbPath, tags: pbMeta.tags || pbMeta.keywords || [], title: pbMeta.title || '', description: pbMeta.description || '' },
-            subjectOption, usedClips
-          );
-          const providerScore = typeof pbRes?.score === 'number' ? pbRes.score : (typeof pbMeta.score === 'number' ? pbMeta.score : null);
-          const finalScore = providerScore !== null ? Math.max(s10, providerScore) : s10;
-          console.log(`[5D][PIXABAY][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pbPath}`);
-          scoredCandidates.push({ source: 'pixabay', path: pbPath, score: finalScore, meta: pbMeta });
+          // SUBJECT GATE
+          if (primarySubject && !subjectPresentInMeta(pbPath, pbMeta, primarySubject)) {
+            console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pixabay off-subject (need "${primarySubject}") -> ${pbPath}`);
+          } else {
+            const filenameForScoring = pbMeta.originalName || pbMeta.filename || pbMeta.url || path.basename(pbPath);
+            const s10 = scoreSceneCandidate(
+              { filename: filenameForScoring, filePath: pbPath, tags: pbMeta.tags || pbMeta.keywords || [], title: pbMeta.title || '', description: pbMeta.description || '' },
+              subjectOption, usedClips
+            );
+            const providerScore = typeof pbRes?.score === 'number' ? pbRes.score : (typeof pbMeta.score === 'number' ? pbMeta.score : null);
+            const finalScore = providerScore !== null ? Math.max(s10, providerScore) : s10;
+            console.log(`[5D][PIXABAY][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pbPath}`);
+            scoredCandidates.push({ source: 'pixabay', path: pbPath, score: finalScore, meta: pbMeta });
+          }
         }
       }
     } catch (e) { console.error(`[5D][PIXABAY][ERR][${jobId}]`, e); }
 
-    // Pick best provider candidate
+    // Pick best provider candidate (video)
     if (scoredCandidates.length) {
       scoredCandidates.sort((a, b) => (b.score - a.score) || (Math.random() - 0.5));
       const winner = scoredCandidates[0];
@@ -229,24 +276,45 @@ async function findClipForScene({
       return winner.path;
     }
 
-    // ---- 4c. Image → Ken Burns
-    try {
-      const unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
-      if (unsplashResult && !isUsed(usedClips, unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
-        console.log(`[5D][PICK][${jobId}] Unsplash image for "${subjectOption}": ${unsplashResult}`);
-        markUsedInPlace(usedClips, { path: unsplashResult, filename: path.basename(unsplashResult) });
-        return unsplashResult;
-      }
-    } catch (e) { console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e); }
-
+    // ---- 4c. Photo → Ken Burns (Pexels/Pixabay via helper)
     try {
       const kb = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
       if (kb && !isUsed(usedClips, kb) && assertFileExists(kb, 'KENBURNS_RESULT')) {
-        console.log(`[5D][PICK][${jobId}] KenBurns for "${subjectOption}": ${kb}`);
-        markUsedInPlace(usedClips, { path: kb, filename: path.basename(kb) });
-        return kb;
+        // SUBJECT GATE for KB (best effort based on filename)
+        if (primarySubject && !subjectPresentInMeta(kb, {}, primarySubject)) {
+          console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject KenBurns off-subject (need "${primarySubject}") -> ${kb}`);
+        } else {
+          console.log(`[5D][PICK][${jobId}] KenBurns (photo) for "${subjectOption}": ${kb}`);
+          markUsedInPlace(usedClips, { path: kb, filename: path.basename(kb) });
+          return kb;
+        }
       }
     } catch (e) { console.error(`[5D][KENBURNS][ERR][${jobId}]`, e); }
+  }
+
+  // 4d) SUBJECT-ONLY FINAL SEARCH (before generic hail-mary)
+  if (primarySubject) {
+    console.log(`[5D][SUBJECT-FALLBACK][${jobId}] Forcing subject-only search: "${primarySubject}"`);
+
+    // R2 subject-only
+    try {
+      const r2Only = await findR2ClipForScene(primarySubject, workDir, sceneIdx, jobId, usedClips);
+      if (r2Only && assertFileExists(r2Only, 'R2_SUBJECT_ONLY')) {
+        markUsedInPlace(usedClips, { path: r2Only, filename: path.basename(r2Only) });
+        console.log(`[5D][SUBJECT-FALLBACK][${jobId}] R2 subject-only hit: ${r2Only}`);
+        return r2Only;
+      }
+    } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][R2][${jobId}]`, e); }
+
+    // As a last resort, KenBurns subject-only (photo from Pexels/Pixabay)
+    try {
+      const kbSubj = await fallbackKenBurnsVideo(primarySubject, workDir, sceneIdx, jobId, usedClips);
+      if (kbSubj && assertFileExists(kbSubj, 'KENBURNS_SUBJECT_ONLY')) {
+        markUsedInPlace(usedClips, { path: kbSubj, filename: path.basename(kbSubj) });
+        console.log(`[5D][SUBJECT-FALLBACK][${jobId}] KenBurns subject-only: ${kbSubj}`);
+        return kbSubj;
+      }
+    } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][KENBURNS][${jobId}]`, e); }
   }
 
   // 5) Final hail-mary: try R2 with main topic OR generic KB
