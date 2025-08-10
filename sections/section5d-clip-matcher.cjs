@@ -1,6 +1,7 @@
 // ============================================================
 // SECTION 5D: CLIP MATCHER ORCHESTRATOR (Deterministic, Bulletproof)
-// R2-FIRST short-circuit: if R2 returns a clip, we take it immediately.
+// R2-FIRST short-circuit: if R2 returns a clip, we take it immediately
+//   *but only if it matches the primary subject* (subject gate).
 // Always returns something: R2 video, provider video, or Ken Burns (Pexels/Pixabay photos).
 // Max logging at each step. No infinite loops.
 // Policy: Ken Burns never on scene 1, max 2 per job.
@@ -188,26 +189,31 @@ async function findClipForScene({
     prioritizedSubjects = [searchSubject, mainTopic].filter(Boolean);
   }
 
-  // 4) Try each subject once (no recursion). R2-FIRST SHORT-CIRCUIT.
+  // 4) Try each subject once (no recursion). R2-FIRST SHORT-CIRCUIT (with subject gate).
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // ---- 4a. R2 FIRST (short-circuit if found)
+    // ---- 4a. R2 FIRST (short-circuit if found) — now gated by primary subject
     try {
-      const r2Local = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
-      if (r2Local && assertFileExists(r2Local, 'R2_RESULT')) {
-        if (isUsed(usedClips, r2Local)) {
-          console.log(`[5D][R2][${jobId}] R2 candidate already used: ${path.basename(r2Local)}`);
+      const r2Res = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId, usedClips);
+      const r2Path = (r2Res && r2Res.path) ? r2Res.path : r2Res;
+      const r2Meta = (r2Res && r2Res.meta) ? r2Res.meta : {};
+      if (r2Path && assertFileExists(r2Path, 'R2_RESULT')) {
+        // SUBJECT GATE for R2 as well (prevents dolphins/bees/etc)
+        if (primarySubject && !subjectPresentInMeta(r2Path, r2Meta, primarySubject)) {
+          console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject R2 off-subject (need "${primarySubject}") -> ${path.basename(r2Path)}`);
+        } else if (isUsed(usedClips, r2Path)) {
+          console.log(`[5D][R2][${jobId}] R2 candidate already used: ${path.basename(r2Path)}`);
         } else {
-          console.log(`[5D][R2][${jobId}] Taking R2 winner immediately for "${subjectOption}": ${r2Local}`);
-          markUsedInPlace(usedClips, { path: r2Local, filename: path.basename(r2Local) });
+          console.log(`[5D][R2][${jobId}] Taking R2 winner for "${subjectOption}": ${r2Path}`);
+          markUsedInPlace(usedClips, { path: r2Path, filename: path.basename(r2Path) });
 
           if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
             jobContext.clipsToIngest.push({
-              localPath: r2Local, subject: subjectOption, sceneIdx, source: 'r2', categoryFolder
+              localPath: r2Path, subject: subjectOption, sceneIdx, source: 'r2', categoryFolder
             });
           }
-          return r2Local; // SHORT-CIRCUIT ON R2
+          return r2Path; // SHORT-CIRCUIT ON R2 (after gate)
         }
       } else {
         console.log(`[5D][R2][${jobId}] No R2 match for "${subjectOption}"`);
@@ -311,13 +317,19 @@ async function findClipForScene({
   if (primarySubject) {
     console.log(`[5D][SUBJECT-FALLBACK][${jobId}] Forcing subject-only search: "${primarySubject}"`);
 
-    // R2 subject-only
+    // R2 subject-only (still gated)
     try {
-      const r2Only = await findR2ClipForScene(primarySubject, workDir, sceneIdx, jobId, usedClips);
-      if (r2Only && assertFileExists(r2Only, 'R2_SUBJECT_ONLY')) {
-        markUsedInPlace(usedClips, { path: r2Only, filename: path.basename(r2Only) });
-        console.log(`[5D][SUBJECT-FALLBACK][${jobId}] R2 subject-only hit: ${r2Only}`);
-        return r2Only;
+      const r2OnlyRes = await findR2ClipForScene(primarySubject, workDir, sceneIdx, jobId, usedClips);
+      const r2OnlyPath = (r2OnlyRes && r2OnlyRes.path) ? r2OnlyRes.path : r2OnlyRes;
+      const r2OnlyMeta = (r2OnlyRes && r2OnlyRes.meta) ? r2OnlyRes.meta : {};
+      if (r2OnlyPath && assertFileExists(r2OnlyPath, 'R2_SUBJECT_ONLY')) {
+        if (primarySubject && !subjectPresentInMeta(r2OnlyPath, r2OnlyMeta, primarySubject)) {
+          console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject R2 subject-only (off-subject) -> ${path.basename(r2OnlyPath)}`);
+        } else {
+          markUsedInPlace(usedClips, { path: r2OnlyPath, filename: path.basename(r2OnlyPath) });
+          console.log(`[5D][SUBJECT-FALLBACK][${jobId}] R2 subject-only hit: ${r2OnlyPath}`);
+          return r2OnlyPath;
+        }
       }
     } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][R2][${jobId}]`, e); }
 
@@ -342,11 +354,18 @@ async function findClipForScene({
   try {
     const hm = mainTopic || subject || 'landmark';
     console.warn(`[5D][FINALFALLBACK][${jobId}] Hail-mary R2 with "${hm}"`);
-    const r2hm = await findR2ClipForScene(hm, workDir, sceneIdx, jobId, usedClips);
-    if (r2hm && assertFileExists(r2hm, 'R2_FINAL')) {
-      markUsedInPlace(usedClips, { path: r2hm, filename: path.basename(r2hm) });
-      console.warn(`[5D][FINALFALLBACK][${jobId}] Using R2 hail-mary: ${r2hm}`);
-      return r2hm;
+    const r2hmRes = await findR2ClipForScene(hm, workDir, sceneIdx, jobId, usedClips);
+    const r2hmPath = (r2hmRes && r2hmRes.path) ? r2hmRes.path : r2hmRes;
+    const r2hmMeta = (r2hmRes && r2hmRes.meta) ? r2hmRes.meta : {};
+    if (r2hmPath && assertFileExists(r2hmPath, 'R2_FINAL')) {
+      // Gate hail-mary too
+      if (primarySubject && !subjectPresentInMeta(r2hmPath, r2hmMeta, primarySubject)) {
+        console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject R2 hail-mary off-subject -> ${path.basename(r2hmPath)}`);
+      } else {
+        markUsedInPlace(usedClips, { path: r2hmPath, filename: path.basename(r2hmPath) });
+        console.warn(`[5D][FINALFALLBACK][${jobId}] Using R2 hail-mary: ${r2hmPath}`);
+        return r2hmPath;
+      }
     }
   } catch (e) { console.error(`[5D][FINALFALLBACK][R2][${jobId}]`, e); }
 
