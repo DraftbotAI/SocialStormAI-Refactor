@@ -163,6 +163,28 @@ function expandSubject(subject = '') {
   return result;
 }
 
+// NEW: canonical tokens (roots/synonyms only) for strict gating
+function canonicalTokensFromSubject(subject = '') {
+  const primary = normalizeToken(subject);
+  const set = new Set();
+  for (const [root, syns] of Object.entries(CANONICAL_SYNONYMS)) {
+    const rootHit = primary.includes(root);
+    const synHit = syns.some(s => primary.includes(normalizeToken(s)));
+    if (rootHit || synHit) {
+      set.add(root);
+      syns.forEach(v => set.add(normalizeToken(v)));
+    }
+  }
+  // plural/singular variants
+  for (const v of Array.from(set)) {
+    if (v.endsWith('s')) set.add(v.slice(0, -1));
+    else set.add(`${v}s`);
+  }
+  const canonical = Array.from(set).filter(Boolean);
+  log('SUBJECT', 'CANON', `Canonical tokens for "${subject}"`, { canonical });
+  return canonical;
+}
+
 // ---- MATCH HELPERS ----------------------------------------------------------
 function strictSubjectMatch(filename, subject) {
   if (!filename || !subject) return false;
@@ -346,6 +368,7 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
 
   // 3) Score by strict/fuzzy/partial + synonyms
   const expansions = expandSubject(subject);
+  const canonical = canonicalTokensFromSubject(subject); // NEW: strict gate tokens
   const scored = [];
 
   for (const key of candidates) {
@@ -369,9 +392,12 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
 
   // 3b) Subject/min-score gate (pre-download)
   let filtered = scored.filter(s => typeof s.score === 'number' && s.score >= R2_MIN_SCORE);
-  if (R2_REQUIRE_SUBJECT && expansions.length) {
+
+  if (R2_REQUIRE_SUBJECT) {
+    // Use canonical tokens if we detected a canonical subject; otherwise fall back to expansions.
+    const gateTokens = (canonical && canonical.length) ? canonical : expansions;
     const pre = filtered.length;
-    filtered = filtered.filter(s => subjectPresentInKey(s.key, expansions));
+    filtered = gateTokens.length ? filtered.filter(s => subjectPresentInKey(s.key, gateTokens)) : filtered;
     if (!filtered.length) {
       log('FILTER', 'SUBJECT_NONE', `No on-subject R2 keys after gate for "${subject}" (minScore=${R2_MIN_SCORE}, pre=${pre})`);
     }

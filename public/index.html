@@ -6,6 +6,7 @@
   <title>SocialStorm AI - Next-Level Video Creation</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       background: #fff;
@@ -17,135 +18,141 @@
     a { text-decoration: none; color: inherit; }
     ul { list-style: none; }
 
-    nav {
-      position: sticky; top: 0; background: #10141a;
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 0 2rem; z-index: 1000;
-      min-height: 100px;
+    /* ===== GLOBAL BANNER (same as video/about/contact) ===== */
+    :root {
+      --header-bg: #10141a;
+      --header-fg: #ffffff;
+      --cta-bg: #00e5ff;
+      --cta-fg: #041016;
+      --bar-h: 68px; /* banner height */
+    }
+
+    .ssai-header {
+      background: var(--header-bg);
+      color: var(--header-fg);
+      position: sticky;
+      top: 0;
+      z-index: 1000;
       box-shadow: 0 2px 8px rgba(0,0,0,0.14);
+      overflow: visible;
     }
-    .nav-logo {
-      display: flex; align-items: center; cursor: pointer;
+    .ssai-header__bar {
+      position: relative;            /* for absolute children */
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0 16px;
+      height: var(--bar-h);
+      min-height: var(--bar-h);
     }
-    .nav-logo img {
-      height: 200px !important; width: auto; max-width: 90vw;
-      display: block; filter: brightness(100);
-      transition: height 0.22s;
-    }
-    .nav-links {
-      display: flex; gap: 2rem; align-items: center;
-    }
-    .nav-links li a {
-      color: #fff; font-weight: 700; font-size: 1.09rem; letter-spacing: 0.03em;
-      transition: color 0.2s;
-    }
-    .nav-links li a:hover,
-    .nav-links li[aria-current="page"] a {
-      color: #00e0fe;
-      text-shadow: 0 0 8px #00e0fe55;
-    }
-    .btn-primary {
-      background: #00e0fe; color: #111; font-weight: 900;
-      padding: 0.65rem 1.5rem; border: none; border-radius: 8px;
-      cursor: pointer; font-size: 1.13rem;
-      box-shadow: 0 4px 14px #00e0fe44;
-      transition: background 0.2s;
-      letter-spacing: 0.01em;
-      margin-left: 1.5rem;
-    }
-    .btn-primary:hover { background: #00b3c4; }
-
-    /* Hamburger */
-    .hamburger {
-      display: none;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      width: 46px;
-      height: 46px;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      z-index: 2002;
-    }
-    .hamburger span {
-      display: block;
-      width: 28px;
-      height: 4px;
-      margin: 4px 0;
-      background: #00e0fe;
-      border-radius: 2px;
-      transition: all 0.22s;
-    }
-    .hamburger.active span:nth-child(1) {
-      transform: translateY(8px) rotate(45deg);
-    }
-    .hamburger.active span:nth-child(2) {
-      opacity: 0;
-    }
-    .hamburger.active span:nth-child(3) {
-      transform: translateY(-8px) rotate(-45deg);
-    }
-
-    /* Mobile Nav Dropdown */
-    .mobile-nav {
-      display: none;
-      flex-direction: column;
-      align-items: flex-end;
-      background: #10141a;
+    /* Left: big logo that hangs outside the bar */
+    .ssai-header__brand {
       position: absolute;
-      top: 120px;
-      right: 0;
-      width: 100vw;
-      max-width: 100vw;
-      box-shadow: 0 8px 28px #0008;
-      border-radius: 0 0 18px 18px;
-      padding: 1.2rem 2.2rem 1.8rem 2.2rem;
-      z-index: 2001;
-      animation: slideDown 0.22s;
+      left: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: inline-flex;
+      align-items: center;
+      text-decoration: none;
+      line-height: 0;
+      z-index: 1;
     }
-    @keyframes slideDown {
-      from { opacity: 0; transform: translateY(-24px);}
-      to   { opacity: 1; transform: translateY(0);}
+    .ssai-header__brand img {
+      height: 200px !important;
+      width: auto !important;
+      display: block;
+      margin: calc(var(--bar-h) * -0.75) 0 calc(var(--bar-h) * -0.75) 0;
+      pointer-events: none; /* overhang won't block center-nav clicks */
     }
-    .mobile-nav li {
-      margin-bottom: 1.18rem;
-      text-align: right;
+    /* Center: nav absolutely centered (independent of logo/CTA width) */
+    .ssai-header__nav {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 2;
     }
-    .mobile-nav li:last-child {
-      margin-bottom: 0;
-    }
-    .mobile-nav a, .mobile-nav .btn-primary {
-      font-size: 1.2rem;
-      color: #fff;
+    .ssai-header__menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      gap: 2rem;
       font-weight: 800;
     }
-    .mobile-nav .btn-primary {
-      width: 100%;
-      margin-left: 0;
-      margin-top: 1.2rem;
+    .ssai-header__menu a {
+      color: var(--header-fg);
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .ssai-header__menu a[aria-current="page"] { text-decoration: underline; }
+    /* Right: CTA pinned to far right */
+    .ssai-header__cta {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: inline-flex;
+      align-items: center;
+      padding: 12px 18px;
+      border-radius: 12px;
+      font-weight: 800;
+      background: var(--cta-bg);
+      color: var(--cta-fg);
+      text-decoration: none;
+      white-space: nowrap;
+      z-index: 2;
+    }
+    /* Hamburger (CSS-only) */
+    .ssai-header__toggle { display: none; } /* hidden checkbox */
+    .ssai-header__hamburger {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: none;
+      border: 0;
+      background: transparent;
+      width: 44px; height: 44px;
+      padding: 0;
+      align-items: center; justify-content: center;
+      cursor: pointer;
+      z-index: 3;
+    }
+    .ssai-header__hamburger span {
+      display: block;
+      width: 24px; height: 2px;
+      background: var(--header-fg);
+      margin: 4px 0;
+    }
+    /* Desktop→Mobile logo scaling */
+    @media (max-width: 850px) { .ssai-header__brand img { height: 110px !important; margin: -28px 0 -28px 0; } }
+    @media (max-width: 700px) { .ssai-header__brand img { height: 70px  !important; margin: -12px 0 -12px 0; } }
+    @media (max-width: 480px) { .ssai-header__brand img { height: 48px  !important; margin: 0; } }
+    /* Mobile behavior */
+    @media (max-width: 900px) {
+      .ssai-header__cta { display: none; }           /* free space for hamburger */
+      .ssai-header__hamburger { display: inline-flex; }
+      .ssai-header__menu {
+        display: none; /* toggled by checkbox */
+        position: absolute;
+        top: calc(100% + 8px);
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(720px, calc(100vw - 28px));
+        background: var(--header-bg);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px;
+        padding: 12px;
+        flex-direction: column;
+        gap: 10px;
+        text-align: center;
+        z-index: 1010;
+      }
+      #navToggle:checked ~ nav .ssai-header__menu { display: flex; }
     }
 
-    @media (max-width: 850px) {
-      .nav-logo img { height: 160px !important; }
-      nav { min-height: 90px; }
-      .nav-links { gap: 1.1rem; }
-      .mobile-nav { top: 90px; }
-    }
-    @media (max-width: 700px) {
-      .nav-logo img { height: 110px !important; }
-      nav { min-height: 64px; padding: 0 1rem; }
-      .nav-links { display: none; }
-      .btn-primary { display: none; }
-      .hamburger { display: flex; }
-      .mobile-nav { top: 64px; }
-    }
-    @media (max-width: 480px) {
-      .nav-logo img { height: 90px !important; }
-      .mobile-nav { padding: 1rem 1rem 1.5rem 1rem; }
-    }
-
-    /* ---- Rest of your existing CSS unchanged below ---- */
+    /* ---- Existing site styles (unchanged) ---- */
     header.hero {
       text-align: center; padding: 4.7rem 2rem 2.6rem;
       max-width: 760px; margin: 0 auto;
@@ -246,6 +253,7 @@
       transition: background 0.18s;
     }
     .cta-bar:hover { background: #00b3c4; color: #fff; }
+
     section.features {
       display: grid;
       grid-template-columns: repeat(auto-fit,minmax(250px,1fr));
@@ -277,9 +285,8 @@
       font-size: 1.04rem; color: #dbe9f4; font-weight: 400;
       letter-spacing: 0.01em;
     }
-    section.comparison {
-      padding: 0 1rem 4rem; overflow-x: auto;
-    }
+
+    section.comparison { padding: 0 1rem 4rem; overflow-x: auto; }
     .comparison-table {
       width: 100%; max-width: 960px; margin: auto;
       border-collapse: collapse; text-align: center;
@@ -302,12 +309,9 @@
       color: #c00; font-weight: 900; font-size: 1.05rem;
       text-shadow: 0 1px 0 #fff;
     }
-    .comparison-table .strong {
-      font-weight: 900; background: #eaf7fb;
-    }
-    .comparison-table caption {
-      caption-side: top; font-weight: 800; margin-bottom: 0.5rem;
-    }
+    .comparison-table .strong { font-weight: 900; background: #eaf7fb; }
+    .comparison-table caption { caption-side: top; font-weight: 800; margin-bottom: 0.5rem; }
+
     .faq-section {
       max-width: 900px;
       margin: 40px auto 24px auto;
@@ -324,24 +328,16 @@
       text-align: center;
       letter-spacing: 0.02em;
     }
-    .faq-q {
-      font-weight: 800;
-      color: #0a2342;
-      margin-top: 1.1rem;
-      margin-bottom: 0.1rem;
-    }
-    .faq-a {
-      color: #355a78;
-      margin-bottom: 0.2rem;
-      font-weight: 500;
-      font-size: 1.07rem;
-    }
+    .faq-q { font-weight: 800; color: #0a2342; margin-top: 1.1rem; margin-bottom: 0.1rem; }
+    .faq-a { color: #355a78; margin-bottom: 0.2rem; font-weight: 500; font-size: 1.07rem; }
+
     footer {
       text-align: center; padding: 2.2rem 1rem 1.1rem;
       background: #10141a; color: #dbe9f4; font-size: 1rem; font-weight: 500;
       margin-top: auto;
       border-top: 1px solid #00e0fe10;
     }
+
     #chatbot-bubble {
       position: fixed; bottom: 26px; right: 26px;
       width: 60px; height: 60px;
@@ -353,18 +349,13 @@
     }
     #chatbot-bubble:hover { background: #00b3c4; }
     #chatbot-bubble svg { width: 32px; height: 32px; fill: #fff; }
+
+    /* Mobile tweaks (content only) */
     @media (max-width: 700px) {
-      .nav-links { display: none; }
-      .btn-primary { display: none; }
-      .hamburger { display: flex; }
-      .nav-logo img { height: 110px !important; }
-      nav { min-height: 64px; padding: 0 1rem; }
       header.hero h1 { font-size: 2rem; }
       .feature-item { padding: 1.3rem 0.6rem; }
       section.features { gap: 1.1rem; }
-      .comparison-table th, .comparison-table td {
-        font-size: 0.9rem; padding: 0.5rem 0.25rem;
-      }
+      .comparison-table th, .comparison-table td { font-size: 0.9rem; padding: 0.5rem 0.25rem; }
       .how-it-works { flex-direction: column; gap: 1.2rem; padding: 0.7rem 0.7rem 0.2rem; }
       .how-step { width: 97vw; }
       .faq-section { padding: 1.1rem 0.7rem 0.7rem; }
@@ -372,40 +363,40 @@
   </style>
 </head>
 <body>
-  <nav>
-    <div class="nav-logo" onclick="location.href='index.html'">
-      <img src="logo.png" alt="SocialStorm Logo" />
+  <!-- ===== HEADER / NAV (EXACT MATCH) ===== -->
+  <header class="ssai-header" role="banner">
+    <div class="ssai-header__bar">
+      <!-- Left: Logo -->
+      <a class="ssai-header__brand" href="index.html" aria-label="SocialStormAI Home">
+        <img src="logo.png" alt="SocialStormAI" />
+      </a>
+
+      <!-- Mobile toggle + Centered Nav -->
+      <input type="checkbox" id="navToggle" class="ssai-header__toggle" />
+      <label for="navToggle" class="ssai-header__hamburger" aria-label="Open menu" aria-controls="primaryMenu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </label>
+
+      <nav class="ssai-header__nav" aria-label="Primary">
+        <ul class="ssai-header__menu" id="primaryMenu">
+          <li><a href="index.html" aria-current="page">Home</a></li>
+          <li><a href="video.html">Create Video</a></li>
+          <li><a href="thumbnail.html">Thumbnails</a></li>
+          <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="contact.html">Contact</a></li>
+        </ul>
+      </nav>
+
+      <!-- Right: CTA -->
+      <a href="video.html" class="ssai-header__cta">Get Started</a>
     </div>
-    <ul class="nav-links">
-      <li><a href="index.html" aria-current="page">Home</a></li>
-      <li><a href="video.html">Create Video</a></li>
-      <li><a href="thumbnail.html">Thumbnails</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="about.html">About</a></li>
-      <li><a href="contact.html">Contact</a></li>
-    </ul>
-    <button class="btn-primary" onclick="location.href='video.html'">Get Started</button>
-    <button class="hamburger" id="hamburgerBtn" aria-label="Open menu">
-      <span></span>
-      <span></span>
-      <span></span>
-    </button>
-    <ul class="mobile-nav" id="mobileNav">
-      <li><a href="index.html" aria-current="page">Home</a></li>
-      <li><a href="video.html">Create Video</a></li>
-      <li><a href="thumbnail.html">Thumbnails</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="about.html">About</a></li>
-      <li><a href="contact.html">Contact</a></li>
-      <li><button class="btn-primary" onclick="location.href='video.html'">Get Started</button></li>
-    </ul>
-  </nav>
+  </header>
 
   <header class="hero">
     <div class="trust-bar">AI Video Creation, Reimagined for Real People — Yours Could Be Next!</div>
     <h1>Turn Ideas Into Viral Shorts — Instantly</h1>
     <p>
-      SocialStormAI is the fastest way to go from idea to YouTube Shorts or TikToks.  
+      SocialStormAI is the fastest way to go from idea to YouTube Shorts or TikToks.
       <b>Write your concept, click generate — your video is ready in minutes, no software, no editing, no stress.</b>
     </p>
     <button class="cta-btn" onclick="location.href='video.html'">Try It Free</button>
@@ -528,36 +519,9 @@
   <div id="chatbot-bubble" title="Chat with Sparkie!">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><rect x="7" y="11" width="10" height="2" rx="1"/><circle cx="9" cy="9" r="1.2"/><circle cx="15" cy="9" r="1.2"/></svg>
   </div>
-  <script>
-    // Hamburger + Mobile Nav Logic
-    const hamburgerBtn = document.getElementById('hamburgerBtn');
-    const mobileNav = document.getElementById('mobileNav');
-    let mobileNavOpen = false;
-    hamburgerBtn.addEventListener('click', () => {
-      hamburgerBtn.classList.toggle('active');
-      mobileNavOpen = !mobileNavOpen;
-      mobileNav.style.display = mobileNavOpen ? 'flex' : 'none';
-      document.body.style.overflow = mobileNavOpen ? 'hidden' : '';
-    });
-    // Close mobile nav when clicking a link or outside
-    mobileNav.addEventListener('click', (e) => {
-      if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON') {
-        hamburgerBtn.classList.remove('active');
-        mobileNav.style.display = 'none';
-        document.body.style.overflow = '';
-        mobileNavOpen = false;
-      }
-    });
-    window.addEventListener('resize', () => {
-      if (window.innerWidth > 700) {
-        hamburgerBtn.classList.remove('active');
-        mobileNav.style.display = 'none';
-        document.body.style.overflow = '';
-        mobileNavOpen = false;
-      }
-    });
-  </script>
+
   <script src="chatbot.js"></script>
+
   <footer>
     &copy; 2025 SocialStorm AI. Built for creators who want to win.
   </footer>

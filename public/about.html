@@ -1,32 +1,17 @@
 <!--
-INDEX
-1. DOCTYPE & HTML BOILERPLATE
-2. HEAD: META, TITLE, STYLE
-3. BODY
-   3.1. NAVBAR (with "Thumbnail Generator" link at top)
-   3.2. MAIN ABOUT CONTENT
-   3.3. FOOTER
-4. JS: NAVBAR MOBILE TOGGLE
-END
+ABOUT PAGE
+- Exact same banner as video.html (logo left, centered nav, CTA right, CSS-only hamburger)
+- Banner height locked at 68px; logo hangs outside
 -->
-
-
-<!-- 1. DOCTYPE & HTML BOILERPLATE -->
-
 <!DOCTYPE html>
-
-
 <html lang="en">
-
-
-<!-- 2. HEAD: META, TITLE, STYLE -->
-
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>About - SocialStorm AI</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       background: #fff;
@@ -38,140 +23,149 @@ END
     a { text-decoration: none; color: #00b3c4; transition: color 0.18s; }
     a:hover { color: #0091a8; }
     ul { list-style: none; margin: 0; padding: 0; }
-    nav {
-      position: sticky; top: 0; background: #10141a;
-      display: flex; justify-content: center; align-items: center;
-      padding: 1rem 2rem; z-index: 1000; gap: 4rem;
+
+    /* ===== EXACT SAME BANNER AS video.html ===== */
+    :root {
+      --header-bg: #10141a;
+      --header-fg: #ffffff;
+      --cta-bg: #00e5ff;
+      --cta-fg: #041016;
+      --bar-h: 68px; /* banner height */
+    }
+
+    .ssai-header {
+      background: var(--header-bg);
+      color: var(--header-fg);
+      position: sticky;
+      top: 0;
+      z-index: 1000;
       box-shadow: 0 2px 8px rgba(0,0,0,0.14);
-      min-height: 112px;
-      transition: min-height 0.2s;
+      overflow: visible;
     }
-    nav .logo { position: absolute; left: 2rem; cursor: pointer; display: flex; align-items: center; }
-    nav .logo img {
-      height: 200px;
-      display: block;
-      background: transparent;
-      border-radius: 12px;
-      object-fit: contain;
-      max-width: 340px;
-      max-height: 200px;
-      box-shadow: 0 2px 12px #00e0fe11;
+
+    .ssai-header__bar {
+      position: relative;            /* for absolute children */
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0 16px;
+      height: var(--bar-h);
+      min-height: var(--bar-h);
     }
-    nav ul {
-      display: flex; gap: 2rem;
-      align-items: center;
-      transition: max-height 0.3s;
-    }
-    nav ul li a {
-      color: #fff; font-weight: 700; font-size: 1.09rem; letter-spacing: 0.03em;
-      transition: color 0.2s;
-      display: block;
-      padding: 0.6em 0.3em;
-      border-radius: 5px;
-    }
-    nav ul li a:hover,
-    nav ul li[aria-current="page"] a {
-      color: #00e0fe;
-      text-shadow: 0 0 8px #00e0fe55;
-      background: #011019;
-    }
-    nav .btn-primary {
-      position: absolute; right: 2rem;
-      background: #00e0fe; color: #111; font-weight: 900;
-      padding: 0.65rem 1.5rem; border: none; border-radius: 8px;
-      cursor: pointer; font-size: 1.13rem;
-      box-shadow: 0 4px 14px #00e0fe44;
-      transition: background 0.2s;
-      letter-spacing: 0.01em;
-      z-index: 10;
-    }
-    nav .btn-primary:hover { background: #00b3c4; }
-    /* Hamburger styles */
-    .hamburger {
-      display: none;
+
+    /* Left: big logo that hangs outside the bar */
+    .ssai-header__brand {
       position: absolute;
-      right: 2.1rem;
+      left: 16px;
       top: 50%;
       transform: translateY(-50%);
-      width: 44px;
-      height: 44px;
-      background: none;
-      border: none;
-      cursor: pointer;
-      z-index: 2002;
-      justify-content: center;
+      display: inline-flex;
       align-items: center;
+      text-decoration: none;
+      line-height: 0;
+      z-index: 1;
     }
-    .hamburger span, .hamburger span:before, .hamburger span:after {
+    .ssai-header__brand img {
+      height: 200px !important;
+      width: auto !important;
       display: block;
+      margin: calc(var(--bar-h) * -0.75) 0 calc(var(--bar-h) * -0.75) 0;
+      pointer-events: none; /* overhang won't block center-nav clicks */
+    }
+
+    /* Center: nav absolutely centered (independent of logo/CTA width) */
+    .ssai-header__nav {
       position: absolute;
-      width: 28px;
-      height: 4px;
-      background: #00e0fe;
-      border-radius: 3px;
-      transition: 0.25s;
-      left: 8px;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 2;
     }
-    .hamburger span { top: 20px; }
-    .hamburger span:before { content: ""; top: -9px; }
-    .hamburger span:after { content: ""; top: 9px; }
-    .hamburger.open span { background: transparent; }
-    .hamburger.open span:before {
-      transform: rotate(45deg);
-      top: 0;
+    .ssai-header__menu {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      gap: 2rem;
+      font-weight: 800;
     }
-    .hamburger.open span:after {
-      transform: rotate(-45deg);
-      top: 0;
+    .ssai-header__menu a {
+      color: var(--header-fg);
+      text-decoration: none;
+      white-space: nowrap;
     }
-    /* Mobile nav */
+
+    /* Right: CTA pinned to far right */
+    .ssai-header__cta {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: inline-flex;
+      align-items: center;
+      padding: 12px 18px;
+      border-radius: 12px;
+      font-weight: 800;
+      background: var(--cta-bg);
+      color: var(--cta-fg);
+      text-decoration: none;
+      white-space: nowrap;
+      z-index: 2;
+    }
+
+    /* Hamburger (CSS-only) */
+    .ssai-header__toggle { display: none; } /* hidden checkbox */
+    .ssai-header__hamburger {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: none;
+      border: 0;
+      background: transparent;
+      width: 44px; height: 44px;
+      padding: 0;
+      align-items: center; justify-content: center;
+      cursor: pointer;
+      z-index: 3;
+    }
+    .ssai-header__hamburger span {
+      display: block;
+      width: 24px; height: 2px;
+      background: var(--header-fg);
+      margin: 4px 0;
+    }
+
+    /* Desktop→Mobile logo scaling (same as video.html) */
+    @media (max-width: 850px) { .ssai-header__brand img { height: 110px !important; margin: -28px 0 -28px 0; } }
+    @media (max-width: 700px) { .ssai-header__brand img { height: 70px  !important; margin: -12px 0 -12px 0; } }
+    @media (max-width: 480px) { .ssai-header__brand img { height: 48px  !important; margin: 0; } }
+
+    /* Mobile behavior */
     @media (max-width: 900px) {
-      nav { min-height: 72px; gap: 1.5rem; padding: 0.8rem 1rem 0.7rem 1rem; }
-      nav .logo img { height: 72px; max-width: 150px; max-height: 72px; }
-      nav .btn-primary { display: none; }
-      .hamburger { display: flex; }
-      nav ul {
+      .ssai-header__cta { display: none; }           /* free space for hamburger */
+      .ssai-header__hamburger { display: inline-flex; }
+
+      .ssai-header__menu {
+        display: none; /* toggled by checkbox */
         position: absolute;
-        top: 100%;
-        left: 0;
-        width: 100vw;
-        background: #10141a;
+        top: calc(100% + 8px);
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(720px, calc(100vw - 28px));
+        background: var(--header-bg);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px;
+        padding: 12px;
         flex-direction: column;
-        align-items: flex-start;
-        gap: 0;
-        max-height: 0;
-        overflow: hidden;
-        padding: 0 0 0 0;
-        box-shadow: 0 14px 32px #00e0fe13;
-        z-index: 1500;
-        border-bottom-left-radius: 12px;
-        border-bottom-right-radius: 12px;
-        transition: max-height 0.32s cubic-bezier(.5,0,.5,1);
+        gap: 10px;
+        text-align: center;
+        z-index: 1010;
       }
-      nav ul.open {
-        max-height: 380px;
-        padding: 12px 0 6px 0;
-      }
-      nav ul li {
-        width: 100%;
-        border-bottom: 1px solid #16365340;
-        padding: 0;
-        margin: 0;
-      }
-      nav ul li:last-child { border-bottom: none; }
-      nav ul li a {
-        width: 100%;
-        padding: 1em 2.7em 1em 2.5em;
-        font-size: 1.14rem;
-        background: none;
-        color: #fff;
-      }
-      nav ul li a:active,
-      nav ul li[aria-current="page"] a {
-        background: #012c3f;
-        color: #00e0fe;
-      }
+      #navToggle:checked ~ nav .ssai-header__menu { display: flex; }
     }
+
+    /* ===== ABOUT PAGE CONTENT ===== */
     main.page-content {
       max-width: 700px;
       width: 98vw;
@@ -234,13 +228,14 @@ END
       line-height: 1.5;
       list-style: disc;
     }
+
     /* Disclaimer styling */
     .disclaimer-section {
       background: #fff3c9;
       color: #533400;
       border-radius: 13px;
       box-shadow: 0 2px 12px #ffd60019;
-      padding: 1.3rem 1.3rem 1.3rem 1.3rem;
+      padding: 1.3rem;
       margin: 22px auto 14px auto;
       font-size: 1.01rem;
       line-height: 1.7;
@@ -269,52 +264,63 @@ END
       margin-bottom: 0.37em;
       list-style: disc;
     }
+
     @media (max-width: 700px) {
       main.page-content { padding: 1.1rem 0.3rem 1rem; }
       h1 { font-size: 1.33rem; }
       .about-lead { font-size: 1.05rem; }
       .disclaimer-section { font-size: 0.92rem; }
     }
+
+    /* Footer */
+    footer { width:100%; text-align:center; padding:1.5rem 0 0.5rem; font-size:1.08rem; color:#0093ae; }
   </style>
 </head>
 
-
-<!-- 3. BODY -->
 <body>
+  <!-- ===== HEADER / NAV (EXACT MATCH) ===== -->
+  <header class="ssai-header" role="banner">
+    <div class="ssai-header__bar">
+      <!-- Left: Logo -->
+      <a class="ssai-header__brand" href="index.html" aria-label="SocialStormAI Home">
+        <img src="logo.png" alt="SocialStormAI" />
+      </a>
 
-  <!-- 3.1. NAVBAR (with Thumbnail Generator link at top) -->
-  <nav>
-    <div class="logo" onclick="location.href='index.html'">
-      <img src="logo.png" alt="SocialStorm Logo" />
+      <!-- Mobile toggle + Centered Nav -->
+      <input type="checkbox" id="navToggle" class="ssai-header__toggle" />
+      <label for="navToggle" class="ssai-header__hamburger" aria-label="Open menu" aria-controls="primaryMenu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </label>
+
+      <nav class="ssai-header__nav" aria-label="Primary">
+        <ul class="ssai-header__menu" id="primaryMenu">
+          <li><a href="index.html">Home</a></li>
+          <li><a href="video.html">Create Video</a></li>
+          <li><a href="thumbnail.html">Thumbnails</a></li>
+          <li><a href="pricing.html">Pricing</a></li>
+          <li><a href="contact.html">Contact</a></li>
+        </ul>
+      </nav>
+
+      <!-- Right: CTA -->
+      <a href="video.html" class="ssai-header__cta">Get Started</a>
     </div>
-    <button class="hamburger" id="navHamburger" aria-label="Open menu" aria-expanded="false">
-      <span></span>
-    </button>
-    <ul id="mainNavList">
-      <li><a href="thumbnail.html" style="color:#00e0fe;font-weight:900;">Thumbnail Generator</a></li>
-      <li><a href="index.html">Home</a></li>
-      <li><a href="video.html">Create Video</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="about.html" aria-current="page">About</a></li>
-      <li><a href="contact.html">Contact</a></li>
-    </ul>
-    <button class="btn-primary" onclick="location.href='video.html'">Get Started</button>
-  </nav>
+  </header>
 
-
-  <!-- 3.2. MAIN ABOUT CONTENT -->
+  <!-- ===== MAIN ABOUT CONTENT ===== -->
   <main class="page-content">
-
     <h1>About SocialStormAI</h1>
     <div class="about-lead">
       SocialStormAI was built for creators who want to make viral content fast—without technical headaches or endless editing.
     </div>
+
     <section class="about-section">
       <h2>Why SocialStormAI?</h2>
       <p>
         Our founder was tired of seeing great ideas die in Google Docs or Notes apps. So we built a tool that bridges the gap between “idea” and “published video”—in under 2 minutes.
       </p>
     </section>
+
     <section class="about-section">
       <h2>What Makes Us Different?</h2>
       <ul>
@@ -327,18 +333,21 @@ END
         <li>Mobile- and desktop-friendly. Create from anywhere.</li>
       </ul>
     </section>
+
     <section class="about-section">
       <h2>Our Mission</h2>
       <p>
         We want to level the playing field for small creators. If you have an idea, you can go viral. SocialStormAI puts top-tier tools in everyone’s hands—no editing skills needed.
       </p>
     </section>
+
     <section class="about-section">
       <h2>Questions?</h2>
       <p>
         Reach out <a href="contact.html">here</a> or email <a href="mailto:andrew@socialstormai.com">andrew@socialstormai.com</a>. We want to hear from you!
       </p>
     </section>
+
     <!-- Legal Disclaimer / Terms Section -->
     <section class="disclaimer-section">
       <strong>Important Legal Notice & Terms of Use</strong>
@@ -365,30 +374,9 @@ END
     </section>
   </main>
 
-  <!-- 3.3. FOOTER -->
+  <!-- ===== FOOTER ===== -->
   <footer>
     &copy; 2025 SocialStorm AI. Built for creators who want to win.
   </footer>
-
-  <!-- 4. JS: NAVBAR MOBILE TOGGLE -->
-  <script>
-    // Hamburger nav
-    const hamburger = document.getElementById('navHamburger');
-    const navList = document.getElementById('mainNavList');
-    hamburger.addEventListener('click', function () {
-      const open = navList.classList.toggle('open');
-      hamburger.classList.toggle('open');
-      hamburger.setAttribute('aria-expanded', open ? 'true' : 'false');
-    });
-    document.querySelectorAll('#mainNavList a').forEach(link => {
-      link.addEventListener('click', () => {
-        navList.classList.remove('open');
-        hamburger.classList.remove('open');
-        hamburger.setAttribute('aria-expanded', 'false');
-      });
-    });
-  </script>
-
 </body>
-
 </html>

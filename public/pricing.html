@@ -1,9 +1,3 @@
-<!--
-1. SOCIALSTORMAI PRICING PAGE
-2. HEADER & NAV MATCHES APP STYLE/SCREENSHOT EXACTLY
-3. 3 TIERS + THUMBNAIL PACK UPSELL
--->
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -21,155 +15,147 @@
       display: flex;
       flex-direction: column;
     }
+    ul { list-style: none; }
 
-    nav {
+    /* ===== GLOBAL BANNER (exactly same as other pages) ===== */
+    :root {
+      --header-bg: #10141a;
+      --header-fg: #ffffff;
+      --cta-bg: #00e5ff;
+      --cta-fg: #041016;
+      --bar-h: 68px; /* banner height */
+    }
+
+    .ssai-header {
+      background: var(--header-bg);
+      color: var(--header-fg);
       position: sticky;
       top: 0;
-      background: #10141a;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 2rem;
       z-index: 1000;
-      min-height: 80px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.14);
+      overflow: visible;
     }
-    .nav-logo {
-      display: flex;
-      align-items: center;
-      cursor: pointer;
+    .ssai-header__bar {
+      position: relative;            /* for absolute children */
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 0 16px;
+      height: var(--bar-h);
+      min-height: var(--bar-h);
     }
-    .nav-logo img {
-      height: 200px;
-      width: auto;
-      max-width: 90vw;
-      display: block;
-      filter: brightness(100);
-      margin-bottom: -24px;
-      margin-top: -24px;
-      transition: height 0.22s;
-    }
-    .nav-links {
-      display: flex;
-      gap: 2rem;
-      align-items: center;
-    }
-    .nav-links li {
-      list-style: none;
-    }
-    .nav-links li a {
-      color: #fff;
-      font-weight: 700;
-      font-size: 1.09rem;
-      letter-spacing: 0.03em;
-      transition: color 0.2s;
-    }
-    .nav-links li a:hover,
-    .nav-links li[aria-current="page"] a {
-      color: #00e0fe;
-      text-shadow: 0 0 8px #00e0fe55;
-    }
-    .btn-primary {
-      background: #00e0fe;
-      color: #111;
-      font-weight: 900;
-      padding: 0.65rem 1.5rem;
-      border: none;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 1.13rem;
-      box-shadow: 0 4px 14px #00e0fe44;
-      transition: background 0.2s;
-      letter-spacing: 0.01em;
-      margin-left: 1.5rem;
-    }
-    .btn-primary:hover { background: #00b3c4; }
-    /* Hamburger for mobile (hidden on desktop) */
-    .hamburger {
-      display: none;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      width: 46px;
-      height: 46px;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      z-index: 2002;
-    }
-    .hamburger span {
-      display: block;
-      width: 28px;
-      height: 4px;
-      margin: 4px 0;
-      background: #00e0fe;
-      border-radius: 2px;
-      transition: all 0.22s;
-    }
-    .hamburger.active span:nth-child(1) {
-      transform: translateY(8px) rotate(45deg);
-    }
-    .hamburger.active span:nth-child(2) {
-      opacity: 0;
-    }
-    .hamburger.active span:nth-child(3) {
-      transform: translateY(-8px) rotate(-45deg);
-    }
-    /* Mobile Nav Dropdown */
-    .mobile-nav {
-      display: none;
-      flex-direction: column;
-      align-items: flex-end;
-      background: #10141a;
+    /* Left: big logo that hangs outside the bar */
+    .ssai-header__brand {
       position: absolute;
-      top: 80px;
-      right: 0;
-      width: 100vw;
-      max-width: 100vw;
-      box-shadow: 0 8px 28px #0008;
-      border-radius: 0 0 18px 18px;
-      padding: 1.2rem 2.2rem 1.8rem 2.2rem;
-      z-index: 2001;
-      animation: slideDown 0.22s;
+      left: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: inline-flex;
+      align-items: center;
+      text-decoration: none;
+      line-height: 0;
+      z-index: 1;
     }
-    @keyframes slideDown {
-      from { opacity: 0; transform: translateY(-24px);}
-      to   { opacity: 1; transform: translateY(0);}
+    .ssai-header__brand img {
+      height: 200px !important;
+      width: auto !important;
+      display: block;
+      margin: calc(var(--bar-h) * -0.75) 0 calc(var(--bar-h) * -0.75) 0;
+      pointer-events: none; /* overhang won't block center-nav clicks */
     }
-    .mobile-nav li {
-      margin-bottom: 1.18rem;
-      text-align: right;
-      list-style: none;
+    /* Center: nav absolutely centered (independent of logo/CTA width) */
+    .ssai-header__nav {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 2;
     }
-    .mobile-nav li:last-child {
-      margin-bottom: 0;
-    }
-    .mobile-nav a, .mobile-nav .btn-primary {
-      font-size: 1.2rem;
-      color: #fff;
+    .ssai-header__menu {
+      margin: 0;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      gap: 2rem;
       font-weight: 800;
     }
-    .mobile-nav .btn-primary {
-      width: 100%;
-      margin-left: 0;
-      margin-top: 1.2rem;
+    .ssai-header__menu a {
+      color: var(--header-fg);
+      text-decoration: none;
+      white-space: nowrap;
     }
-    @media (max-width: 850px) {
-      .nav-logo img { height: 120px; }
-      nav { min-height: 68px; }
-      .nav-links { gap: 1.1rem; }
-    }
-    @media (max-width: 700px) {
-      .nav-logo img { height: 70px; }
-      nav { min-height: 56px; padding: 0 1rem; }
-      .nav-links { display: none; }
-      .btn-primary { display: none; }
-      .hamburger { display: flex; }
-    }
-    @media (max-width: 480px) {
-      .mobile-nav { padding: 1rem 1rem 1.5rem 1rem; }
+    .ssai-header__menu a[aria-current="page"] { text-decoration: underline; }
+
+    /* Right: CTA pinned to far right */
+    .ssai-header__cta {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: inline-flex;
+      align-items: center;
+      padding: 12px 18px;
+      border-radius: 12px;
+      font-weight: 800;
+      background: var(--cta-bg);
+      color: var(--cta-fg);
+      text-decoration: none;
+      white-space: nowrap;
+      z-index: 2;
     }
 
+    /* Hamburger (CSS-only) */
+    .ssai-header__toggle { display: none; } /* hidden checkbox */
+    .ssai-header__hamburger {
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: none;
+      border: 0;
+      background: transparent;
+      width: 44px; height: 44px;
+      padding: 0;
+      align-items: center; justify-content: center;
+      cursor: pointer;
+      z-index: 3;
+    }
+    .ssai-header__hamburger span {
+      display: block;
+      width: 24px; height: 2px;
+      background: var(--header-fg);
+      margin: 4px 0;
+    }
+
+    /* Desktop→Mobile logo scaling (shared across pages) */
+    @media (max-width: 850px) { .ssai-header__brand img { height: 110px !important; margin: -28px 0 -28px 0; } }
+    @media (max-width: 700px) { .ssai-header__brand img { height: 70px  !important; margin: -12px 0 -12px 0; } }
+    @media (max-width: 480px) { .ssai-header__brand img { height: 48px  !important; margin: 0; } }
+
+    /* Mobile behavior */
+    @media (max-width: 900px) {
+      .ssai-header__cta { display: none; }           /* free space for hamburger */
+      .ssai-header__hamburger { display: inline-flex; }
+
+      .ssai-header__menu {
+        display: none; /* toggled by checkbox */
+        position: absolute;
+        top: calc(100% + 8px);
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(720px, calc(100vw - 28px));
+        background: var(--header-bg);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 12px;
+        padding: 12px;
+        flex-direction: column;
+        gap: 10px;
+        text-align: center;
+        z-index: 1010;
+      }
+      #navToggle:checked ~ nav .ssai-header__menu { display: flex; }
+    }
+
+    /* ===== PAGE CONTENT (Pricing) ===== */
     main {
       flex: 1 0 auto;
       width: 100%;
@@ -332,12 +318,7 @@
       margin-bottom: 1.4rem;
       font-weight: 500;
     }
-    .thumb-price {
-      font-size: 1.19rem;
-      color: #00b3c4;
-      font-weight: 700;
-      margin-bottom: 1.1rem;
-    }
+    .thumb-price { font-size: 1.19rem; color: #00b3c4; font-weight: 700; margin-bottom: 1.1rem; }
     .thumb-btn {
       background: #00e0fe;
       color: #10141a;
@@ -359,75 +340,46 @@
     }
     @media (max-width: 650px) {
       .plan-card { padding: 2rem 0.8rem 2rem 0.8rem; min-width: 220px; }
-      .nav-logo img { height: 80px; }
-      nav { min-height: 54px; padding: 0 0.7rem; }
       .thumbnail-upsell { padding: 1.2rem 0.3rem 1.5rem 0.3rem; }
       h1 { font-size: 2.1rem; }
     }
+
+    /* Footer */
+    footer { width:100%; text-align:center; padding:1.5rem 0 0.5rem; font-size:1.08rem; color:#0093ae; }
   </style>
 </head>
 
 <body>
-  <!-- 1. TOP NAV (Screenshot-Match) -->
-  <nav>
-    <div class="nav-logo" onclick="location.href='index.html'">
-      <img src="logo.png" alt="SocialStorm Logo" />
-    </div>
-    <ul class="nav-links">
-      <li><a href="index.html">Home</a></li>
-      <li><a href="video.html">Create Video</a></li>
-      <li><a href="thumbnail.html">Thumbnails</a></li>
-      <li><a href="pricing.html" aria-current="page">Pricing</a></li>
-      <li><a href="about.html">About</a></li>
-      <li><a href="contact.html">Contact</a></li>
-    </ul>
-    <button class="btn-primary" onclick="location.href='video.html'">Get Started</button>
-    <button class="hamburger" id="hamburgerBtn" aria-label="Open menu">
-      <span></span>
-      <span></span>
-      <span></span>
-    </button>
-    <ul class="mobile-nav" id="mobileNav">
-      <li><a href="index.html">Home</a></li>
-      <li><a href="video.html">Create Video</a></li>
-      <li><a href="thumbnail.html">Thumbnails</a></li>
-      <li><a href="pricing.html" aria-current="page">Pricing</a></li>
-      <li><a href="about.html">About</a></li>
-      <li><a href="contact.html">Contact</a></li>
-      <li><button class="btn-primary" onclick="location.href='video.html'">Get Started</button></li>
-    </ul>
-  </nav>
-  <script>
-    // Hamburger + Mobile Nav Logic
-    const hamburgerBtn = document.getElementById('hamburgerBtn');
-    const mobileNav = document.getElementById('mobileNav');
-    let mobileNavOpen = false;
-    hamburgerBtn.addEventListener('click', () => {
-      hamburgerBtn.classList.toggle('active');
-      mobileNavOpen = !mobileNavOpen;
-      mobileNav.style.display = mobileNavOpen ? 'flex' : 'none';
-      document.body.style.overflow = mobileNavOpen ? 'hidden' : '';
-    });
-    // Close mobile nav when clicking a link or outside
-    mobileNav.addEventListener('click', (e) => {
-      if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON') {
-        hamburgerBtn.classList.remove('active');
-        mobileNav.style.display = 'none';
-        document.body.style.overflow = '';
-        mobileNavOpen = false;
-      }
-    });
-    window.addEventListener('resize', () => {
-      if (window.innerWidth > 700) {
-        hamburgerBtn.classList.remove('active');
-        mobileNav.style.display = 'none';
-        document.body.style.overflow = '';
-        mobileNavOpen = false;
-      }
-    });
-  </script>
+  <!-- ===== HEADER / NAV (EXACT MATCH) ===== -->
+  <header class="ssai-header" role="banner">
+    <div class="ssai-header__bar">
+      <!-- Left: Logo -->
+      <a class="ssai-header__brand" href="index.html" aria-label="SocialStormAI Home">
+        <img src="logo.png" alt="SocialStormAI" />
+      </a>
 
-  <!-- 2. MAIN CONTENT -->
+      <!-- Mobile toggle + Centered Nav -->
+      <input type="checkbox" id="navToggle" class="ssai-header__toggle" />
+      <label for="navToggle" class="ssai-header__hamburger" aria-label="Open menu" aria-controls="primaryMenu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </label>
+
+      <nav class="ssai-header__nav" aria-label="Primary">
+        <ul class="ssai-header__menu" id="primaryMenu">
+          <li><a href="index.html">Home</a></li>
+          <li><a href="video.html">Create Video</a></li>
+          <li><a href="thumbnail.html">Thumbnails</a></li>
+          <li><a href="pricing.html" aria-current="page">Pricing</a></li>
+          <li><a href="contact.html">Contact</a></li>
+        </ul>
+      </nav>
+
+      <!-- Right: CTA -->
+      <a href="video.html" class="ssai-header__cta">Get Started</a>
+    </div>
+  </header>
+
+  <!-- ===== MAIN CONTENT ===== -->
   <main>
     <h1>Pricing Plans</h1>
     <div class="subheadline">
@@ -449,6 +401,7 @@
         </ul>
         <button class="btn" onclick="location.href='video.html'">Get Started</button>
       </div>
+
       <!-- CREATOR PLAN -->
       <div class="plan-card">
         <div class="plan-title">Creator</div>
@@ -463,6 +416,7 @@
         </ul>
         <button class="btn" onclick="location.href='video.html'">Upgrade</button>
       </div>
+
       <!-- PRO PLAN (BEST VALUE) -->
       <div class="plan-card best">
         <div class="badge">Best Value</div>
@@ -480,6 +434,7 @@
         <button class="btn" onclick="location.href='video.html'">Go Pro</button>
       </div>
     </div>
+
     <!-- THUMBNAIL PACK UPSELL -->
     <div class="thumbnail-upsell">
       <h2>Just want thumbnails?</h2>
@@ -491,7 +446,8 @@
       <div style="color:#0093ae;font-size:1rem;font-weight:600;margin-top:0.7rem;">Pro users get unlimited thumbnails included free.</div>
     </div>
   </main>
-  <footer style="width:100%;text-align:center;padding:1.5rem 0 0.5rem 0;font-size:1.08rem;color:#0093ae;">
+
+  <footer>
     &copy; 2025 SocialStorm AI. Built for creators who want to win.
   </footer>
 </body>
