@@ -11,6 +11,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { execFile } = require('child_process');
 
 console.log('[10C][INIT] Pixabay clip helper loaded.');
 
@@ -85,56 +86,119 @@ function isValidClip(filePath, jobId) {
   }
 }
 
-// --- Download video from Pixabay to local file ---
+// --- ffprobe helper (video validation) ---
+function ffprobeHasVideoStream(p) {
+  return new Promise((resolve) => {
+    execFile(
+      'ffprobe',
+      ['-v','error','-select_streams','v:0','-show_entries','stream=codec_name,width,height','-of','csv=p=0', p],
+      (err, stdout) => {
+        if (err) return resolve(false);
+        resolve(Boolean(String(stdout || '').trim()));
+      }
+    );
+  });
+}
+
+// --- Download video from Pixabay to local file (ROBUST) ---
 async function downloadPixabayVideoToLocal(url, outPath, jobId) {
+  const tmp = `${outPath}.part`;
   try {
     console.log(`[10C][DL][${jobId}] Downloading Pixabay video: ${url} -> ${outPath}`);
-    const response = await axios.get(url, { responseType: 'stream' });
+    const response = await axios.get(url, { responseType: 'stream', timeout: 20000, maxRedirects: 5 });
+
+    const expected = Number(response.headers['content-length'] || 0);
+    let written = 0;
+
     await new Promise((resolve, reject) => {
-      const stream = response.data.pipe(fs.createWriteStream(outPath));
-      stream.on('finish', () => {
-        console.log(`[10C][DL][${jobId}] Video saved to: ${outPath}`);
-        resolve();
-      });
-      stream.on('error', (err) => {
-        console.error('[10C][DL][ERR]', err);
-        reject(err);
-      });
+      const ws = fs.createWriteStream(tmp);
+      response.data.on('data', (chunk) => { written += chunk.length; });
+      response.data.on('error', reject);
+      ws.on('error', reject);
+      response.data.pipe(ws);
+      ws.on('finish', resolve);
     });
+
+    if (expected && written !== expected) {
+      console.warn(`[10C][DL][${jobId}] Incomplete video download: wrote ${written} of ${expected} bytes.`);
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      return null;
+    }
+
+    const minBytes = 256 * 1024;
+    if (written < minBytes) {
+      console.warn(`[10C][DL][${jobId}] Video too small (${written} bytes).`);
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      return null;
+    }
+
+    fs.renameSync(tmp, outPath);
+
+    const ok = await ffprobeHasVideoStream(outPath);
+    if (!ok) {
+      console.warn(`[10C][DL][${jobId}] ffprobe found NO video stream. Deleting ${outPath}.`);
+      try { fs.unlinkSync(outPath); } catch (_) {}
+      return null;
+    }
+
     if (!isValidClip(outPath, jobId)) {
       console.warn(`[10C][DL][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
       return null;
     }
+
+    console.log(`[10C][DL][${jobId}] Video saved to: ${outPath} (${written} bytes)`);
     return outPath;
   } catch (err) {
     console.error('[10C][DL][ERR]', err);
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
     return null;
   }
 }
 
-// --- Download image from Pixabay to local file ---
+// --- Download image from Pixabay to local file (ROBUST) ---
 async function downloadPixabayImageToLocal(url, outPath, jobId) {
+  const tmp = `${outPath}.part`;
   try {
     console.log(`[10C][DL][${jobId}] Downloading Pixabay image: ${url} -> ${outPath}`);
-    const response = await axios.get(url, { responseType: 'stream' });
+    const response = await axios.get(url, { responseType: 'stream', timeout: 20000, maxRedirects: 5 });
+
+    const expected = Number(response.headers['content-length'] || 0);
+    let written = 0;
+
     await new Promise((resolve, reject) => {
-      const stream = response.data.pipe(fs.createWriteStream(outPath));
-      stream.on('finish', () => {
-        console.log(`[10C][DL][${jobId}] Image saved to: ${outPath}`);
-        resolve();
-      });
-      stream.on('error', (err) => {
-        console.error('[10C][DL][ERR]', err);
-        reject(err);
-      });
+      const ws = fs.createWriteStream(tmp);
+      response.data.on('data', (chunk) => { written += chunk.length; });
+      response.data.on('error', reject);
+      ws.on('error', reject);
+      response.data.pipe(ws);
+      ws.on('finish', resolve);
     });
+
+    if (expected && written !== expected) {
+      console.warn(`[10C][DL][${jobId}] Incomplete image download: wrote ${written} of ${expected} bytes.`);
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      return null;
+    }
+
+    const minBytes = 16 * 1024;
+    if (written < minBytes) {
+      console.warn(`[10C][DL][${jobId}] Image too small (${written} bytes).`);
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      return null;
+    }
+
+    fs.renameSync(tmp, outPath);
+
     if (!isValidClip(outPath, jobId)) {
       console.warn(`[10C][DL][${jobId}] Downloaded image invalid/broken: ${outPath}`);
       return null;
     }
+
+    console.log(`[10C][DL][${jobId}] Image saved to: ${outPath} (${written} bytes)`);
     return outPath;
   } catch (err) {
     console.error('[10C][DL][ERR]', err);
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
     return null;
   }
 }

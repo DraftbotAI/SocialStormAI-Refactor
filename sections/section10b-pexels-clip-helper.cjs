@@ -13,6 +13,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { execFile } = require('child_process');
 
 console.log('[10B][INIT] Pexels helper (video + photo) loaded.');
 
@@ -82,29 +83,78 @@ function isValidFile(filePath, jobId) {
   }
 }
 
-// --- Downloaders ---
+// --- ffprobe helper (video validation) ---
+function ffprobeHasVideoStream(p) {
+  return new Promise((resolve) => {
+    execFile(
+      'ffprobe',
+      ['-v','error','-select_streams','v:0','-show_entries','stream=codec_name,width,height','-of','csv=p=0', p],
+      (err, stdout) => {
+        if (err) return resolve(false);
+        resolve(Boolean(String(stdout || '').trim()));
+      }
+    );
+  });
+}
+
+// --- Downloaders (ROBUST) ---
 async function downloadStreamToLocal(url, outPath, jobId, kind = 'Video') {
+  const tmp = `${outPath}.part`;
   try {
     console.log(`[10B][DL][${jobId}] Downloading ${kind}: ${url} -> ${outPath}`);
-    const response = await axios.get(url, { responseType: 'stream' });
+    const response = await axios.get(url, { responseType: 'stream', timeout: 20000, maxRedirects: 5 });
+
+    const expected = Number(response.headers['content-length'] || 0);
+    let written = 0;
+
     await new Promise((resolve, reject) => {
-      const stream = response.data.pipe(fs.createWriteStream(outPath));
-      stream.on('finish', () => {
-        console.log(`[10B][DL][${jobId}] ${kind} saved to: ${outPath}`);
-        resolve();
-      });
-      stream.on('error', (err) => {
-        console.error('[10B][DL][ERR]', err);
-        reject(err);
-      });
+      const ws = fs.createWriteStream(tmp);
+      response.data.on('data', (chunk) => { written += chunk.length; });
+      response.data.on('error', reject);
+      ws.on('error', reject);
+      response.data.pipe(ws);
+      ws.on('finish', resolve);
     });
+
+    // Content-length guard (when provided)
+    if (expected && written !== expected) {
+      console.warn(`[10B][DL][${jobId}] Incomplete download: wrote ${written} of ${expected} bytes.`);
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      return null;
+    }
+
+    // Minimum sanity bytes
+    const minBytes = kind === 'Video' ? 256 * 1024 : 16 * 1024;
+    if (written < minBytes) {
+      console.warn(`[10B][DL][${jobId}] ${kind} too small (${written} bytes).`);
+      try { fs.unlinkSync(tmp); } catch (_) {}
+      return null;
+    }
+
+    // Atomic rename
+    fs.renameSync(tmp, outPath);
+
+    // ffprobe validation for videos
+    if (kind === 'Video') {
+      const ok = await ffprobeHasVideoStream(outPath);
+      if (!ok) {
+        console.warn(`[10B][DL][${jobId}] ffprobe found NO video stream. Deleting ${outPath}.`);
+        try { fs.unlinkSync(outPath); } catch (_) {}
+        return null;
+      }
+    }
+
+    // Final sanity check
     if (!isValidFile(outPath, jobId)) {
       console.warn(`[10B][DL][${jobId}] Downloaded ${kind.toLowerCase()} invalid/broken: ${outPath}`);
       return null;
     }
+
+    console.log(`[10B][DL][${jobId}] ${kind} saved to: ${outPath} (${written} bytes)`);
     return outPath;
   } catch (err) {
     console.error('[10B][DL][ERR]', err?.message || err);
+    try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
     return null;
   }
 }
