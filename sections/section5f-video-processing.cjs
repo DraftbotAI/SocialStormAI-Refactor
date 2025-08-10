@@ -1,10 +1,11 @@
 // ===========================================================
-// SECTION 5F: VIDEO PROCESSING & AV COMBINER (2025-08 FIX)
+// SECTION 5F: VIDEO PROCESSING & AV COMBINER (2025-08 FIX2)
 // Handles trimming, normalizing, silent audio, muxing narration onto video
 // MAX LOGGING AT EVERY STEP, VIRAL PORTRAIT BLUR, NO STRETCH, NO BLACK BARS
 // Scene logic: 0.5s pre-voice, +1.0s post-voice by default
-// Aspect always forced to 1080x1920 (portrait), 30fps, yuv420p, faststart
-// Bulletproof: Avoids keyframe seeking (no -ss mid-GOP), pads/locks duration
+// Aspect 1080x1920 portrait, 30fps, yuv420p, faststart
+// Bulletproof: trim in filtergraph (no mid-GOP seek), CFR output
+// CHANGE: replace deprecated/contradictory `-vsync 2` with `-fps_mode cfr`
 // ===========================================================
 
 const fs = require('fs');
@@ -89,10 +90,7 @@ async function convertMp3ToWav(mp3Path, wavPath) {
 }
 
 // ============================================================
-// INTERNAL: Build portrait trim+blur graph (no mid-GOP seek)
-// - startSec/endSec are in seconds; we trim in the filtergraph.
-// - We split the trimmed stream, make bg (blurred) + fg (fit), overlay.
-// - tpad clones last frame to cover tail, then we hard-trim to duration.
+// INTERNAL: Build portrait trim+blur graph (CFR, no mid-GOP seek)
 // ============================================================
 function buildPortraitTrimFilter(startSec, endSec, totalDur, tailSec) {
   const s = Math.max(0, Number(startSec) || 0);
@@ -100,8 +98,6 @@ function buildPortraitTrimFilter(startSec, endSec, totalDur, tailSec) {
   const dur = Math.max(0.2, Number(totalDur) || (e - s));
   const tail = Math.max(0, Number(tailSec) || 0);
 
-  // Single-trim first -> split -> bg/fg -> overlay -> pad tail -> exact trim
-  // IMPORTANT: use setpts to reset timeline after trim, then lock to exact dur.
   return [
     `[0:v]trim=start=${s}:end=${e},setpts=PTS-STARTPTS[v0]`,
     `[v0]split=2[v1][v2]`,
@@ -112,8 +108,7 @@ function buildPortraitTrimFilter(startSec, endSec, totalDur, tailSec) {
 }
 
 // ============================================================
-// SCENE BUILDER: Slices video for scene 1 & 2 (shared clip, two lines)
-// Returns [scene1Path, scene2Path]; uses filtergraph trim to avoid keyframe seek.
+// SCENE 1+2 SPLIT (shared clip, two lines) – CFR, no -vsync
 // ============================================================
 async function splitVideoForFirstTwoScenes(videoIn, audio1, audio2, outDir = path.dirname(videoIn)) {
   console.log(`${TAG}[SPLIT][START] "${videoIn}" + two voice lines`);
@@ -138,7 +133,6 @@ async function splitVideoForFirstTwoScenes(videoIn, audio1, audio2, outDir = pat
   const scene1Path = path.resolve(outDir, `scene1-${Date.now()}-${Math.floor(Math.random() * 1e6)}.mp4`);
   const scene2Path = path.resolve(outDir, `scene2-${Date.now()}-${Math.floor(Math.random() * 1e6)}.mp4`);
 
-  // SCENE 1 (trim in filtergraph; no -ss)
   await new Promise((resolve, reject) => {
     const filter = buildPortraitTrimFilter(scene1Start, scene1Start + scene1Len, scene1Len, tail);
     ffmpeg(videoIn)
@@ -147,7 +141,7 @@ async function splitVideoForFirstTwoScenes(videoIn, audio1, audio2, outDir = pat
         '-filter_complex', filter,
         '-map', '[vout]',
         '-r', '30',
-        '-vsync', '2',
+        '-fps_mode', 'cfr',
         '-an',
         '-c:v', 'libx264',
         '-preset', 'veryfast',
@@ -159,11 +153,8 @@ async function splitVideoForFirstTwoScenes(videoIn, audio1, audio2, outDir = pat
       .on('start', cmd => console.log(`${TAG}[SPLIT][SCENE1][CMD] ${cmd}`))
       .on('stderr', line => console.log(`${TAG}[SPLIT][SCENE1][STDERR] ${line}`))
       .on('end', () => {
-        try {
-          assertFile(scene1Path, 10240, 'SCENE1_OUT');
-          console.log(`${TAG}[SPLIT][SCENE1][OK] ${scene1Path}`);
-          resolve();
-        } catch (e) { console.error(`${TAG}[SPLIT][SCENE1][ERR] ${e.message}`); reject(e); }
+        try { assertFile(scene1Path, 10240, 'SCENE1_OUT'); console.log(`${TAG}[SPLIT][SCENE1][OK] ${scene1Path}`); resolve(); }
+        catch (e) { console.error(`${TAG}[SPLIT][SCENE1][ERR] ${e.message}`); reject(e); }
       })
       .on('error', (err, stdout, stderr) => {
         console.error(`${TAG}[SPLIT][SCENE1][ERR]`, err);
@@ -174,7 +165,6 @@ async function splitVideoForFirstTwoScenes(videoIn, audio1, audio2, outDir = pat
       .save(scene1Path);
   });
 
-  // SCENE 2 (also trim via filtergraph)
   await new Promise((resolve, reject) => {
     const filter = buildPortraitTrimFilter(scene2Start, scene2Start + scene2Len, scene2Len, tail);
     ffmpeg(videoIn)
@@ -183,7 +173,7 @@ async function splitVideoForFirstTwoScenes(videoIn, audio1, audio2, outDir = pat
         '-filter_complex', filter,
         '-map', '[vout]',
         '-r', '30',
-        '-vsync', '2',
+        '-fps_mode', 'cfr',
         '-an',
         '-c:v', 'libx264',
         '-preset', 'veryfast',
@@ -195,11 +185,8 @@ async function splitVideoForFirstTwoScenes(videoIn, audio1, audio2, outDir = pat
       .on('start', cmd => console.log(`${TAG}[SPLIT][SCENE2][CMD] ${cmd}`))
       .on('stderr', line => console.log(`${TAG}[SPLIT][SCENE2][STDERR] ${line}`))
       .on('end', () => {
-        try {
-          assertFile(scene2Path, 10240, 'SCENE2_OUT');
-          console.log(`${TAG}[SPLIT][SCENE2][OK] ${scene2Path}`);
-          resolve();
-        } catch (e) { console.error(`${TAG}[SPLIT][SCENE2][ERR] ${e.message}`); reject(e); }
+        try { assertFile(scene2Path, 10240, 'SCENE2_OUT'); console.log(`${TAG}[SPLIT][SCENE2][OK] ${scene2Path}`); resolve(); }
+        catch (e) { console.error(`${TAG}[SPLIT][SCENE2][ERR] ${e.message}`); reject(e); }
       })
       .on('error', (err, stdout, stderr) => {
         console.error(`${TAG}[SPLIT][SCENE2][ERR]`, err);
@@ -214,8 +201,7 @@ async function splitVideoForFirstTwoScenes(videoIn, audio1, audio2, outDir = pat
 }
 
 // ============================================================
-// TRIM FOR NARRATION (Scene 3+): 0.5s pre, 1.0s post (defaults)
-// Filtergraph trim (no -ss), pad tail if needed, lock exact duration.
+// TRIM FOR NARRATION (Scene 3+): CFR, no -vsync, loop optional
 // ============================================================
 async function trimForNarration(inPath, outPath, audioDuration, options = {}) {
   let leadIn = 0.5, trailOut = 1.0, loop = false;
@@ -235,7 +221,6 @@ async function trimForNarration(inPath, outPath, audioDuration, options = {}) {
   return new Promise((resolve, reject) => {
     let cmd = ffmpeg(inPath).inputOptions(['-y']);
     if (loop) {
-      // Loop source if requested; we still hard-trim via filtergraph.
       cmd = cmd.inputOptions(['-stream_loop', '-1']);
       console.log(`${TAG}[TRIM][LOOP] Enabled for ${inPath}`);
     }
@@ -245,7 +230,7 @@ async function trimForNarration(inPath, outPath, audioDuration, options = {}) {
         '-filter_complex', filter,
         '-map', '[vout]',
         '-r', '30',
-        '-vsync', '2',
+        '-fps_mode', 'cfr',
         '-an',
         '-c:v', 'libx264',
         '-preset', 'veryfast',
@@ -257,11 +242,8 @@ async function trimForNarration(inPath, outPath, audioDuration, options = {}) {
       .on('start', c => console.log(`${TAG}[TRIM][CMD] ${c}`))
       .on('stderr', line => console.log(`${TAG}[TRIM][STDERR] ${line}`))
       .on('end', () => {
-        try {
-          assertFile(outPath, 10240, 'TRIM_OUT');
-          console.log(`${TAG}[TRIM][OK] ${outPath}`);
-          resolve();
-        } catch (e) { console.error(`${TAG}[TRIM][ERR] ${e.message}`); reject(e); }
+        try { assertFile(outPath, 10240, 'TRIM_OUT'); console.log(`${TAG}[TRIM][OK] ${outPath}`); resolve(); }
+        catch (e) { console.error(`${TAG}[TRIM][ERR] ${e.message}`); reject(e); }
       })
       .on('error', (err, stdout, stderr) => {
         console.error(`${TAG}[TRIM][ERR]`, err);
@@ -274,9 +256,7 @@ async function trimForNarration(inPath, outPath, audioDuration, options = {}) {
 }
 
 // ============================================================
-// MUX: Sync narration over *trimmed* video, no offset
-// We DO NOT use -shortest. We force output duration to video duration,
-// and resample audio to avoid drift.
+// MUX: narration over trimmed video — CFR audio resample, no -vsync
 // ============================================================
 async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   assertFile(videoIn, 10000, 'MUX_VIDEO_IN');
@@ -286,7 +266,6 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
   const audioDur = await getDuration(audioIn);
   console.log(`${TAG}[MUX][START] video="${videoIn}" (${videoDur.toFixed(3)}s), audio="${audioIn}" (${audioDur.toFixed(3)}s) → "${outPath}"`);
 
-  // Always mux from WAV for stability
   const wavTemp = path.join(os.tmpdir(), `ssai-wav-${Date.now()}-${Math.floor(Math.random() * 1e6)}.wav`);
   await convertMp3ToWav(audioIn, wavTemp);
 
@@ -302,12 +281,10 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
         '-c:a', 'aac',
         '-b:v', '2200k',
         '-b:a', '160k',
-        // Lock total output length to the (already-trimmed) video duration
         '-t', videoDur.toFixed(3),
-        // Kill drift / fractional rounding
         '-filter:a', 'aresample=async=1',
         '-r', '30',
-        '-vsync', '2',
+        '-fps_mode', 'cfr',
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
         '-preset', 'veryfast',
@@ -339,7 +316,7 @@ async function muxVideoWithNarration(videoIn, audioIn, outPath) {
 }
 
 // ============================================================
-// ADD SILENT AUDIO TO VIDEO (for Ken Burns / image videos)
+// ADD SILENT AUDIO (Ken Burns / image videos) — unchanged
 // ============================================================
 async function addSilentAudioTrack(inPath, outPath, duration) {
   assertFile(inPath, 10000, 'SILENT_IN');
@@ -361,11 +338,8 @@ async function addSilentAudioTrack(inPath, outPath, duration) {
       .on('start', cmd => console.log(`${TAG}[AUDIO][CMD] ${cmd}`))
       .on('stderr', line => console.log(`${TAG}[AUDIO][STDERR] ${line}`))
       .on('end', () => {
-        try {
-          assertFile(outPath, 10240, 'AUDIO_OUT');
-          console.log(`${TAG}[AUDIO][OK] ${outPath}`);
-          resolve();
-        } catch (e) { console.error(`${TAG}[AUDIO][ERR] ${e.message}`); reject(e); }
+        try { assertFile(outPath, 10240, 'AUDIO_OUT'); console.log(`${TAG}[AUDIO][OK] ${outPath}`); resolve(); }
+        catch (e) { console.error(`${TAG}[AUDIO][ERR] ${e.message}`); reject(e); }
       })
       .on('error', (err, stdout, stderr) => {
         console.error(`${TAG}[AUDIO][ERR]`, err);
