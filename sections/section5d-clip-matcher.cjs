@@ -18,7 +18,7 @@ const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs')
 const fs = require('fs');
 const path = require('path');
 
-console.log('[5D][INIT] Clip matcher orchestrator (R2-first, deterministic) loaded.');
+console.log('[5D][INIT] Clip matcher orchestrator (R2-first, deterministic) loaded. v-2025-08-10');
 
 const GENERIC_SUBJECTS = [
   'face','person','man','woman','it','thing','someone','something','body','eyes','kid','boy','girl','they','we','people','scene','child','children'
@@ -248,10 +248,14 @@ async function findClipForScene({
   let prioritizedSubjects = [];
   try {
     prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
+    // ---- Patch: ensure primarySubject is first to avoid long-sentence queries starving providers
+    const set = new Set([primarySubject, ...prioritizedSubjects.filter(Boolean)]);
+    prioritizedSubjects = Array.from(set).filter(Boolean);
     console.log(`[5D][SUBJECTS][${jobId}] Prioritized:`, prioritizedSubjects);
   } catch (err) {
     console.error(`[5D][SUBJECTS][${jobId}][ERR]`, err);
-    prioritizedSubjects = [searchSubject, mainTopic].filter(Boolean);
+    const set = new Set([primarySubject, searchSubject, mainTopic].filter(Boolean));
+    prioritizedSubjects = Array.from(set);
   }
 
   // 4) Try each subject once (no recursion). R2-FIRST SHORT-CIRCUIT (with subject gate).
