@@ -1,16 +1,20 @@
 // ===========================================================
-// SECTION 10B: PEXELS CLIP HELPER (Video Search & Download)
-// Exports: findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
-// Bulletproof: always tries all options, never blocks on strict match
-// Max logs at every step, accepts best available, NO silent fails
+// SECTION 10B: PEXELS CLIP HELPER (Video + Photo Search & Download)
+// Exports:
+//   - findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips)
+//   - findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips)
+// Bulletproof: tries options, logs every step, no silent fails
+// NOTE: Images are fallback-tier; 5D should prefer video over photos.
 // ===========================================================
+
+'use strict';
 
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-console.log('[10B][INIT] Pexels clip helper loaded.');
+console.log('[10B][INIT] Pexels helper (video + photo) loaded.');
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 if (!PEXELS_API_KEY) {
@@ -60,7 +64,7 @@ function strictSubjectPresent(text, subject) {
 }
 
 // --- File validation ---
-function isValidClip(filePath, jobId) {
+function isValidFile(filePath, jobId) {
   try {
     if (!fs.existsSync(filePath)) {
       console.warn(`[10B][DL][${jobId}] File does not exist: ${filePath}`);
@@ -78,15 +82,15 @@ function isValidClip(filePath, jobId) {
   }
 }
 
-// --- Download video from Pexels to local file ---
-async function downloadPexelsVideoToLocal(url, outPath, jobId) {
+// --- Downloaders ---
+async function downloadStreamToLocal(url, outPath, jobId, kind = 'Video') {
   try {
-    console.log(`[10B][DL][${jobId}] Downloading Pexels video: ${url} -> ${outPath}`);
+    console.log(`[10B][DL][${jobId}] Downloading ${kind}: ${url} -> ${outPath}`);
     const response = await axios.get(url, { responseType: 'stream' });
     await new Promise((resolve, reject) => {
       const stream = response.data.pipe(fs.createWriteStream(outPath));
       stream.on('finish', () => {
-        console.log(`[10B][DL][${jobId}] Video saved to: ${outPath}`);
+        console.log(`[10B][DL][${jobId}] ${kind} saved to: ${outPath}`);
         resolve();
       });
       stream.on('error', (err) => {
@@ -94,24 +98,23 @@ async function downloadPexelsVideoToLocal(url, outPath, jobId) {
         reject(err);
       });
     });
-    if (!isValidClip(outPath, jobId)) {
-      console.warn(`[10B][DL][${jobId}] Downloaded file is invalid/broken: ${outPath}`);
+    if (!isValidFile(outPath, jobId)) {
+      console.warn(`[10B][DL][${jobId}] Downloaded ${kind.toLowerCase()} invalid/broken: ${outPath}`);
       return null;
     }
     return outPath;
   } catch (err) {
-    console.error('[10B][DL][ERR]', err);
+    console.error('[10B][DL][ERR]', err?.message || err);
     return null;
   }
 }
 
-// --- Scoring function: now accepts fuzzy, partial, and strict matches ---
+// --- Scoring (video): choose best inside Pexels; 5D/10G does global ranking ---
 function scorePexelsMatch(video, file, subject, usedClips = []) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
 
-  // Main fields for matching/scoring
   const fields = [
     (video?.user?.name || ''),
     (video?.url || ''),
@@ -154,21 +157,48 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
   // Penalize very short clips
   if (video.duration && video.duration < 4) score -= 6;
 
-  // Slight bonus for popular Pexels video IDs (higher ID = newer/higher quality)
+  // Slight bonus for newer Pexels IDs
   if (video.id && Number(video.id) > 1000000) score += 2;
 
   return score;
 }
 
+// --- Scoring (photo): used only to pick best inside photos; videos still have priority in 5D ---
+function scorePexelsPhotoMatch(photo, subject, usedClips = []) {
+  let score = 0;
+  const cleanedSubject = cleanQuery(subject).toLowerCase();
+  const subjectWords = getKeywords(subject);
+
+  const fields = [
+    (photo?.alt || ''),
+    (photo?.url || ''),
+    (photo?.photographer || ''),
+    ...(Array.isArray(photo?.tags) ? photo.tags : []),
+  ].join(' ').toLowerCase();
+
+  // Text relevance
+  if (strictSubjectPresent(fields, subject)) score += 28;
+  if (fuzzyMatch(fields, subject)) score += 16;
+  if (partialMatch(fields, subject)) score += 6;
+  if (fields.includes(cleanedSubject) && cleanedSubject.length > 2) score += 8;
+  subjectWords.forEach(w => { if (fields.includes(w)) score += 2; });
+
+  // Prefer portrait-ish images (better for 9:16)
+  const w = Number(photo?.width || 0);
+  const h = Number(photo?.height || 0);
+  if (h > w) score += 10;
+  if (h >= 1280) score += 4;
+
+  // De-dupe if a similar remote src was used
+  const src = photo?.src?.large2x || photo?.src?.large || photo?.src?.portrait || photo?.src?.original || photo?.src?.medium || '';
+  if (usedClips && usedClips.some(u => src && (u.includes(src) || src.includes(u)))) score -= 100;
+
+  return score;
+}
+
 /**
- * Finds and downloads the best Pexels video for a given subject/scene,
- * using strict/fuzzy/partial keyword matching. Will always pick the best result available.
- * @param {string} subject - Main scene subject (clean, descriptive)
- * @param {string} workDir - Local job folder for saving video
- * @param {number} sceneIdx
- * @param {string} jobId
- * @param {Array<string>} usedClips - Paths/URLs already used
- * @returns {Promise<string|null>} Local .mp4 path, or null
+ * Finds and downloads the best Pexels video for a given subject/scene.
+ * Returns a local .mp4 path or null.
  */
 async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
   console.log(`[10B][PEXELS][${jobId}] findPexelsClipForScene | subject="${subject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
@@ -179,39 +209,43 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
   }
   try {
     const query = encodeURIComponent(cleanQuery(subject));
-    const url = `https://api.pexels.com/videos/search?query=${query}&per_page=10`;
-    console.log(`[10B][PEXELS][${jobId}] Searching: ${url}`);
+    const url = `https://api.pexels.com/videos/search?query=${query}&per_page=12&orientation=portrait`;
+    console.log(`[10B][PEXELS][${jobId}] Searching videos: ${url}`);
     const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY } });
 
-    if (resp.data && resp.data.videos && resp.data.videos.length > 0) {
+    if (resp.data && Array.isArray(resp.data.videos) && resp.data.videos.length > 0) {
       let scored = [];
       for (const video of resp.data.videos) {
-        const files = (video.video_files || []).filter(f => f.file_type === 'video/mp4');
+        const files = (video.video_files || []).filter(f => f.file_type === 'video/mp4' && f.link);
         for (const file of files) {
           const score = scorePexelsMatch(video, file, subject, usedClips);
           scored.push({ video, file, score });
         }
       }
-      // Sort high to low, log all
+      // Sort high to low, log top
       scored.sort((a, b) => b.score - a.score);
       scored.slice(0, 7).forEach((s, i) =>
         console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`)
       );
 
-      // === Key improvement: Always pick the best available, even if score is low ===
       let best = scored.find(s => s.score > 5) || scored[0];
-      if (!best && scored.length > 0) best = scored[0];
       if (best) {
-        console.log(`[10B][PEXELS][${jobId}][PICKED] Selected: ${best.file.link} | score=${best.score}`);
+        console.log(`[10B][PEXELS][${jobId}][PICKED] Video: ${best.file.link} | score=${best.score}`);
         const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
-        const resultPath = await downloadPexelsVideoToLocal(best.file.link, outPath, jobId);
+        const resultPath = await downloadStreamToLocal(best.file.link, outPath, jobId, 'Video');
         if (resultPath) return resultPath;
-        // If download fails, try next best
+        console.warn(`[10B][PEXELS][${jobId}] Download failed for best video; trying next best...`);
+        // Try next best if available
+        for (const cand of scored.slice(1)) {
+          const altOut = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
+          const altRes = await downloadStreamToLocal(cand.file.link, altOut, jobId, 'Video');
+          if (altRes) return altRes;
+        }
       } else {
-        console.warn(`[10B][PEXELS][${jobId}] No Pexels videos matched subject, but candidates were returned.`);
+        console.warn(`[10B][PEXELS][${jobId}] No suitable Pexels video candidates scored.`);
       }
     } else {
-      console.log(`[10B][PEXELS][${jobId}] No Pexels video results found for "${subject}"`);
+      console.log(`[10B][PEXELS][${jobId}] No Pexels video results for "${subject}"`);
     }
     return null;
   } catch (err) {
@@ -224,4 +258,94 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
   }
 }
 
-module.exports = { findPexelsClipForScene };
+/**
+ * Finds and downloads the best Pexels PHOTO for a given subject/scene.
+ * Returns a local image path (.jpg/.jpeg/.png) or null.
+ * NOTE: Photos are fallback; 5D should score/choose video first.
+ */
+async function findPexelsPhotoForScene(subject, workDir, sceneIdx, jobId, usedClips = []) {
+  console.log(`[10B][PEXELS][${jobId}] findPexelsPhotoForScene | subject="${subject}" | sceneIdx=${sceneIdx} | usedClips=${JSON.stringify(usedClips)}`);
+
+  if (!PEXELS_API_KEY) {
+    console.error('[10B][PEXELS][ERR] No Pexels API key set!');
+    return null;
+  }
+  try {
+    const query = encodeURIComponent(cleanQuery(subject));
+    const url = `https://api.pexels.com/v1/search?query=${query}&per_page=20&orientation=portrait`;
+    console.log(`[10B][PEXELS][${jobId}] Searching photos: ${url}`);
+    const resp = await axios.get(url, { headers: { Authorization: PEXELS_API_KEY } });
+
+    const photos = Array.isArray(resp?.data?.photos) ? resp.data.photos : [];
+    if (photos.length === 0) {
+      console.log(`[10B][PEXELS][${jobId}] No Pexels photo results for "${subject}"`);
+      return null;
+    }
+
+    // Score photos locally to pick the best single candidate
+    const scored = photos.map(p => ({
+      photo: p,
+      score: scorePexelsPhotoMatch(p, subject, usedClips),
+    })).sort((a, b) => b.score - a.score);
+
+    scored.slice(0, 7).forEach((s, i) => {
+      const src = s.photo?.src?.large2x || s.photo?.src?.large || s.photo?.src?.portrait || s.photo?.src?.original || s.photo?.src?.medium || 'n/a';
+      console.log(`[10B][PEXELS][${jobId}][PHOTO][CANDIDATE][${i + 1}] ${src} | score=${s.score} | size=${s.photo?.width}x${s.photo?.height}`);
+    });
+
+    const best = scored[0];
+    if (!best || !best.photo) {
+      console.warn(`[10B][PEXELS][${jobId}] No suitable Pexels photo candidates scored.`);
+      return null;
+    }
+
+    const src =
+      best.photo?.src?.large2x ||
+      best.photo?.src?.large ||
+      best.photo?.src?.portrait ||
+      best.photo?.src?.original ||
+      best.photo?.src?.medium;
+
+    if (!src) {
+      console.warn(`[10B][PEXELS][${jobId}] Best photo missing src URL.`);
+      return null;
+    }
+
+    const extGuess = (src.split('?')[0].split('.').pop() || 'jpg').toLowerCase();
+    const safeExt = ['jpg','jpeg','png','webp'].includes(extGuess) ? extGuess : 'jpg';
+    const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-photo-${uuidv4()}.${safeExt}`);
+
+    const saved = await downloadStreamToLocal(src, outPath, jobId, 'Photo');
+    if (saved) return saved;
+
+    // Try the next best if download failed
+    for (const cand of scored.slice(1)) {
+      const altSrc =
+        cand.photo?.src?.large2x ||
+        cand.photo?.src?.large ||
+        cand.photo?.src?.portrait ||
+        cand.photo?.src?.original ||
+        cand.photo?.src?.medium;
+      if (!altSrc) continue;
+      const altExtGuess = (altSrc.split('?')[0].split('.').pop() || 'jpg').toLowerCase();
+      const altSafeExt = ['jpg','jpeg','png','webp'].includes(altExtGuess) ? altExtGuess : 'jpg';
+      const altOut = path.join(workDir, `scene${sceneIdx + 1}-pexels-photo-${uuidv4()}.${altSafeExt}`);
+      const altSaved = await downloadStreamToLocal(altSrc, altOut, jobId, 'Photo');
+      if (altSaved) return altSaved;
+    }
+
+    return null;
+  } catch (err) {
+    if (err.response?.data) {
+      console.error('[10B][PEXELS][ERR]', JSON.stringify(err.response.data));
+    } else {
+      console.error('[10B][PEXELS][ERR]', err);
+    }
+    return null;
+  }
+}
+
+module.exports = {
+  findPexelsClipForScene,
+  findPexelsPhotoForScene,
+};
