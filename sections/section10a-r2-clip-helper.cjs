@@ -4,9 +4,12 @@
 // MAX LOGGING, parallel-safe, strict/fuzzy/partial scoring,
 // underscore/dash aware, and hard anti-dupe that MUTATES usedClips.
 //
-// 2025-08: Surgical update — pre-download subject gate + min-score
-// filter to stop off-topic picks (e.g., dolphins/jellyfish when
-// subject is "manatee"). Controlled via env:
+// 2025-08 (surgical):
+// - Subject gate now detects canonical topic inside long sentences
+//   (e.g., "Manatees are..." -> adds "manatee" + synonyms).
+// - Exclude our own rendered assets by filename (hookmux/final-with-outro/etc).
+// - Everything else unchanged.
+// Env knobs:
 //   SS_R2_MIN_SCORE (default: 0)
 //   SS_R2_REQUIRE_SUBJECT (default: true)
 // ===========================================================
@@ -51,12 +54,16 @@ const s3Client = new S3Client({
 // ---- CONSTANTS --------------------------------------------------------------
 const VIDEO_EXTS = ['.mp4', '.mov', '.m4v', '.webm'];
 const EXCLUDE_FRAGMENTS = [
+  // path-based blocks (unchanged)
   '/final/', '/hook/', '/mega/', '/jobs/', '/outro/', '/watermark/', '/temp/', '/thumbnails/', '/videos/'
 ];
 
+// filename-based blocks (new: exclude our own renders wherever they live)
+const NAME_EXCLUDE_RE = /(hookmux|final-with-outro|socialstorm-final|with-outro|watermark)/i;
+
 // Canonical synonyms (extend as needed)
 const CANONICAL_SYNONYMS = {
-  manatee: ['manatees', 'sea cow', 'sea cows', 'west indian manatee', 'florida manatee', 'trichechus']
+  manatee: ['manatees', 'sea cow', 'sea cows', 'west indian manatee', 'florida manatee', 'trichechus', 'trichechus manatus']
 };
 
 // Subject gating env controls
@@ -115,7 +122,9 @@ function hasVideoExt(key = '') {
 
 function keyLooksExcluded(key = '') {
   const lk = key.toLowerCase();
-  return EXCLUDE_FRAGMENTS.some(f => lk.includes(f));
+  if (EXCLUDE_FRAGMENTS.some(f => lk.includes(f))) return true;
+  const base = path.basename(lk);
+  return NAME_EXCLUDE_RE.test(base); // NEW: block by name (e.g., hookmux)
 }
 
 function dupeKeyFor(key = '') {
@@ -124,14 +133,34 @@ function dupeKeyFor(key = '') {
   return `${norm}|${stem}`;
 }
 
+// --- canonical-aware subject expansion (surgical) ---
 function expandSubject(subject = '') {
   const primary = normalizeToken(subject);
-  const set = new Set([primary]);
-  const syns = CANONICAL_SYNONYMS[primary];
-  if (syns) syns.forEach(v => set.add(normalizeToken(v)));
-  if (primary.endsWith('s')) set.add(primary.slice(0, -1));
-  else set.add(`${primary}s`);
-  return Array.from(set).filter(Boolean);
+  const set = new Set();
+
+  // If any canonical root or its synonyms appear inside the subject sentence,
+  // add the root + its synonyms explicitly (ensures "manatee" is present).
+  for (const [root, syns] of Object.entries(CANONICAL_SYNONYMS)) {
+    const rootHit = primary.includes(root);
+    const synHit = syns.some(s => primary.includes(normalizeToken(s)));
+    if (rootHit || synHit) {
+      set.add(root);
+      syns.forEach(v => set.add(normalizeToken(v)));
+    }
+  }
+
+  // Also add simple plural/singular for a detected root
+  for (const v of Array.from(set)) {
+    if (v.endsWith('s')) set.add(v.slice(0, -1));
+    else set.add(`${v}s`);
+  }
+
+  // Minimal majors from the sentence (kept small)
+  for (const w of majorWords(subject)) set.add(w);
+
+  const result = Array.from(set).filter(Boolean);
+  log('SUBJECT', 'EXPAND', `Expansions for "${subject}"`, { expansions: result });
+  return result;
 }
 
 // ---- MATCH HELPERS ----------------------------------------------------------
@@ -333,12 +362,12 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
     return null;
   }
 
-  // Sort all first and show visibility Top-5
+  // Sort/show visibility Top-5
   scored.sort((a, b) => b.score - a.score);
   const top5 = scored.slice(0, 5).map((s, i) => ({ rank: i + 1, key: s.key, score: s.score }));
   log('SCORE', 'TOP5', 'Top candidates', top5);
 
-  // 3b) **Surgical subject/min-score filter before downloading**
+  // 3b) Subject/min-score gate (pre-download)
   let filtered = scored.filter(s => typeof s.score === 'number' && s.score >= R2_MIN_SCORE);
   if (R2_REQUIRE_SUBJECT && expansions.length) {
     const pre = filtered.length;
