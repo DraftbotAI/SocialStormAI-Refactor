@@ -3,6 +3,12 @@
 // Exports: findR2ClipForScene (used by 5D) + getAllFiles (for scans)
 // MAX LOGGING, parallel-safe, strict/fuzzy/partial scoring,
 // underscore/dash aware, and hard anti-dupe that MUTATES usedClips.
+//
+// 2025-08: Surgical update — pre-download subject gate + min-score
+// filter to stop off-topic picks (e.g., dolphins/jellyfish when
+// subject is "manatee"). Controlled via env:
+//   SS_R2_MIN_SCORE (default: 0)
+//   SS_R2_REQUIRE_SUBJECT (default: true)
 // ===========================================================
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
@@ -52,6 +58,12 @@ const EXCLUDE_FRAGMENTS = [
 const CANONICAL_SYNONYMS = {
   manatee: ['manatees', 'sea cow', 'sea cows', 'west indian manatee', 'florida manatee', 'trichechus']
 };
+
+// Subject gating env controls
+const R2_MIN_SCORE = Number.isFinite(parseInt(process.env.SS_R2_MIN_SCORE, 10))
+  ? parseInt(process.env.SS_R2_MIN_SCORE, 10)
+  : 0;
+const R2_REQUIRE_SUBJECT = (process.env.SS_R2_REQUIRE_SUBJECT || 'true').toLowerCase() !== 'false';
 
 // ---- UTILS ------------------------------------------------------------------
 function log(section, stage, msg, meta) {
@@ -179,6 +191,14 @@ function scoreR2Match(filename, subject, expansions = []) {
   score -= Math.min(40, fn.length);
 
   return score;
+}
+
+// Subject presence gate (pre-download)
+function subjectPresentInKey(key = '', expansions = []) {
+  if (!key || !expansions || !expansions.length) return false;
+  const fn = normalizeForMatch(key);
+  const toks = tokenizeStem(key);
+  return expansions.some(exp => toks.includes(exp) || fn.includes(exp));
 }
 
 // ---- LISTING ---------------------------------------------------------------
@@ -313,15 +333,31 @@ async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', us
     return null;
   }
 
+  // Sort all first and show visibility Top-5
   scored.sort((a, b) => b.score - a.score);
-
-  // Log Top-5 for visibility
   const top5 = scored.slice(0, 5).map((s, i) => ({ rank: i + 1, key: s.key, score: s.score }));
   log('SCORE', 'TOP5', 'Top candidates', top5);
 
-  const best = scored[0];
+  // 3b) **Surgical subject/min-score filter before downloading**
+  let filtered = scored.filter(s => typeof s.score === 'number' && s.score >= R2_MIN_SCORE);
+  if (R2_REQUIRE_SUBJECT && expansions.length) {
+    const pre = filtered.length;
+    filtered = filtered.filter(s => subjectPresentInKey(s.key, expansions));
+    if (!filtered.length) {
+      log('FILTER', 'SUBJECT_NONE', `No on-subject R2 keys after gate for "${subject}" (minScore=${R2_MIN_SCORE}, pre=${pre})`);
+    }
+  }
+
+  if (!filtered.length) {
+    log('FILTER', 'NONE', `No acceptable R2 candidates for "${subject}". Handing back to 5D.`);
+    return null; // let 5D try Pexels/Pixabay/KB
+  }
+
+  // Prefer highest score among filtered
+  filtered.sort((a, b) => b.score - a.score);
+  const best = filtered[0];
   if (!best || !best.key) {
-    log('SCORE', 'ERR', 'No best candidate after sort');
+    log('SCORE', 'ERR', 'No best candidate after subject/min-score filter');
     return null;
   }
 
