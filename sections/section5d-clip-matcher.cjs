@@ -3,6 +3,7 @@
 // R2-FIRST short-circuit: if R2 returns a clip, we take it immediately.
 // Always returns something: R2 video, provider video, or Ken Burns (Pexels/Pixabay photos).
 // Max logging at each step. No infinite loops.
+// Policy: Ken Burns never on scene 1, max 2 per job.
 // ===========================================================
 
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
@@ -71,7 +72,9 @@ function getMajorWords(subject) {
 }
 
 // ---- Primary-subject + subject-present helpers (minimal, local) ----
-function escapeRegex(s='') { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function escapeRegex(s = '') {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 function wordBoundaryIncludes(hay = '', needle = '') {
   const s = (needle || '').trim();
   if (!s) return false;
@@ -102,6 +105,11 @@ function pickPrimarySubject({ jobContext = {}, megaSubject, mainTopic, subject, 
   return candidates.find(v => v && !GENERIC_SUBJECTS.includes(normalizeGeneric(v))) || candidates[0] || '';
 }
 
+function getMaxKbPerJob() {
+  const n = parseInt(process.env.SS_MAX_KB_PER_JOB || '2', 10);
+  return isNaN(n) ? 2 : Math.max(0, n);
+}
+
 // ---------- Main ----------
 async function findClipForScene({
   subject,
@@ -122,6 +130,10 @@ async function findClipForScene({
   if (primarySubject) {
     console.log(`[5D][PRIMARY][${jobId}] Primary subject = "${primarySubject}"`);
   }
+
+  // Ken Burns policy controls
+  if (typeof jobContext.kbUsedCount !== 'number') jobContext.kbUsedCount = 0;
+  const maxKb = getMaxKbPerJob();
 
   // 1) Decide the search subject (anchor for hook/mega)
   let searchSubject = subject;
@@ -216,7 +228,7 @@ async function findClipForScene({
         if (isUsed(usedClips, pxPath, pxMeta)) {
           console.log(`[5D][PEXELS][${jobId}] Used before: ${path.basename(pxPath)}`);
         } else {
-          // SUBJECT GATE
+          // SUBJECT GATE (videos only)
           if (primarySubject && !subjectPresentInMeta(pxPath, pxMeta, primarySubject)) {
             console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pexels off-subject (need "${primarySubject}") -> ${pxPath}`);
           } else {
@@ -243,7 +255,7 @@ async function findClipForScene({
         if (isUsed(usedClips, pbPath, pbMeta)) {
           console.log(`[5D][PIXABAY][${jobId}] Used before: ${path.basename(pbPath)}`);
         } else {
-          // SUBJECT GATE
+          // SUBJECT GATE (videos only)
           if (primarySubject && !subjectPresentInMeta(pbPath, pbMeta, primarySubject)) {
             console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pixabay off-subject (need "${primarySubject}") -> ${pbPath}`);
           } else {
@@ -276,20 +288,23 @@ async function findClipForScene({
       return winner.path;
     }
 
-    // ---- 4c. Photo → Ken Burns (Pexels/Pixabay via helper)
-    try {
-      const kb = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
-      if (kb && !isUsed(usedClips, kb) && assertFileExists(kb, 'KENBURNS_RESULT')) {
-        // SUBJECT GATE for KB (best effort based on filename)
-        if (primarySubject && !subjectPresentInMeta(kb, {}, primarySubject)) {
-          console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject KenBurns off-subject (need "${primarySubject}") -> ${kb}`);
-        } else {
+    // ---- 4c. Photo → Ken Burns (respect policy)
+    const canUseKB = sceneIdx > 0 && jobContext.kbUsedCount < maxKb;
+    if (!canUseKB) {
+      if (sceneIdx === 0) console.warn(`[5D][KB][${jobId}] Skipping KB on scene 1 by policy.`);
+      if (jobContext.kbUsedCount >= maxKb) console.warn(`[5D][KB][${jobId}] KB cap reached (${jobContext.kbUsedCount}/${maxKb}).`);
+    } else {
+      try {
+        const kb = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
+        if (kb && !isUsed(usedClips, kb) && assertFileExists(kb, 'KENBURNS_RESULT')) {
+          // Allow KB even if filename/meta doesn't include subject tokens (queried by subject).
           console.log(`[5D][PICK][${jobId}] KenBurns (photo) for "${subjectOption}": ${kb}`);
+          jobContext.kbUsedCount++;
           markUsedInPlace(usedClips, { path: kb, filename: path.basename(kb) });
           return kb;
         }
-      }
-    } catch (e) { console.error(`[5D][KENBURNS][ERR][${jobId}]`, e); }
+      } catch (e) { console.error(`[5D][KENBURNS][ERR][${jobId}]`, e); }
+    }
   }
 
   // 4d) SUBJECT-ONLY FINAL SEARCH (before generic hail-mary)
@@ -306,18 +321,24 @@ async function findClipForScene({
       }
     } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][R2][${jobId}]`, e); }
 
-    // As a last resort, KenBurns subject-only (photo from Pexels/Pixabay)
-    try {
-      const kbSubj = await fallbackKenBurnsVideo(primarySubject, workDir, sceneIdx, jobId, usedClips);
-      if (kbSubj && assertFileExists(kbSubj, 'KENBURNS_SUBJECT_ONLY')) {
-        markUsedInPlace(usedClips, { path: kbSubj, filename: path.basename(kbSubj) });
-        console.log(`[5D][SUBJECT-FALLBACK][${jobId}] KenBurns subject-only: ${kbSubj}`);
-        return kbSubj;
-      }
-    } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][KENBURNS][${jobId}]`, e); }
+    // KenBurns subject-only (respect policy)
+    const canUseKB = sceneIdx > 0 && jobContext.kbUsedCount < maxKb;
+    if (canUseKB) {
+      try {
+        const kbSubj = await fallbackKenBurnsVideo(primarySubject, workDir, sceneIdx, jobId, usedClips);
+        if (kbSubj && assertFileExists(kbSubj, 'KENBURNS_SUBJECT_ONLY')) {
+          jobContext.kbUsedCount++;
+          markUsedInPlace(usedClips, { path: kbSubj, filename: path.basename(kbSubj) });
+          console.log(`[5D][SUBJECT-FALLBACK][${jobId}] KenBurns subject-only: ${kbSubj} (${jobContext.kbUsedCount}/${maxKb})`);
+          return kbSubj;
+        }
+      } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][KENBURNS][${jobId}]`, e); }
+    } else {
+      console.warn(`[5D][SUBJECT-FALLBACK][${jobId}] KB fallback disallowed (sceneIdx=${sceneIdx}, used=${jobContext.kbUsedCount}/${maxKb}).`);
+    }
   }
 
-  // 5) Final hail-mary: try R2 with main topic OR generic KB
+  // 5) Final hail-mary: try R2 with main topic OR generic KB (respect policy)
   try {
     const hm = mainTopic || subject || 'landmark';
     console.warn(`[5D][FINALFALLBACK][${jobId}] Hail-mary R2 with "${hm}"`);
@@ -329,14 +350,20 @@ async function findClipForScene({
     }
   } catch (e) { console.error(`[5D][FINALFALLBACK][R2][${jobId}]`, e); }
 
-  try {
-    const kb = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
-    if (kb && assertFileExists(kb, 'KENBURNS_RESULT')) {
-      console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic: ${kb}`);
-      markUsedInPlace(usedClips, { path: kb, filename: path.basename(kb) });
-      return kb;
-    }
-  } catch (e) { console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}]`, e); }
+  const canUseKBFinal = sceneIdx > 0 && jobContext.kbUsedCount < maxKb;
+  if (canUseKBFinal) {
+    try {
+      const kb = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
+      if (kb && assertFileExists(kb, 'KENBURNS_RESULT')) {
+        jobContext.kbUsedCount++;
+        console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic: ${kb} (${jobContext.kbUsedCount}/${maxKb})`);
+        markUsedInPlace(usedClips, { path: kb, filename: path.basename(kb) });
+        return kb;
+      }
+    } catch (e) { console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}]`, e); }
+  } else {
+    console.warn(`[5D][FINALFALLBACK][${jobId}] KB final fallback disallowed (sceneIdx=${sceneIdx}, used=${jobContext.kbUsedCount}/${maxKb}).`);
+  }
 
   console.error(`[5D][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1}`);
   return null;
