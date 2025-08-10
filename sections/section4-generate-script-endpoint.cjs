@@ -4,6 +4,7 @@
    - Exports registerGenerateScriptEndpoint(app, openai)
    - MAX logging everywhere
    - 2024-08: ALWAYS starts script with viral, topic-rich hook
+   - 2025-08: Enforce story-style ENDING line; allow 1 tasteful joke
    - Robust OpenAI prompt, post-validation, error-proofed
    =========================================================== */
 
@@ -45,7 +46,7 @@ function registerGenerateScriptEndpoint(app, openai) {
     console.log(`[SECTION4][INPUT] idea = "${idea}"`);
 
     try {
-      // === VIRAL, TOPIC-RICH HOOK PROMPT (REVISED) ===
+      // === VIRAL, FUNNY-DRAMATIC-INFO HOOK PROMPT (REVISED) ===
       const prompt = `
 You are a viral YouTube Shorts scriptwriter.
 
@@ -58,12 +59,12 @@ Write an ultra-engaging, narratable script for the topic: "${idea}"
 - Make every fact feel like a "secret" or powerful insight.
 - Use 6–10 total lines (including the hook).
 - No animal metaphors, off-topic jokes, or padding.
-- End with a strong, mysterious, or memorable closing line.
+- The LAST line MUST be a proper ending that wraps the story or delivers a takeaway/callback. It cannot be a question or a teaser.
 
 == STYLE ==
-- Conversational, vivid, friendly, clever.
-- Each line advances the story, keeps the viewer hooked.
-- Humor only if natural—never forced.
+- Viral, funny (when appropriate), dramatic, and informational.
+- Include at most ONE light, tasteful joke if it naturally fits; otherwise skip jokes.
+- Conversational, vivid, friendly, clever. Each line advances the story and keeps the viewer hooked.
 
 == METADATA ==
 At the end, return:
@@ -133,7 +134,6 @@ Now write a script for: "${idea}"
       // === FORCED HOOK LOGIC: Ensure first line is topic-rich and hooky ===
       if (scriptLines.length > 0) {
         const firstLine = scriptLines[0];
-        // Extract all "big" (4+ letter) words from idea, and use all long subphrases as candidates
         const ideaKeywords = idea
           .toLowerCase()
           .replace(/[^a-z0-9\s]/gi, ' ')
@@ -141,19 +141,15 @@ Now write a script for: "${idea}"
           .filter(w => w.length > 3);
         const firstLineLc = firstLine.toLowerCase();
 
-        // Consider the *entire* idea string as a possible subject too (for multi-word)
         let subjectMentioned = false;
         if (ideaKeywords.length) {
           subjectMentioned = ideaKeywords.some(word => firstLineLc.includes(word));
         }
-        // Also check if the whole "idea" as a phrase (normalized) appears
         if (!subjectMentioned && idea.length > 5) {
           const ideaNorm = idea.toLowerCase().replace(/[^\w\s]/g, '').trim();
           if (ideaNorm && firstLineLc.includes(ideaNorm)) subjectMentioned = true;
         }
-        // If not found, force replace
         if (!subjectMentioned || firstLine.length < 8) {
-          // Generate a viral, topic-rich hook using the *entire* idea
           let viralHook;
           if (ideaKeywords.length > 0) {
             viralHook = `Here are the secrets about ${idea.replace(/^the\s+/i, '').trim()} you never learned in school.`;
@@ -167,6 +163,35 @@ Now write a script for: "${idea}"
 
       // Cap at 10 lines (including hook)
       if (scriptLines.length > 10) scriptLines = scriptLines.slice(0, 10);
+
+      // === ENDING ENFORCER: last line must be a story-style wrap (no question) ===
+      const looksLikeEnding = (line) => {
+        if (!line) return false;
+        const l = line.trim();
+        if (l.length < 8) return false;
+        if (/\?$/.test(l)) return false; // no questions for the closer
+        const mustEnd = /[.!]$/.test(l);
+        const cues = [
+          "that's the story",
+          "now you know",
+          "bottom line",
+          "the takeaway",
+          "here's the kicker",
+          "in the end",
+          "long story short",
+          "and that's why",
+          "remember this"
+        ];
+        const hasCue = cues.some(c => l.toLowerCase().includes(c));
+        return mustEnd || hasCue;
+      };
+
+      if (scriptLines.length > 0 && !looksLikeEnding(scriptLines[scriptLines.length - 1])) {
+        const cleanIdea = idea.replace(/^the\s+/i, '').trim();
+        const fallbackEnd = `That's the story behind ${cleanIdea}. Now you know why it matters.`;
+        console.warn('[SECTION4][ENDING][ENFORCE] Appending proper ending line:', fallbackEnd);
+        scriptLines.push(fallbackEnd);
+      }
 
       // Extract meta
       for (const l of lines.slice(metaStart)) {
