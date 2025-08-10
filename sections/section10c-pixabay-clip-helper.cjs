@@ -7,6 +7,8 @@
 // NOTE: Photos are fallback-tier; videos remain priority (scored higher in 5D/10G).
 // ===========================================================
 
+'use strict';
+
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -19,6 +21,9 @@ const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
 if (!PIXABAY_API_KEY) {
   console.error('[10C][FATAL] Missing PIXABAY_API_KEY in environment!');
 }
+
+// New: env floor to force photo/other source fallback when videos are weak
+const PIXABAY_MIN_SCORE = Number(process.env.SS_PIXABAY_MIN_SCORE || 28);
 
 // --- Utility: Query normalization & keyword helpers ---
 function cleanQuery(str) {
@@ -65,6 +70,29 @@ function partialMatchPixabay(filename, subject) {
   const fn = normalizeForMatch(filename);
   const words = majorWords(subject);
   return words.some(word => fn.includes(word));
+}
+
+// --- Species gate (minimal, subject-aware) ---
+function getSpeciesGate(subject) {
+  const s = String(subject || '').toLowerCase();
+  if (s.includes('manatee') || s.includes('sea cow')) {
+    return {
+      include: ['manatee','sea cow','west indian manatee','trichechus'],
+      exclude: [
+        'gorilla','monkey','primate','dolphin','porpoise','whale','orca','shark',
+        'octopus','squid','ray','stingray','seal','sea lion','owl','bird','cat','kitten','dog','puppy'
+      ],
+    };
+  }
+  return null;
+}
+function gatePenalty(fields, subject) {
+  const gate = getSpeciesGate(subject);
+  if (!gate) return 0;
+  const low = fields.toLowerCase();
+  if (gate.exclude.some(tok => low.includes(tok))) return -1000;
+  if (!gate.include.some(tok => low.includes(tok))) return -250;
+  return 0;
 }
 
 // --- File validation (works for video or image streams) ---
@@ -242,6 +270,16 @@ function scorePixabayMatch(hit, vid, subject, usedClips = []) {
 
   // Bonus: shorter filename, newer id, better match
   score -= filename.length;
+
+  // Species gate penalty/blocks
+  score += gatePenalty(
+    [
+      ...(hit.tags ? hit.tags.split(',').map(t => t.trim()) : []),
+      hit.user || '', hit.pageURL || '', vid.url || ''
+    ].join(' '),
+    subject
+  );
+
   return score;
 }
 
@@ -272,6 +310,9 @@ function scorePixabayPhotoMatch(hit, subject, usedClips = []) {
   // De-dupe if remote src already used
   const src = hit.largeImageURL || hit.webformatURL || hit.previewURL || '';
   if (usedClips && usedClips.some(u => src && (u.includes(src) || src.includes(u)))) score -= 100;
+
+  // Species gate penalty/blocks
+  score += gatePenalty(fields, subject);
 
   return score;
 }
@@ -314,23 +355,32 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId, usedCl
         console.log(`[10C][PIXABAY][${jobId}][CANDIDATE][${i + 1}] ${s.vid.url} | score=${s.score} | size=${s.vid.width}x${s.vid.height}`)
       );
 
-      // Always pick the best available candidate, even if not a strong match
-      let best = scored.find(s => s.score > 15) || scored[0];
-      if (!best && scored.length > 0) best = scored[0];
-      if (best) {
-        console.log(`[10C][PIXABAY][${jobId}][PICKED] Selected: ${best.vid.url} | score=${best.score}`);
-        const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
-        const resultPath = await downloadPixabayVideoToLocal(best.vid.url, outPath, jobId);
-        if (resultPath) return resultPath;
+      let best = scored[0];
+      if (!best) {
+        console.warn(`[10C][PIXABAY][${jobId}] No suitable Pixabay video candidates scored.`);
+        return null;
+      }
 
-        // If download fails, try remaining candidates
-        for (const cand of scored.slice(1)) {
-          const altPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
-          const altRes = await downloadPixabayVideoToLocal(cand.vid.url, altPath, jobId);
-          if (altRes) return altRes;
+      // Enforce floor to allow fallback to photos/other sources
+      if (typeof best.score === 'number' && best.score < PIXABAY_MIN_SCORE) {
+        console.warn(`[10C][PIXABAY][${jobId}][FLOOR] Best video score ${best.score} < floor ${PIXABAY_MIN_SCORE}. Returning null to trigger photo/other source.`);
+        return null;
+      }
+
+      console.log(`[10C][PIXABAY][${jobId}][PICKED] Selected: ${best.vid.url} | score=${best.score}`);
+      const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
+      const resultPath = await downloadPixabayVideoToLocal(best.vid.url, outPath, jobId);
+      if (resultPath) return resultPath;
+
+      // If download fails, try remaining candidates (respect floor)
+      for (const cand of scored.slice(1)) {
+        if (cand.score < PIXABAY_MIN_SCORE) {
+          console.warn(`[10C][PIXABAY][${jobId}][FLOOR] Skipping candidate below floor: ${cand.score}`);
+          continue;
         }
-      } else {
-        console.warn(`[10C][PIXABAY][${jobId}] No Pixabay videos matched subject, but candidates were returned.`);
+        const altPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
+        const altRes = await downloadPixabayVideoToLocal(cand.vid.url, altPath, jobId);
+        if (altRes) return altRes;
       }
     } else {
       console.log(`[10C][PIXABAY][${jobId}] No Pixabay video results found for "${subject}"`);

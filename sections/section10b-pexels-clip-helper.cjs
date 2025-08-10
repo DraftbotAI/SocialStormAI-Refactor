@@ -22,6 +22,9 @@ if (!PEXELS_API_KEY) {
   console.error('[10B][FATAL] Missing PEXELS_API_KEY in environment!');
 }
 
+// New: env floor to force photo/other source fallback when videos are weak
+const PEXELS_MIN_SCORE = Number(process.env.SS_PEXELS_MIN_SCORE || 28);
+
 // --- Normalization helpers ---
 function cleanQuery(str) {
   if (!str) return '';
@@ -62,6 +65,29 @@ function strictSubjectPresent(text, subject) {
   const subjectWords = getKeywords(subject);
   if (!subjectWords.length) return false;
   return subjectWords.every(w => text.includes(w));
+}
+
+// --- Species gate (minimal, subject-aware) ---
+function getSpeciesGate(subject) {
+  const s = String(subject || '').toLowerCase();
+  if (s.includes('manatee') || s.includes('sea cow')) {
+    return {
+      include: ['manatee','sea cow','west indian manatee','trichechus'],
+      exclude: [
+        'gorilla','monkey','primate','dolphin','porpoise','whale','orca','shark',
+        'octopus','squid','ray','stingray','seal','sea lion','owl','bird','cat','kitten','dog','puppy'
+      ],
+    };
+  }
+  return null; // no special gate
+}
+function gatePenalty(fields, subject) {
+  const gate = getSpeciesGate(subject);
+  if (!gate) return 0;
+  const low = fields.toLowerCase();
+  if (gate.exclude.some(tok => low.includes(tok))) return -1000;
+  if (!gate.include.some(tok => low.includes(tok))) return -250;
+  return 0;
 }
 
 // --- File validation ---
@@ -210,6 +236,9 @@ function scorePexelsMatch(video, file, subject, usedClips = []) {
   // Slight bonus for newer Pexels IDs
   if (video.id && Number(video.id) > 1000000) score += 2;
 
+  // New: species gate penalty/blocks
+  score += gatePenalty(fields, subject);
+
   return score;
 }
 
@@ -243,6 +272,9 @@ function scorePexelsPhotoMatch(photo, subject, usedClips = []) {
   const src = photo?.src?.large2x || photo?.src?.large || photo?.src?.portrait || photo?.src?.original || photo?.src?.medium || '';
   if (usedClips && usedClips.some(u => src && (u.includes(src) || src.includes(u)))) score -= 100;
 
+  // New: species gate penalty/blocks
+  score += gatePenalty(fields, subject);
+
   return score;
 }
 
@@ -274,26 +306,40 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId, usedCli
       }
       // Sort high to low, log top
       scored.sort((a, b) => b.score - a.score);
-      scored.slice(0, 7).forEach((s, i) =>
-        console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`)
-      );
+      scored.slice(0, 7).forEach((s, i) => {
+        console.log(`[10B][PEXELS][${jobId}][CANDIDATE][${i + 1}] ${s.file.link} | score=${s.score} | duration=${s.video.duration}s | size=${s.file.width}x${s.file.height}`);
+      });
 
-      let best = scored.find(s => s.score > 5) || scored[0];
-      if (best) {
-        console.log(`[10B][PEXELS][${jobId}][PICKED] Video: ${best.file.link} | score=${best.score}`);
-        const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
-        const resultPath = await downloadStreamToLocal(best.file.link, outPath, jobId, 'Video');
-        if (resultPath) return resultPath;
-        console.warn(`[10B][PEXELS][${jobId}] Download failed for best video; trying next best...`);
-        // Try next best if available
-        for (const cand of scored.slice(1)) {
-          const altOut = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
-          const altRes = await downloadStreamToLocal(cand.file.link, altOut, jobId, 'Video');
-          if (altRes) return altRes;
-        }
-      } else {
+      let best = scored[0];
+      if (!best) {
         console.warn(`[10B][PEXELS][${jobId}] No suitable Pexels video candidates scored.`);
+        return null;
       }
+
+      // New: enforce floor to allow fallback to photos/other sources
+      if (typeof best.score === 'number' && best.score < PEXELS_MIN_SCORE) {
+        console.warn(`[10B][PEXELS][${jobId}][FLOOR] Best video score ${best.score} < floor ${PEXELS_MIN_SCORE}. Returning null to trigger photo/other source.`);
+        return null;
+      }
+
+      console.log(`[10B][PEXELS][${jobId}][PICKED] Video: ${best.file.link} | score=${best.score}`);
+      const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
+      const resultPath = await downloadStreamToLocal(best.file.link, outPath, jobId, 'Video');
+      if (resultPath) return resultPath;
+
+      console.warn(`[10B][PEXELS][${jobId}] Download failed for best video; trying next best...`);
+      // Try next best if available (and still above floor)
+      for (const cand of scored.slice(1)) {
+        if (cand.score < PEXELS_MIN_SCORE) {
+          console.warn(`[10B][PEXELS][${jobId}][FLOOR] Skipping candidate below floor: ${cand.score}`);
+          continue;
+        }
+        const altOut = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
+        const altRes = await downloadStreamToLocal(cand.file.link, altOut, jobId, 'Video');
+        if (altRes) return altRes;
+      }
+
+      return null;
     } else {
       console.log(`[10B][PEXELS][${jobId}] No Pexels video results for "${subject}"`);
     }
