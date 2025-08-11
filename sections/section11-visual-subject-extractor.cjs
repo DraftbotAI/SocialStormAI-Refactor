@@ -217,7 +217,7 @@ function buildFromStopwords(line, mainTopic) {
 function buildPrompt(line, mainTopic) {
   const topic = canonicalizeTopic(mainTopic);
   const disallow = STRICT_SPECIES ? `NEVER substitute related species/objects (banned examples: ${topic.bannedNear.join(', ') || 'n/a'}).` : '';
-  const mustContain = STRICT_SPECIES
+    const mustContain = STRICT_SPECIES
     ? `Every item must explicitly mention ${topic.aliases.join(' or ')}.`
     : `Prefer items that explicitly mention ${topic.aliases.join(' or ')}.`;
   
@@ -240,12 +240,12 @@ function buildPrompt(line, mainTopic) {
   const examples = [
     `Line: "They’re gentle giants that graze all day."`,
     `Main Topic: manatee`,
-    `Answer:`,
-    `1) manatee eating seagrass in shallow water`,
-    `2) mother manatee with calf swimming slowly`,
-    `3) close-up of a manatee face and whiskers`,
-    `4) group of manatees resting near a spring`,
-  ].join('\n');
+      `Answer:`,
+      `1) manatee eating seagrass in shallow water`,
+      `2) mother manatee with calf swimming slowly`,
+      `3) close-up of a manatee face and whiskers`,
+      `4) group of manatees resting near a spring`,
+    ].join('\n');
   const user = [
     `Line: "${line}"`,
     `Main Topic: ${topic.canonical}`,

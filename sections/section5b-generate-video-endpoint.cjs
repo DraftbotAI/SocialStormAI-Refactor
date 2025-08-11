@@ -447,7 +447,7 @@ function registerGenerateVideoEndpoint(app, deps) {
 
           // Find best clip (R2-first; 5D handles de-dupe via jobContext.usedClipKeys)
           const clipPath = await findClipForScene({
-            subject: sceneSubject?.full_query || sceneSubject || mainTopic, sceneIdx, allSceneTexts, mainTopic,
+            subject: sceneSubject?.full_query || mainTopic, sceneIdx, allSceneTexts, mainTopic,
             isMegaScene: false, workDir, jobId, jobContext, categoryFolder
           });
 

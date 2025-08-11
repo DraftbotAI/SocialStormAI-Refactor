@@ -20,7 +20,7 @@
 'use strict';
 
 const { S3Client, GetObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
-const fs = require('fs');
+const fs = require('node:fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
@@ -36,6 +36,7 @@ const R2_KEY = process.env.R2_KEY || process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET = process.env.R2_SECRET || process.env.R2_SECRET_ACCESS_KEY;
 
 if (!R2_BUCKET || !R2_ENDPOINT || !R2_KEY || !R2_SECRET) {
+  // Consider logging to a file or external service in addition to console.error
   console.error('[10A][FATAL] Missing R2 env vars: R2_BUCKET|R2_LIBRARY_BUCKET, R2_ENDPOINT, R2_KEY, R2_SECRET');
   throw new Error('[10A] Missing R2 env vars');
 }
@@ -59,7 +60,7 @@ const s3Client = new S3Client({
 // ---- CONSTANTS --------------------------------------------------------------
 const VIDEO_EXTS = ['.mp4', '.mov', '.m4v', '.webm'];
 const EXCLUDE_FRAGMENTS = [
-  // path-based blocks
+  // Path-based blocks (lowercase)
   '/final/', '/hook/', '/mega/', '/jobs/', '/outro/', '/watermark/', '/temp/', '/thumbnails/', '/videos/'
 ];
 
@@ -74,7 +75,7 @@ const CANONICAL_SYNONYMS = {
 // Subject gating env controls
 const R2_MIN_SCORE = Number.isFinite(parseInt(process.env.SS_R2_MIN_SCORE, 10))
   ? parseInt(process.env.SS_R2_MIN_SCORE, 10)
-  : 0;
+  : 0; // Consider increasing the default if irrelevant clips are being selected
 const R2_REQUIRE_SUBJECT = (process.env.SS_R2_REQUIRE_SUBJECT || 'true').toLowerCase() !== 'false';
 
 // ---- UTILS ------------------------------------------------------------------

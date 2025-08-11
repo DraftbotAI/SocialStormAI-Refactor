@@ -166,7 +166,7 @@ async function callProvider(fn, primarySubject, mainTopic, sceneIdx, jobId, cate
   try {
     // Preferred: object signature
     return await fn({
-      subject: primarySubject, // ensure it's string
+      subject: String(primarySubject),
       mainTopic,
       sceneIdx,
       jobId,
@@ -231,7 +231,7 @@ async function findClipForScene(opts) {
   // 1) R2-FIRST: short-circuit
   // ===========================
   try {
-    const r2Res = await callProvider(findR2ClipForScene, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder);
+    const r2Res = await callProvider(findR2ClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder);
     const r2Clip = normalizeProviderResult(r2Res);
     if (r2Clip) {
       console.log(`[5D][R2][CANDIDATE][${jobId}] ${r2Clip}`);
@@ -262,7 +262,7 @@ async function findClipForScene(opts) {
   // ======================================================
   // PEXELS
   try {
-    const pxRes = await callProvider(findPexelsClipForScene, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder);
+    const pxRes = await callProvider(findPexelsClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder);
     const pxClip = normalizeProviderResult(pxRes);
     if (pxClip) {
       console.log(`[5D][PEXELS][CANDIDATE][${jobId}] ${pxClip}`);
@@ -288,7 +288,7 @@ async function findClipForScene(opts) {
 
   // PIXABAY
   try {
-    const pbRes = await callProvider(findPixabayClipForScene, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder);
+    const pbRes = await callProvider(findPixabayClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder);
     const pbClip = normalizeProviderResult(pbRes);
     if (pbClip) {
       console.log(`[5D][PIXABAY][CANDIDATE][${jobId}] ${pbClip}`);
@@ -318,7 +318,7 @@ async function findClipForScene(opts) {
   // ======================================================
   try {
     console.log(`[5D][KB][FALLBACK][${jobId}] Triggered Ken Burns fallback for subject="${primarySubject || mainTopic}" scene=${sceneIdx+1}`);
-    const kb = await fallbackKenBurnsVideo(primarySubject || mainTopic || 'scenic nature', workDir, sceneIdx, jobId);
+    const kb = await fallbackKenBurnsVideo(String(primarySubject || mainTopic || 'scenic nature'), workDir, sceneIdx, jobId);
     if (kb) {
       // Ken Burns creates a *new* file name each time; de-dupe is unlikely but still mark it.
       markUsed(jobContext, kb, 'KENBURNS');

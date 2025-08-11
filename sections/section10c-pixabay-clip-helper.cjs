@@ -331,7 +331,7 @@ async function findPixabayClipForScene(subject, workDir, sceneIdx, jobId /*, use
       console.warn(`[10C][PIXABAY][${jobId}][FLOOR] Best video score ${best.score} < floor ${PIXABAY_MIN_SCORE}. Returning null to trigger photo/other source.`);
       return null;
     }
-
+    
     console.log(`[10C][PIXABAY][${jobId}][PICKED] Video: ${best.variant.url} | score=${best.score}`);
     const outPath = path.join(workDir, `scene${sceneIdx + 1}-pixabay-${uuidv4()}.mp4`);
     const resultPath = await downloadStreamToLocal(best.variant.url, outPath, jobId, 'Video');

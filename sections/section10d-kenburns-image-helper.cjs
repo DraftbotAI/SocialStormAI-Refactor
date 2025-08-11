@@ -14,7 +14,6 @@ const sharp = require('sharp');
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
-const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
 console.log('[10D][INIT] Ken Burns image video helper loaded.');
 
@@ -41,6 +40,7 @@ function isValidFile(fp, jobId) {
 function cleanQuery(str) {
   if (!str) return '';
   return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
+  if (typeof str !== 'string') throw new Error(`[10D][KENBURNS][FATAL] cleanQuery requires string: ${typeof str}`);
 }
 function getKeywords(str) {
   return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
@@ -361,11 +361,6 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     // --- Try all sources and score them ---
     let candidates = [];
 
-    // Unsplash
-    if (UNSPLASH_ACCESS_KEY) {
-      const url = await findImageInUnsplash(subject, usedClips);
-      if (url) candidates.push({ url, api: 'unsplash', score: 100 });
-    }
     // Pexels
     if (PEXELS_API_KEY) {
       const url = await findImageInPexels(subject, usedClips);
@@ -428,9 +423,7 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
 
 module.exports = {
   fallbackKenBurnsVideo,
-  findImageInPexels,
   findImageInPixabay,
-  findImageInUnsplash,
   downloadRemoteFileToLocal,
   makeKenBurnsVideoFromImage,
   staticImageToVideo,

@@ -316,7 +316,7 @@ async function findPexelsClipForScene(subject, workDir, sceneIdx, jobId /*, used
         console.warn(`[10B][PEXELS][${jobId}][FLOOR] Best video score ${best.score} < floor ${PEXELS_MIN_SCORE}. Returning null to trigger photo/other source.`);
         return null;
       }
-
+    
       console.log(`[10B][PEXELS][${jobId}][PICKED] Video: ${best.file.link} | score=${best.score}`);
       const outPath = path.join(workDir, `scene${sceneIdx + 1}-pexels-${uuidv4()}.mp4`);
       const resultPath = await downloadStreamToLocal(best.file.link, outPath, jobId, 'Video');
