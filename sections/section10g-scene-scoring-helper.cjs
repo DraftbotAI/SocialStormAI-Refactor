@@ -151,6 +151,20 @@ function scoreSceneCandidate(candidate, subject, usedFiles) {
     weak_topic: 12, // generic topical words
   };
 
+  // NEW: Semantic similarity score (example using a hypothetical function)
+  let semanticScore = 0;
+  try {
+    const combinedText = `${title} ${desc} ${tagsStr}`;
+    semanticScore = calculateSemanticSimilarity(subj, combinedText); // scale 0-1
+    if (semanticScore > 0.6) {
+      score += W.title_phrase * semanticScore; // Boost based on similarity
+      reasons.push(`semantic_boost:${semanticScore.toFixed(2)}`);
+    }
+  } catch (e) {
+    console.warn('[10G][SEMANTIC][WARN]', e?.message || e);
+  }
+
+
   let score = 10; // baseline
   const reasons = [];
 

@@ -13,21 +13,41 @@
 //   - stripAllStops(line) -> string (utility)
 //
 // Notes:
-//   - Uses centralized lists via section10n-stopword-lists.cjs
+//   - Loads lists from sections/10n-lists; if missing, falls back to helpers/stopWords.cjs
 //   - MAX LOGGING with stable tags
 //   - No cross-job memory; purely local/deterministic
 // ============================================================
 
 'use strict';
 
-const {
-  STOPWORDS,
-  STOP_PHRASES,
-  stripStopPhrases,
-  OBJECT_HINTS,
-  CANONICAL_MULTI,
-  BANNED_PRIMARY,
-} = require('./section10n-stopword-lists.cjs');
+// ---- Resilient list loader (sections first, then helpers) ----
+let STOPWORDS, STOP_PHRASES, stripStopPhrases, OBJECT_HINTS, CANONICAL_MULTI, BANNED_PRIMARY;
+try {
+  ({
+    STOPWORDS,
+    STOP_PHRASES,
+    stripStopPhrases,
+    OBJECT_HINTS,
+    CANONICAL_MULTI,
+    BANNED_PRIMARY
+  } = require('./section10n-stopword-lists.cjs'));
+  console.log('[10N-EXTRACT][INIT] Lists loaded from sections/section10n-stopword-lists.cjs');
+} catch (e1) {
+  try {
+    ({
+      STOPWORDS,
+      STOP_PHRASES,
+      stripStopPhrases,
+      OBJECT_HINTS,
+      CANONICAL_MULTI,
+      BANNED_PRIMARY
+    } = require('../helpers/stopWords.cjs'));
+    console.warn('[10N-EXTRACT][INIT][WARN] Falling back to helpers/stopWords.cjs (sections/10n-lists not found).');
+  } catch (e2) {
+    console.error('[10N-EXTRACT][FATAL] No stopword lists available. Add sections/section10n-stopword-lists.cjs or helpers/stopWords.cjs.');
+    throw e1;
+  }
+}
 
 const HEAD_NOUNS = new Set([
   'fountain','bridge','castle','temple','statue','cathedral','church','mosque','palace','museum','square','plaza','gate','arch','tower',
@@ -67,42 +87,35 @@ function findPhraseOriginal(original, phraseLower) {
 function canonicalCandidates(lineRaw) {
   const lower = norm(lineRaw);
   const out = [];
-  // sort canonical phrases by length desc to prefer longest
   const sorted = [...CANONICAL_MULTI].sort((a, b) => b.length - a.length);
   for (const ph of sorted) {
     const phLower = ph.toLowerCase();
-    // word-boundary search
     const re = new RegExp(`\\b${phLower.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')}\\b`, 'i');
     if (re.test(lower)) {
       const orig = findPhraseOriginal(lineRaw, phLower) || titleCase(phLower);
       out.push({ text: orig, score: 1.0, reason: 'canonical-phrase' });
-      // Keep scanning to collect others, but the first will usually win
     }
   }
   return out;
 }
 
 function headNounReconstruction(lineRaw) {
-  // Build "<modifier> <head>" bigrams using original order
   const lower = norm(lineRaw);
   const tokens = tokenize(lower);
   const out = [];
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (!HEAD_NOUNS.has(tok)) continue;
-    // prev token as modifier if not a stopword
     const prev = tokens[i - 1];
     if (prev && !STOPWORDS.has(prev) && prev.length > 2) {
       const phrase = `${prev} ${tok}`;
       out.push({ text: titleCase(phrase), score: 0.82, reason: 'head-noun-bigram' });
     }
-    // try prev2 + prev + head if prev2 is strong (not stopword and >=4)
     const prev2 = tokens[i - 2];
     if (prev && prev2 && !STOPWORDS.has(prev2) && prev2.length >= 4 && !STOPWORDS.has(prev)) {
       const tri = `${prev2} ${prev} ${tok}`;
       out.push({ text: titleCase(tri), score: 0.86, reason: 'head-noun-trigram' });
     }
-    // bare head noun
     out.push({ text: titleCase(tok), score: 0.65, reason: 'head-noun' });
   }
   return dedupeByKey(out, c => norm(c.text));
@@ -123,7 +136,6 @@ function objectHintCandidates(lineRaw) {
       const baseScore = 0.74 + Math.min(0.06, count * 0.01);
       out.push({ text: titleCase(k), score: baseScore, reason: 'object-hint' });
     } else if (count >= 2 && k.length >= 5) {
-      // noun-ish heuristic: repeated, long-ish token
       const baseScore = 0.68 + Math.min(0.05, count * 0.01);
       out.push({ text: titleCase(k), score: baseScore, reason: 'freq-long' });
     }
@@ -166,7 +178,6 @@ function filterBanned(cands) {
 }
 
 function rankCandidates(all) {
-  // Sort by score desc, then longer text, then alpha
   return [...all].sort((a, b) =>
     (b.score - a.score) ||
     (b.text.length - a.text.length) ||
@@ -178,10 +189,8 @@ function finalizePrimary(cands, mainTopic) {
   if (cands.length) {
     const top = rankCandidates(cands)[0];
     let conf = Math.max(0, Math.min(1, top.score));
-    // clamp confidence bands
     if (conf >= 0.95) conf = 0.95;
     if (conf < 0.6 && mainTopic) {
-      // weak confidence → bias to mainTopic if it's literal
       const mt = titleCase(mainTopic.trim());
       if (!BANNED_PRIMARY.has(norm(mt))) {
         return { primary: mt, confidence: 0.62, source: 'fallback-mainTopic' };
@@ -189,7 +198,6 @@ function finalizePrimary(cands, mainTopic) {
     }
     return { primary: top.text, confidence: conf, source: 'ranked' };
   }
-  // No candidates → fallbacks
   if (mainTopic && !BANNED_PRIMARY.has(norm(mainTopic))) {
     return { primary: titleCase(mainTopic), confidence: 0.6, source: 'fallback-mainTopic' };
   }

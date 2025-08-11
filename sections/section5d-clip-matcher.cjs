@@ -43,6 +43,7 @@ function fileStem(p) {
   return b.replace(/\.[a-z0-9]+$/i, '');
 }
 
+// Normalize clip key with provider prefix and aggressive normalization
 function normalizeClipKey(src) {
   const s = safe(src).trim();
   const base = path.basename(s.split('?')[0]);
@@ -50,14 +51,19 @@ function normalizeClipKey(src) {
   const lowered = low(s);
   const variants = new Set([
     lowered,
+    lowered.replace(/[^a-z0-9]+/g, ''), // aggressive normalization
     low(base),
+    low(base).replace(/[^a-z0-9]+/g, ''), // aggressive normalization
     low(stem),
+    low(stem).replace(/[^a-z0-9]+/g, ''), // aggressive normalization
   ]);
+
   // Provider-tagged variants to further reduce collisions
   variants.add(`r2:${lowered}`);
   variants.add(`url:${lowered}`);
   variants.add(`base:${low(base)}`);
   variants.add(`stem:${low(stem)}`);
+
   return variants;
 }
 
