@@ -20,7 +20,7 @@ const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cj
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
 
 // Subject + scoring
-const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
+const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs'); // kept for future use
 const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
 // =============================
@@ -192,7 +192,8 @@ async function scoreCandidateWrapper({ candidateSrc, subject, mainTopic, sceneId
   }
 }
 
-// Provider caller with signature auto-detect
+// Provider caller with defensive signature handling.
+// Always try object-style first (what 10A expects), then clean positional fallbacks.
 async function callProvider(fn, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder, workDir) {
   const ctx = {
     subject: String(primarySubject || ''),
@@ -201,29 +202,52 @@ async function callProvider(fn, primarySubject, mainTopic, sceneIdx, jobId, cate
     jobId,
     categoryFolder,
     allowSynonyms: !SUBJECT_STRICT,
-    workDir,
+    workDir: (typeof workDir === 'string') ? workDir : '',
   };
 
+  // Try object ctx (10A expects this)
   try {
-    // Case 1: object-style signature (e.g., 10A R2 helper expects ctx)
-    if (fn.length <= 1) {
-      return await fn(ctx);
-    }
-    // Case 2: positional-style for 10B/10C: (subject, workDir, sceneIdx, jobId)
-    if (fn.length >= 4) {
-      return await fn(ctx.subject, workDir, sceneIdx, jobId);
-    }
-    // Case 3: fallback variants
-    if (fn.length === 3) {
-      return await fn(ctx.subject, sceneIdx, jobId);
-    }
-    if (fn.length === 2) {
-      return await fn(ctx.subject, sceneIdx);
-    }
-    // Last resort: string only
-    return await fn(ctx.subject);
-  } catch (e) {
-    console.warn(`[5D][PROVIDER][WARN] Provider call failed. ${fn.name}:`, e?.message || e);
+    const r = await fn(ctx);
+    console.log(`[5D][PROVIDER][TRY_CTX] ${fn.name} ok`);
+    return r;
+  } catch (e1) {
+    console.warn(`[5D][PROVIDER][TRY_CTX][WARN] ${fn.name}: ${e1?.message || e1}`);
+  }
+
+  // Try common positional signature used by 10B/10C: (subject, workDir, sceneIdx, jobId)
+  try {
+    const r = await fn(ctx.subject, ctx.workDir, ctx.sceneIdx, ctx.jobId);
+    console.log(`[5D][PROVIDER][TRY_POS_4] ${fn.name} ok`);
+    return r;
+  } catch (e2) {
+    console.warn(`[5D][PROVIDER][TRY_POS_4][WARN] ${fn.name}: ${e2?.message || e2}`);
+  }
+
+  // Try (subject, sceneIdx, jobId)
+  try {
+    const r = await fn(ctx.subject, ctx.sceneIdx, ctx.jobId);
+    console.log(`[5D][PROVIDER][TRY_POS_3] ${fn.name} ok`);
+    return r;
+  } catch (e3) {
+    console.warn(`[5D][PROVIDER][TRY_POS_3][WARN] ${fn.name}: ${e3?.message || e3}`);
+  }
+
+  // Try (subject, sceneIdx)
+  try {
+    const r = await fn(ctx.subject, ctx.sceneIdx);
+    console.log(`[5D][PROVIDER][TRY_POS_2] ${fn.name} ok`);
+    return r;
+  } catch (e4) {
+    console.warn(`[5D][PROVIDER][TRY_POS_2][WARN] ${fn.name}: ${e4?.message || e4}`);
+  }
+
+  // Last resort: (subject)
+  try {
+    const r = await fn(ctx.subject);
+    console.log(`[5D][PROVIDER][TRY_POS_1] ${fn.name} ok`);
+    return r;
+  } catch (e5) {
+    console.warn(`[5D][PROVIDER][FAIL] ${fn.name}: ${e5?.message || e5}`);
     return null;
   }
 }
@@ -274,11 +298,13 @@ async function findClipForScene(opts) {
   console.log(`\n[5D][BEGIN][${jobId}] Scene=${sceneIdx + 1} subject="${primarySubject}" mainTopic="${mainTopic}" mode=${strictNote} category=${categoryFolder}`);
   console.log(`[5D][DEDUPE][${jobId}] usedSet size=${usedSet.size}`);
 
+  const safeWorkDir = (typeof workDir === 'string') ? workDir : '';
+
   // ===========================
   // 1) R2-FIRST: short-circuit
   // ===========================
   try {
-    const r2Res = await callProvider(findR2ClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, workDir);
+    const r2Res = await callProvider(findR2ClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, safeWorkDir);
     const r2Clip = normalizeProviderResult(r2Res);
     if (r2Clip) {
       console.log(`[5D][R2][CANDIDATE][${jobId}] ${r2Clip}`);
@@ -309,7 +335,7 @@ async function findClipForScene(opts) {
   // ======================================================
   // PEXELS
   try {
-    const pxRes = await callProvider(findPexelsClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, workDir);
+    const pxRes = await callProvider(findPexelsClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, safeWorkDir);
     const pxClip = normalizeProviderResult(pxRes);
     if (pxClip) {
       console.log(`[5D][PEXELS][CANDIDATE][${jobId}] ${pxClip}`);
@@ -335,7 +361,7 @@ async function findClipForScene(opts) {
 
   // PIXABAY
   try {
-    const pbRes = await callProvider(findPixabayClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, workDir);
+    const pbRes = await callProvider(findPixabayClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, safeWorkDir);
     const pbClip = normalizeProviderResult(pbRes);
     if (pbClip) {
       console.log(`[5D][PIXABAY][CANDIDATE][${jobId}] ${pbClip}`);
@@ -365,7 +391,7 @@ async function findClipForScene(opts) {
   // ======================================================
   try {
     console.log(`[5D][KB][FALLBACK][${jobId}] Triggered Ken Burns fallback for subject="${primarySubject || mainTopic}" scene=${sceneIdx + 1}`);
-    const kb = await fallbackKenBurnsVideo(String(primarySubject || mainTopic || 'scenic nature'), workDir, sceneIdx, jobId);
+    const kb = await fallbackKenBurnsVideo(String(primarySubject || mainTopic || 'scenic nature'), safeWorkDir, sceneIdx, jobId);
     if (kb) {
       // Ken Burns creates a *new* file name each time; de-dupe is unlikely but still mark it.
       markUsed(jobId, kb, 'KENBURNS');
