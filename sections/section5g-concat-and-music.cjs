@@ -6,6 +6,12 @@
 // BulletproofScenes for size/audio normalization
 // Never repeats same song twice! AI mood detection fallback!
 // 2024-08: PRO — Always 9:16 output, validated output, logging
+// 2025-08: FIX — overlayMusic now always writes to a *file*
+//              inside workDir (prevents "Invalid argument" when
+//              a directory path is accidentally passed). Also
+//              accepts a Promise for musicPath and resolves it.
+//              appendOutro is now backward-compatible with
+//              (main, workDir, jobId) *or* (main, outro, out, workDir).
 // ===========================================================
 
 const fs = require('fs');
@@ -231,14 +237,14 @@ async function bulletproofFile(inputPath, workDir, label) {
  * Concat scenes, returns final concat file path.
  * @param {string[]} sceneFiles - Array of scene .mp4s
  * @param {string} workDir
- * @param {Object[]} sceneClipMetaList - [NEW] Optional: Array of metadata for each scene (for archiving)
+ * @param {Object[]} sceneClipMetaList - Optional: metadata list per scene
  * @returns {Promise<string>}
  */
 async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
   console.log(`[5G][CONCAT] concatScenes called with ${sceneFiles.length} files:`);
   sceneFiles.forEach((file, i) => console.log(`[5G][CONCAT][IN] ${i + 1}: ${file}`));
 
-  // [NEW] Pass meta list to bulletproofScenes for accurate tracking after fixes
+  // Normalize/repair scenes
   let fixedScenes = await bulletproofScenes(
     sceneFiles,
     null,
@@ -258,7 +264,7 @@ async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
       });
     },
     null,
-    sceneClipMetaList // <--- track per-clip file path fixes
+    sceneClipMetaList
   );
 
   // Ensure all have audio
@@ -310,11 +316,6 @@ async function concatScenes(sceneFiles, workDir, sceneClipMetaList = null) {
 }
 
 // === Async Scene Clip Archiver Hook (call this from 5H job cleanup) ===
-/**
- * Called after video is finished. Kick off archiving scene clips to R2.
- * @param {Object[]} sceneClipMetaList - Array of scene meta: { localFilePath, subject, sceneIdx, source, category }
- * @param {Function} asyncArchiveFn - Function to call for each scene ({ localFilePath, subject, sceneIdx, source, category })
- */
 async function postProcessSceneClipArchiving(sceneClipMetaList, asyncArchiveFn) {
   if (!Array.isArray(sceneClipMetaList) || !sceneClipMetaList.length) {
     console.warn('[5G][ARCHIVE][WARN] No sceneClipMetaList provided.');
@@ -337,10 +338,26 @@ async function postProcessSceneClipArchiving(sceneClipMetaList, asyncArchiveFn) 
   console.log('[5G][ARCHIVE][DONE] All scene clips processed.');
 }
 
-// === Outro appender (bulletproof, both files forced to perfect audio/video for concat) ===
-async function appendOutro(mainPath, outroPath, outPath, workDir) {
-  outroPath = getOutroPath();
-  if (!outPath) outPath = path.resolve(workDir, getUniqueFinalName('final-with-outro'));
+// === Outro appender (bulletproof, compat with both signatures) ===
+// Supports:
+//   appendOutro(mainPath, workDir, jobId?)                            // (used by 5B)
+//   appendOutro(mainPath, outroPath, outPath, workDir)                // original form
+async function appendOutro(mainPath, arg2, arg3, arg4) {
+  let outroPath = null;
+  let outPath = null;
+  let workDir = null;
+
+  // Heuristic: if arg2 exists and is a directory => (main, workDir, jobId?)
+  if (arg2 && typeof arg2 === 'string' && fs.existsSync(arg2) && fs.statSync(arg2).isDirectory()) {
+    workDir = arg2;
+    outroPath = getOutroPath();
+    outPath = path.resolve(workDir, getUniqueFinalName('final-with-outro'));
+  } else {
+    // original style
+    outroPath = arg2 || getOutroPath();
+    outPath = arg3 || path.resolve(arg4 || path.dirname(mainPath), getUniqueFinalName('final-with-outro'));
+    workDir = arg4 || path.dirname(outroPath);
+  }
 
   console.log(`[5G][OUTRO] appendOutro called: main="${mainPath}" outro="${outroPath}" out="${outPath}"`);
   await logFileProbe(mainPath, 'OUTRO_MAIN');
@@ -396,21 +413,53 @@ async function appendOutro(mainPath, outroPath, outPath, workDir) {
   });
 }
 
-// === Music overlay (max logging, bulletproof random) ===
-async function overlayMusic(videoPath, musicPath, outPath) {
-  console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPath}" out="${outPath}"`);
+// === Music overlay (now always writes its own OUT path inside workDir) ===
+// Accepts either a string path, null (skip), or a Promise that resolves to a path.
+async function overlayMusic(videoPath, musicPathMaybe, workDir) {
+  console.log(`[5G][MUSIC] overlayMusic called: video="${videoPath}" music="${musicPathMaybe}" workDir="${workDir}"`);
 
+  // Resolve Promise if the caller forgot to await pickMusicForMood
+  if (musicPathMaybe && typeof musicPathMaybe.then === 'function') {
+    try {
+      musicPathMaybe = await musicPathMaybe;
+      console.log('[5G][MUSIC] Resolved musicPath Promise →', musicPathMaybe);
+    } catch (e) {
+      console.warn('[5G][MUSIC][WARN] Failed to resolve musicPath Promise. Skipping music.', e);
+      return videoPath; // no music overlay
+    }
+  }
+
+  // If no track was provided/resolved, skip overlay gracefully
+  if (!musicPathMaybe) {
+    console.warn('[5G][MUSIC][WARN] No music track provided. Skipping music overlay.');
+    return videoPath;
+  }
+
+  // Validate inputs and log probes
   try {
     await logFileProbe(videoPath, 'MUSIC_VIDEO');
-    await logFileProbe(musicPath, 'MUSIC_MUSIC');
+    await logFileProbe(musicPathMaybe, 'MUSIC_MUSIC');
   } catch (e) {
     console.warn('[5G][MUSIC][PROBE][WARN] Could not probe input durations.');
   }
 
+  // Ensure music path exists, otherwise skip
+  if (!fs.existsSync(musicPathMaybe)) {
+    console.warn('[5G][MUSIC][WARN] Music file not found:', musicPathMaybe, '— skipping overlay.');
+    return videoPath;
+  }
+
+  // Always produce an explicit OUTPUT FILE in workDir
+  const outPath = path.resolve(
+    workDir || path.dirname(videoPath),
+    `${path.basename(videoPath, '.mp4')}-music-${uuidv4()}.mp4`
+  );
+  console.log('[5G][MUSIC] Output file will be:', outPath);
+
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(videoPath)
-      .input(musicPath)
+      .input(musicPathMaybe)
       .complexFilter([
         '[0:a]volume=1.0[a0]',
         '[1:a]volume=0.16[a1]',
@@ -622,8 +671,8 @@ async function create9x16FromInput(inputPath, outputPath) {
 module.exports = {
   concatScenes, // (sceneFiles, workDir, sceneClipMetaList)
   ensureAudioStream,
-  overlayMusic,
-  appendOutro,
+  overlayMusic, // (videoPath, musicPathOrPromiseOrNull, workDir)
+  appendOutro,  // compat: (main, workDir, jobId?) OR (main, outro, out, workDir)
   getOutroPath,
   getUniqueFinalName,
   bulletproofScenes,
@@ -632,5 +681,5 @@ module.exports = {
   simpleDetectMood,
   create16x9FromInput,
   create9x16FromInput,
-  postProcessSceneClipArchiving // NEW: bulk-archive scene clips after job
+  postProcessSceneClipArchiving
 };
