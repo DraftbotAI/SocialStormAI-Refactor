@@ -6,6 +6,10 @@
 // Aspect 1080x1920 portrait, 30fps, yuv420p, faststart
 // Bulletproof: trim in filtergraph (no mid-GOP seek), CFR output
 // CHANGE: replace deprecated/contradictory `-vsync 2` with `-fps_mode cfr`
+//
+// 2025-08 hotfix:
+// - Foreground path now uses `force_original_aspect_ratio=decrease` before pad,
+//   plus a safety crop after overlay to prevent "Padded dimensions smaller than input".
 // ===========================================================
 
 const fs = require('fs');
@@ -98,12 +102,24 @@ function buildPortraitTrimFilter(startSec, endSec, totalDur, tailSec) {
   const dur = Math.max(0.2, Number(totalDur) || (e - s));
   const tail = Math.max(0, Number(tailSec) || 0);
 
+  // Notes:
+  // - Background: scale with "increase" then crop to guaranteed 1080x1920, add blur.
+  // - Foreground: scale with "decrease" so result is <= 1080x1920, then pad to exact 1080x1920.
+  //   This avoids "Padded dimensions cannot be smaller than input" when source is taller than 1920.
+  // - Safety crop after overlay to guard against rounding anomalies.
   return [
     `[0:v]trim=start=${s}:end=${e},setpts=PTS-STARTPTS[v0]`,
     `[v0]split=2[v1][v2]`,
+    // Background (blurred fill)
     `[v1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=32:2[bg]`,
-    `[v2]scale=1080:-2:flags=lanczos,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[fg]`,
-    `[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p,tpad=stop_mode=clone:stop_duration=${tail.toFixed(3)},trim=0:${dur.toFixed(3)},setpts=N/FRAME_RATE/TB[vout]`
+    // Foreground (content): fit inside, then pad
+    `[v2]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[fg]`,
+    // Composite + safety crop + tpad tail + trim to dur
+    `[bg][fg]overlay=(W-w)/2:(H-h)/2,` +
+      `crop='min(iw,1080)':'min(ih,1920)':(iw-1080)/2:(ih-1920)/2,` +
+      `format=yuv420p,` +
+      `tpad=stop_mode=clone:stop_duration=${tail.toFixed(3)},` +
+      `trim=0:${dur.toFixed(3)},setpts=N/FRAME_RATE/TB[vout]`
   ].join(';');
 }
 
