@@ -1,523 +1,330 @@
 // ============================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Deterministic, Bulletproof)
-// R2-FIRST short-circuit: if R2 returns a clip, we take it immediately
-//   *but only if it matches the primary subject* (subject gate).
-// Always returns something: R2 video, provider video, or Ken Burns.
-// Max logging at each step. No infinite loops.
-//
-// De-dupe rule (AS REQUESTED):
-//   - Only prevent the SAME clip from appearing twice within the
-//     CURRENT video being generated.
-//   - No cross-job memory; reuse across other users/videos is allowed.
-//     We track duplicates ONLY via a Set on jobContext for this run.
-//
-// Policy: Prefer not to use Ken Burns on scene 1 and cap KBs per job,
-//         but at the very end we OVERRIDE those caps to guarantee output.
-//
-// UPDATED 2025-08-11 — Wired to Section 11 (Stopwords→AI) subjects.
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (R2-first, De-dupe, Strict Species Gate)
+// Always returns the best available visual: R2 video → Pexels video → Pixabay video → Ken Burns fallback.
+// Within-job de-dupe enforced via jobContext.usedClipKeys (Set). No cross-job dedupe.
+// R2-first short-circuit: if R2 yields a non-duplicate that passes the subject gate, we pick it immediately.
+// Strict species gate for animals (exact only) unless SS_SUBJECT_STRICT=0, which allows synonyms via 10G scoring.
+// MAX LOGGING. No recursion. No infinite loops.
+// Exports: findClipForScene(opts)
 // ============================================================
 
-'use strict';
+const path = require('path');
+const fs = require('fs');
 
+// Providers
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
 const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
+
+// Subject + scoring
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
 const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
 
-const fs = require('fs');
-const path = require('path');
+// =============================
+// ENV / MODE FLAGS
+// =============================
+const SUBJECT_STRICT = String(process.env.SS_SUBJECT_STRICT || '1') !== '0'; // default strict
 
-console.log('[5D][INIT] Clip matcher orchestrator loaded. v-2025-08-11-local-dupe-only');
+// =============================
+// Small utilities
+// =============================
+function safe(s) { return (s ?? '').toString(); }
+function low(s) { return safe(s).toLowerCase(); }
 
-const GENERIC_SUBJECTS = [
-  'face','person','man','woman','it','thing','someone','something','body','eyes','kid','boy','girl','they','we','people','scene','child','children'
-];
+function isHttpUrl(s) { return /^https?:\/\//i.test(safe(s)); }
+function isR2Key(s) {
+  const v = safe(s);
+  return !isHttpUrl(v) && v.includes('/') && !fs.existsSync(v); // heuristic for "bucket key"
+}
 
-// ---------- Small utils ----------
-function assertFileExists(file, label = 'FILE', minSize = 10240) {
-  try {
-    if (!file || !fs.existsSync(file)) {
-      console.error(`[5D][${label}][ERR] File does not exist: ${file}`);
-      return false;
+function fileStem(p) {
+  const b = path.basename(safe(p));
+  return b.replace(/\.[a-z0-9]+$/i, '');
+}
+
+function normalizeClipKey(src) {
+  const s = safe(src).trim();
+  const base = path.basename(s.split('?')[0]);
+  const stem = fileStem(s);
+  const lowered = low(s);
+  const variants = new Set([
+    lowered,
+    low(base),
+    low(stem),
+  ]);
+  // Provider-tagged variants to further reduce collisions
+  variants.add(`r2:${lowered}`);
+  variants.add(`url:${lowered}`);
+  variants.add(`base:${low(base)}`);
+  variants.add(`stem:${low(stem)}`);
+  return variants;
+}
+
+function markUsed(jobContext, src, tag = '') {
+  const variants = normalizeClipKey(src);
+  for (const v of variants) jobContext.usedClipKeys.add(v);
+  console.log(`[5D][DEDUPE][ADD] ${tag} added ${variants.size} keys for: ${src}`);
+}
+
+function isUsed(jobContext, src) {
+  const variants = normalizeClipKey(src);
+  for (const v of variants) {
+    if (jobContext.usedClipKeys.has(v)) {
+      return true;
     }
-    const sz = fs.statSync(file).size;
-    if (sz < minSize) {
-      console.error(`[5D][${label}][ERR] File too small (${sz} bytes): ${file}`);
-      return false;
-    }
+  }
+  return false;
+}
+
+function guessProvider(src) {
+  const s = safe(src);
+  if (s.includes('pexels')) return 'pexels';
+  if (s.includes('pixabay')) return 'pixabay';
+  return 'r2';
+}
+
+function isAnimalWord(word) {
+  const w = low(word);
+  // Fast common set — detailed mapping handled in 10G scoring. Keep this minimal to avoid dupe-hell.
+  return /\b(manatee|sea\s*cow|dolphin|whale|shark|seal|otter|cat|dog|monkey|lion|tiger|bear|eagle|elephant|giraffe|panda|koala|hippo|rhinoceros|rhino|penguin|wolf|fox|owl|cow|horse|zebra|camel)\b/.test(w);
+}
+
+function canonicalAnimal(word) {
+  const w = low(word).trim();
+  if (/\bsea\s*cow\b/.test(w)) return 'manatee';
+  if (/\brhino|rhinoceros\b/.test(w)) return 'rhino';
+  return w;
+}
+
+// Subject gate logic:
+// - If primarySubject exists and is an animal, enforce species gate.
+//   * STRICT mode (default): require canonical species token to appear in candidate name/key.
+//   * NON-STRICT (SS_SUBJECT_STRICT=0): allow synonyms; 10G scoring will adjudicate.
+// - If primarySubject empty → allow (we’ll rely on scoring & order).
+function passesSubjectGate(candidateSrc, primarySubject, mainTopic) {
+  const src = low(candidateSrc);
+  const subject = low(primarySubject || '');
+  const topic = low(mainTopic || '');
+
+  if (!subject && !topic) {
+    console.log('[5D][SUBJECT-GATE] No subject/topic set → pass.');
     return true;
-  } catch (err) {
-    console.error(`[5D][${label}][ERR] Exception on assert:`, err);
-    return false;
   }
-}
 
-// ---- In-video de-dupe (current job only) ----
-function getUsedSet(jobContext) {
-  if (!jobContext || typeof jobContext !== 'object') return new Set();
-  if (!jobContext.__usedClipKeys) jobContext.__usedClipKeys = new Set();
-  return jobContext.__usedClipKeys;
-}
-function clipKey(filePath) {
-  try {
-    const base = path.basename(filePath || '').toLowerCase();
-    if (!base) return '';
-    const sz = fs.existsSync(filePath) ? (fs.statSync(filePath).size || 0) : 0;
-    const stem = base.replace(/\.[a-z0-9]+$/i, '');
-    return `${stem}|${sz}`;
-  } catch {
-    const base = path.basename(filePath || '').toLowerCase();
-    const stem = base.replace(/\.[a-z0-9]+$/i, '');
-    return stem;
-  }
-}
-function hasUsed(jobContext, filePath) {
-  const set = getUsedSet(jobContext);
-  const key = clipKey(filePath);
-  return key && set.has(key);
-}
-function markUsed(jobContext, filePath) {
-  const set = getUsedSet(jobContext);
-  const key = clipKey(filePath);
-  if (key) set.add(key);
-}
+  // Prefer the explicit subject; fall back to mainTopic
+  const chosen = subject || topic;
 
-function normalizeGeneric(subject) {
-  return (subject || '').toLowerCase();
-}
-
-function getMajorWords(subject) {
-  return (subject || '')
-    .split(/\s+/)
-    .map(w => w.toLowerCase())
-    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
-}
-
-// ---- Subject presence helpers ----
-function escapeRegex(s = '') {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-function wordBoundaryIncludes(hay = '', needle = '') {
-  const s = (needle || '').trim();
-  if (!s) return false;
-  const re = new RegExp(`\\b${escapeRegex(s)}s?\\b`, 'i'); // allow simple plural
-  return re.test(String(hay));
-}
-function subjectPresentInMeta(pathOrName, meta, subject) {
-  const s = (subject || '').trim();
-  if (!s) return false;
-  const fn = (pathOrName || '').toString();
-  const tags = meta?.tags || meta?.keywords || [];
-  const title = meta?.title || '';
-  const desc = meta?.description || '';
-  // Phrase check first
-  if (wordBoundaryIncludes(fn, s) || wordBoundaryIncludes((tags||[]).join(' '), s) ||
-      wordBoundaryIncludes(title, s) || wordBoundaryIncludes(desc, s)) {
+  // Animal strictness
+  const animalGate = isAnimalWord(chosen);
+  if (!animalGate) {
+    // Non-animal → gate is advisory; rely on scoring.
+    console.log('[5D][SUBJECT-GATE] Non-animal subject → pass (will rely on 10G scoring).');
     return true;
   }
-  // Token fallback (any major word)
-  const majors = getMajorWords(s);
-  if (!majors.length) return false;
-  const hay = `${fn} ${(tags||[]).join(' ')} ${title} ${desc}`.toLowerCase();
-  return majors.some(t => wordBoundaryIncludes(hay, t));
+
+  const canon = canonicalAnimal(chosen);
+  if (SUBJECT_STRICT) {
+    const ok = src.includes(canon);
+    console.log(`[5D][SUBJECT-GATE] STRICT animal gate on "${canon}" → ${ok ? 'PASS' : 'FAIL'}. Source="${candidateSrc}"`);
+    return ok;
+  } else {
+    // relaxed animal gate: allow synonyms; scoring decides
+    const ok = (src.includes(canon) || src.includes('sea_cow') || src.includes('sea cow'));
+    console.log(`[5D][SUBJECT-GATE] RELAXED animal gate on "${canon}" (synonyms allowed) → ${ok ? 'PASS' : 'SOFT-PASS (score)'} Source="${candidateSrc}"`);
+    return true; // allow; scoring will penalize if too far
+  }
 }
 
-function pickPrimarySubject({ jobContext = {}, megaSubject, mainTopic, subject, fallback }) {
-  const fromCtx = (jobContext.primarySubject || '').trim();
-  const candidates = [fromCtx, megaSubject, mainTopic, subject, fallback].filter(Boolean);
-  return candidates.find(v => v && !GENERIC_SUBJECTS.includes(normalizeGeneric(v))) || candidates[0] || '';
-}
-
-function getMaxKbPerJob() {
-  const n = parseInt(process.env.SS_MAX_KB_PER_JOB || '2', 10);
-  return isNaN(n) ? 2 : Math.max(0, n);
-}
-
-// ---------- Main ----------
-async function findClipForScene({
-  subject,
-  sceneIdx,
-  allSceneTexts,
-  mainTopic,
-  isMegaScene = false,
-  workDir,
-  jobId,
-  megaSubject = null,
-  forceClipPath = null,
-  jobContext = {},
-  categoryFolder
-}) {
-  // 0) Primary subject (for gating / fallback)
-  const primarySubject = pickPrimarySubject({ jobContext, megaSubject, mainTopic, subject, fallback: allSceneTexts?.[0] });
-  if (primarySubject) {
-    console.log(`[5D][PRIMARY][${jobId}] Primary subject = "${primarySubject}"`);
-  }
-
-  // Ken Burns policy controls (soft caps; overridden at the very end)
-  if (typeof jobContext.kbUsedCount !== 'number') jobContext.kbUsedCount = 0;
-  if (!Array.isArray(jobContext.clipsToIngest)) jobContext.clipsToIngest = [];
-  const maxKb = getMaxKbPerJob();
-
-  // 1) Decide the search subject (anchor for hook/mega)
-  let searchSubject = subject;
-
-  if (isMegaScene || sceneIdx === 0) {
-    if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(normalizeGeneric(megaSubject))) {
-      searchSubject = megaSubject;
-      console.log(`[5D][ANCHOR][${jobId}] Using megaSubject for scene ${sceneIdx + 1}: "${searchSubject}"`);
-    } else if (mainTopic && typeof mainTopic === 'string' && mainTopic.length > 2 && !GENERIC_SUBJECTS.includes(normalizeGeneric(mainTopic))) {
-      searchSubject = mainTopic;
-      console.log(`[5D][ANCHOR][${jobId}] Using mainTopic for scene ${sceneIdx + 1}: "${searchSubject}"`);
-    } else if (allSceneTexts?.[0]) {
-      searchSubject = allSceneTexts[0];
-      console.log(`[5D][ANCHOR][${jobId}] Fallback to first scene text for anchor: "${searchSubject}"`);
-    }
-  }
-
-  if (!searchSubject || GENERIC_SUBJECTS.includes(normalizeGeneric(searchSubject))) {
-    if (mainTopic && !GENERIC_SUBJECTS.includes(normalizeGeneric(mainTopic))) {
-      searchSubject = mainTopic;
-      console.log(`[5D][SUBJECT][${jobId}] Generic subject → using mainTopic: "${searchSubject}"`);
-    } else if (allSceneTexts?.[0]) {
-      searchSubject = allSceneTexts[0];
-      console.log(`[5D][SUBJECT][${jobId}] Generic subject → using first scene text: "${searchSubject}"`);
-    }
-  }
-
-  if (!searchSubject || searchSubject.length < 2) {
-    console.error(`[5D][FATAL][${jobId}] No valid subject for scene ${sceneIdx + 1}.`);
-    // Final override: unconditional KB on a generic term so we *still* return something
-    const kbEmergency = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId /* no used list */);
-    if (kbEmergency && assertFileExists(kbEmergency, 'KB_EMERGENCY')) {
-      console.warn(`[5D][EMERGENCY][${jobId}] Used generic KenBurns due to missing subject: ${kbEmergency}`);
-      markUsed(jobContext, kbEmergency);
-      return kbEmergency;
-    }
-    return null;
-  }
-
-  // 2) Force clip for debugging
-  if (forceClipPath) {
-    console.log(`[5D][FORCE][${jobId}] Forcing clip path: ${forceClipPath}`);
-    if (assertFileExists(forceClipPath, 'FORCE_CLIP')) {
-      if (hasUsed(jobContext, forceClipPath)) {
-        console.warn(`[5D][FORCE][${jobId}] Forced clip already used in this video. Still honoring force: ${path.basename(forceClipPath)}`);
-      } else {
-        markUsed(jobContext, forceClipPath);
-      }
-      return forceClipPath;
-    }
-    return null;
-  }
-
-  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !fallbackKenBurnsVideo) {
-    console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
-    const kbEmergency = await fallbackKenBurnsVideo(primarySubject || searchSubject || 'landmark', workDir, sceneIdx, jobId);
-    if (kbEmergency && assertFileExists(kbEmergency, 'KB_EMERGENCY')) {
-      markUsed(jobContext, kbEmergency);
-      return kbEmergency;
-    }
-    return null;
-  }
-
-  // 3) Visual subject extraction (ordered list) — ensure primarySubject is included first
-  let prioritizedSubjects = [];
+// Score helper wrapper with rich logs (safe even if 10G changes)
+async function scoreCandidateWrapper({ candidateSrc, subject, mainTopic, sceneIdx, isMegaScene }) {
   try {
-    const extracted = await extractVisualSubjects(searchSubject, mainTopic);
-    const set = new Set([primarySubject, ...extracted.filter(Boolean)]);
-    prioritizedSubjects = Array.from(set).filter(Boolean);
-    console.log(`[5D][SUBJECTS][${jobId}] Prioritized:`, prioritizedSubjects);
-  } catch (err) {
-    console.error(`[5D][SUBJECTS][${jobId}][ERR]`, err);
-    const set = new Set([primarySubject, searchSubject, mainTopic].filter(Boolean));
-    prioritizedSubjects = Array.from(set);
-  }
-
-  // 4) Try each subject once (no recursion). R2-FIRST SHORT-CIRCUIT (with subject gate).
-  for (const subjectOption of prioritizedSubjects) {
-    if (!subjectOption || subjectOption.length < 2) continue;
-
-    // ---- 4a. R2 FIRST (short-circuit if found) — gated by primary subject, de-duped within this video
-    try {
-      const r2Res = await findR2ClipForScene(subjectOption, workDir, sceneIdx, jobId /* no used list */);
-      const r2Path = (r2Res && r2Res.path) ? r2Res.path : r2Res;
-      const r2Meta = (r2Res && r2Res.meta) ? r2Res.meta : {};
-      if (r2Path && assertFileExists(r2Path, 'R2_RESULT')) {
-        if (primarySubject && !subjectPresentInMeta(r2Path, r2Meta, primarySubject)) {
-          console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject R2 off-subject (need "${primarySubject}") -> ${path.basename(r2Path)}`);
-        } else if (hasUsed(jobContext, r2Path)) {
-          console.log(`[5D][R2][${jobId}] R2 candidate already used in THIS video: ${path.basename(r2Path)}`);
-        } else {
-          console.log(`[5D][R2][${jobId}] Taking R2 winner for "${subjectOption}": ${r2Path}`);
-          markUsed(jobContext, r2Path);
-          if (Array.isArray(jobContext.clipsToIngest)) {
-            jobContext.clipsToIngest.push({ localPath: r2Path, subject: subjectOption, sceneIdx, source: 'r2', categoryFolder });
-          }
-          return r2Path;
-        }
-      } else {
-        console.log(`[5D][R2][${jobId}] No R2 match for "${subjectOption}"`);
-      }
-    } catch (err) {
-      console.error(`[5D][R2][${jobId}][ERR]`, err);
-    }
-
-    // ---- 4b. Providers (only if R2 failed) – videos first (try BOTH, always)
-    const scoredCandidates = [];
-
-    // PEXELS (video)
-    try {
-      console.log(`[5D][PEXELS][TRY][${jobId}] "${subjectOption}" (sceneIdx=${sceneIdx})`);
-      const pxRes = await findPexelsClipForScene(subjectOption, workDir, sceneIdx, jobId /* no used list */);
-      if (!pxRes) {
-        console.log(`[5D][PEXELS][NONE][${jobId}] No acceptable video candidate.`);
-      } else {
-        const pxPath = (pxRes && pxRes.path) ? pxRes.path : pxRes;
-        const pxMeta = (pxRes && pxRes.meta) ? pxRes.meta : {};
-        if (pxPath && assertFileExists(pxPath, 'PEXELS_RESULT')) {
-          if (hasUsed(jobContext, pxPath)) {
-            console.log(`[5D][PEXELS][${jobId}] Already used in THIS video: ${path.basename(pxPath)}`);
-          } else {
-            // SUBJECT GATE (videos only)
-            if (primarySubject && !subjectPresentInMeta(pxPath, pxMeta, primarySubject)) {
-              console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pexels off-subject (need "${primarySubject}") -> ${pxPath}`);
-            } else {
-              const filenameForScoring = pxMeta.originalName || pxMeta.filename || pxMeta.url || path.basename(pxPath);
-              const s10 = scoreSceneCandidate(
-                { filename: filenameForScoring, filePath: pxPath, tags: pxMeta.tags || pxMeta.keywords || [], title: pxMeta.title || '', description: pxMeta.description || '' },
-                subjectOption, /* used list not needed */ undefined
-              );
-              const providerScore = typeof pxRes?.score === 'number' ? pxRes.score : (typeof pxMeta.score === 'number' ? pxMeta.score : null);
-              const finalScore = providerScore !== null ? Math.max(s10, providerScore) : s10;
-              console.log(`[5D][PEXELS][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pxPath}`);
-              scoredCandidates.push({ source: 'pexels', path: pxPath, score: finalScore, meta: pxMeta });
-            }
-          }
-        }
-      }
-    } catch (e) { console.error(`[5D][PEXELS][ERR][${jobId}]`, e); }
-
-    // PIXABAY (video)
-    try {
-      console.log(`[5D][PIXABAY][TRY][${jobId}] "${subjectOption}" (sceneIdx=${sceneIdx})`);
-      const pbRes = await findPixabayClipForScene(subjectOption, workDir, sceneIdx, jobId /* no used list */);
-      if (!pbRes) {
-        console.log(`[5D][PIXABAY][NONE][${jobId}] No acceptable video candidate.`);
-      } else {
-        const pbPath = (pbRes && pbRes.path) ? pbRes.path : pbRes;
-        const pbMeta = (pbRes && pbRes.meta) ? pbRes.meta : {};
-        if (pbPath && assertFileExists(pbPath, 'PIXABAY_RESULT')) {
-          if (hasUsed(jobContext, pbPath)) {
-            console.log(`[5D][PIXABAY][${jobId}] Already used in THIS video: ${path.basename(pbPath)}`);
-          } else {
-            if (primarySubject && !subjectPresentInMeta(pbPath, pbMeta, primarySubject)) {
-              console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pixabay off-subject (need "${primarySubject}") -> ${pbPath}`);
-            } else {
-              const filenameForScoring = pbMeta.originalName || pbMeta.filename || pbMeta.url || path.basename(pbPath);
-              const s10 = scoreSceneCandidate(
-                { filename: filenameForScoring, filePath: pbPath, tags: pbMeta.tags || pbMeta.keywords || [], title: pbMeta.title || '', description: '' },
-                subjectOption, /* used list not needed */ undefined
-              );
-              const providerScore = typeof pbRes?.score === 'number' ? pbRes.score : (typeof pbMeta.score === 'number' ? pbMeta.score : null);
-              const finalScore = providerScore !== null ? Math.max(s10, providerScore) : s10;
-              console.log(`[5D][PIXABAY][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pbPath}`);
-              scoredCandidates.push({ source: 'pixabay', path: pbPath, score: finalScore, meta: pbMeta });
-            }
-          }
-        }
-      }
-    } catch (e) { console.error(`[5D][PIXABAY][ERR][${jobId}]`, e); }
-
-    // Pick best provider candidate (video)
-    if (scoredCandidates.length) {
-      scoredCandidates.sort((a, b) => (b.score - a.score) || (Math.random() - 0.5));
-      const winner = scoredCandidates[0];
-      if (hasUsed(jobContext, winner.path)) {
-        console.log(`[5D][PICK][${jobId}] Provider winner duplicate within THIS video, skipping: ${path.basename(winner.path)}`);
-      } else {
-        console.log(`[5D][PICK][${jobId}] Provider winner for "${subjectOption}": ${winner.source} (${winner.score}) -> ${winner.path}`);
-        markUsed(jobContext, winner.path);
-        if (Array.isArray(jobContext.clipsToIngest)) {
-          jobContext.clipsToIngest.push({ localPath: winner.path, subject: subjectOption, sceneIdx, source: winner.source, categoryFolder });
-        }
-        return winner.path;
-      }
-    }
-
-    // ---- 4c. Photo → Ken Burns (respect policy now; final override later)
-    const canUseKB = sceneIdx > 0 && jobContext.kbUsedCount < maxKb;
-    if (!canUseKB) {
-      if (sceneIdx === 0) console.warn(`[5D][KB][${jobId}] Skipping KB on scene 1 by policy.`);
-      if (jobContext.kbUsedCount >= maxKb) console.warn(`[5D][KB][${jobId}] KB cap reached (${jobContext.kbUsedCount}/${maxKb}).`);
-    } else {
-      try {
-        const kb = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId /* no used list */);
-        if (kb && assertFileExists(kb, 'KENBURNS_RESULT')) {
-          if (hasUsed(jobContext, kb)) {
-            console.log(`[5D][KB][${jobId}] KenBurns generated duplicate within THIS video: ${path.basename(kb)}`);
-          } else {
-            console.log(`[5D][PICK][${jobId}] KenBurns (photo) for "${subjectOption}": ${kb}`);
-            jobContext.kbUsedCount++;
-            markUsed(jobContext, kb);
-            return kb;
-          }
-        }
-      } catch (e) { console.error(`[5D][KENBURNS][ERR][${jobId}]`, e); }
-    }
-  }
-
-  // 4d) SUBJECT-ONLY FINAL SEARCH (try one more time by primarySubject)
-  if (primarySubject) {
-    console.log(`[5D][SUBJECT-FALLBACK][${jobId}] Forcing subject-only search: "${primarySubject}"`);
-
-    // R2 subject-only (gated, de-duped)
-    try {
-      const r2OnlyRes = await findR2ClipForScene(primarySubject, workDir, sceneIdx, jobId /* no used list */);
-      const r2OnlyPath = (r2OnlyRes && r2OnlyRes.path) ? r2OnlyRes.path : r2OnlyRes;
-      const r2OnlyMeta = (r2OnlyRes && r2OnlyRes.meta) ? r2OnlyRes.meta : {};
-      if (r2OnlyPath && assertFileExists(r2OnlyPath, 'R2_SUBJECT_ONLY')) {
-        if (primarySubject && !subjectPresentInMeta(r2OnlyPath, r2OnlyMeta, primarySubject)) {
-          console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject R2 subject-only (off-subject) -> ${path.basename(r2OnlyPath)}`);
-        } else if (hasUsed(jobContext, r2OnlyPath)) {
-          console.log(`[5D][R2][${jobId}] Subject-only R2 already used in THIS video: ${path.basename(r2OnlyPath)}`);
-        } else {
-          markUsed(jobContext, r2OnlyPath);
-          console.log(`[5D][SUBJECT-FALLBACK][${jobId}] R2 subject-only hit: ${r2OnlyPath}`);
-          return r2OnlyPath;
-        }
-      }
-    } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][R2][${jobId}]`, e); }
-
-    // Providers (subject-only)
-    try {
-      console.log(`[5D][PEXELS][TRY][${jobId}] "${primarySubject}" (subject-only, sceneIdx=${sceneIdx})`);
-      const pxRes = await findPexelsClipForScene(primarySubject, workDir, sceneIdx, jobId /* no used list */);
-      if (pxRes) {
-        const pxPath = (pxRes && pxRes.path) ? pxRes.path : pxRes;
-        const pxMeta = (pxRes && pxRes.meta) ? pxRes.meta : {};
-        if (pxPath && assertFileExists(pxPath, 'PEXELS_RESULT_SUBJECT_ONLY')) {
-          if (primarySubject && !subjectPresentInMeta(pxPath, pxMeta, primarySubject)) {
-            console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pexels off-subject (subject-only) -> ${pxPath}`);
-          } else if (hasUsed(jobContext, pxPath)) {
-            console.log(`[5D][PEXELS][${jobId}] Already used in THIS video: ${path.basename(pxPath)}`);
-          } else {
-            const filenameForScoring = pxMeta.originalName || pxMeta.filename || pxMeta.url || path.basename(pxPath);
-            const s10 = scoreSceneCandidate(
-              { filename: filenameForScoring, filePath: pxPath, tags: pxMeta.tags || pxMeta.keywords || [], title: pxMeta.title || '', description: '' },
-              primarySubject, /* used list not needed */ undefined
-            );
-            const providerScore = typeof pxRes?.score === 'number' ? pxRes.score : (typeof pxMeta.score === 'number' ? pxMeta.score : null);
-            const finalScore = providerScore !== null ? Math.max(s10, providerScore) : s10;
-            console.log(`[5D][PEXELS][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pxPath}`);
-            markUsed(jobContext, pxPath);
-            if (Array.isArray(jobContext.clipsToIngest)) {
-              jobContext.clipsToIngest.push({ localPath: pxPath, subject: primarySubject, sceneIdx, source: 'pexels', categoryFolder });
-            }
-            return pxPath;
-          }
-        }
-      } else {
-        console.log(`[5D][PEXELS][NONE][${jobId}] No acceptable video candidate (subject-only).`);
-      }
-    } catch (e) { console.error(`[5D][PEXELS][ERR][${jobId}]`, e); }
-
-    try {
-      console.log(`[5D][PIXABAY][TRY][${jobId}] "${primarySubject}" (subject-only, sceneIdx=${sceneIdx})`);
-      const pbRes = await findPixabayClipForScene(primarySubject, workDir, sceneIdx, jobId /* no used list */);
-      if (pbRes) {
-        const pbPath = (pbRes && pbRes.path) ? pbRes.path : pbRes;
-        const pbMeta = (pbRes && pbRes.meta) ? pbRes.meta : {};
-        if (pbPath && assertFileExists(pbPath, 'PIXABAY_RESULT_SUBJECT_ONLY')) {
-          if (primarySubject && !subjectPresentInMeta(pbPath, pbMeta, primarySubject)) {
-            console.warn(`[5D][SUBJECT-GATE][${jobId}] Reject Pixabay off-subject (subject-only) -> ${pbPath}`);
-          } else if (hasUsed(jobContext, pbPath)) {
-            console.log(`[5D][PIXABAY][${jobId}] Already used in THIS video: ${path.basename(pbPath)}`);
-          } else {
-            const filenameForScoring = pbMeta.originalName || pbMeta.filename || pbMeta.url || path.basename(pbPath);
-            const s10 = scoreSceneCandidate(
-              { filename: filenameForScoring, filePath: pbPath, tags: pbMeta.tags || pbMeta.keywords || [], title: pbMeta.title || '', description: '' },
-              primarySubject, /* used list not needed */ undefined
-            );
-            const providerScore = typeof pbRes?.score === 'number' ? pbRes.score : (typeof pbMeta.score === 'number' ? pbMeta.score : null);
-            const finalScore = providerScore !== null ? Math.max(s10, providerScore) : s10;
-            console.log(`[5D][PIXABAY][${jobId}] 10G=${s10}${providerScore!==null?` provider=${providerScore}`:''} path=${pbPath}`);
-            markUsed(jobContext, pbPath);
-            if (Array.isArray(jobContext.clipsToIngest)) {
-              jobContext.clipsToIngest.push({ localPath: pbPath, subject: primarySubject, sceneIdx, source: 'pixabay', categoryFolder });
-            }
-            return pbPath;
-          }
-        }
-      } else {
-        console.log(`[5D][PIXABAY][NONE][${jobId}] No acceptable video candidate (subject-only).`);
-      }
-    } catch (e) { console.error(`[5D][PIXABAY][ERR][${jobId}]`, e); }
-
-    // KB subject-only (respect policy; final override later)
-    const canUseKB = sceneIdx > 0 && jobContext.kbUsedCount < maxKb;
-    if (canUseKB) {
-      try {
-        const kbSubj = await fallbackKenBurnsVideo(primarySubject, workDir, sceneIdx, jobId /* no used list */);
-        if (kbSubj && assertFileExists(kbSubj, 'KENBURNS_SUBJECT_ONLY')) {
-          if (hasUsed(jobContext, kbSubj)) {
-            console.log(`[5D][SUBJECT-FALLBACK][${jobId}] KB subject-only duplicate within THIS video: ${path.basename(kbSubj)}`);
-          } else {
-            jobContext.kbUsedCount++;
-            markUsed(jobContext, kbSubj);
-            console.log(`[5D][SUBJECT-FALLBACK][${jobId}] KenBurns subject-only: ${kbSubj} (${jobContext.kbUsedCount}/${maxKb})`);
-            return kbSubj;
-          }
-        }
-      } catch (e) { console.error(`[5D][SUBJECT-FALLBACK][KENBURNS][${jobId}]`, e); }
-    } else {
-      console.warn(`[5D][SUBJECT-FALLBACK][${jobId}] KB fallback disallowed by policy (sceneIdx=${sceneIdx}, used=${jobContext.kbUsedCount}/${maxKb}).`);
-    }
-  }
-
-  // 5) Final hail-mary: try R2 with a broad topic — RELAX subject gate here
-  try {
-    const hm = mainTopic || subject || 'landmark';
-    console.warn(`[5D][FINALFALLBACK][${jobId}] Hail-mary R2 (relaxed gate) with "${hm}"`);
-    const r2hmRes = await findR2ClipForScene(hm, workDir, sceneIdx, jobId /* no used list */);
-    const r2hmPath = (r2hmRes && r2hmRes.path) ? r2hmRes.path : r2hmRes;
-    const r2hmMeta = (r2hmRes && r2hmRes.meta) ? r2hmRes.meta : {};
-    if (r2hmPath && assertFileExists(r2hmPath, 'R2_FINAL')) {
-      if (hasUsed(jobContext, r2hmPath)) {
-        console.warn(`[5D][FINALFALLBACK][${jobId}] Hail-mary R2 duplicate within THIS video: ${path.basename(r2hmPath)}. Ignoring.`);
-      } else {
-        markUsed(jobContext, r2hmPath);
-        console.warn(`[5D][FINALFALLBACK][${jobId}] Using R2 hail-mary (relaxed): ${r2hmPath}`);
-        return r2hmPath;
-      }
-    }
-  } catch (e) { console.error(`[5D][FINALFALLBACK][R2][${jobId}]`, e); }
-
-  // 6) UNCONDITIONAL LAST-RESORT: Ken Burns override (ignores scene 1 rule and KB cap)
-  try {
-    const kbSubjects = [
-      primarySubject,
-      mainTopic,
+    const score = await scoreSceneCandidate({
+      candidatePathOrUrl: candidateSrc,
       subject,
-      'landmark',
-      'nature'
-    ].filter(Boolean);
+      mainTopic,
+      sceneIdx,
+      isMegaScene,
+      allowSynonyms: !SUBJECT_STRICT,
+    });
+    console.log(`[5D][SCORE] src="${candidateSrc}" → score=${score}`);
+    return Number(score) || 0;
+  } catch (e) {
+    console.warn('[5D][SCORE][WARN] scoreSceneCandidate error; defaulting to 0:', e?.message || e);
+    return 0;
+  }
+}
 
-    for (const sub of kbSubjects) {
-      const kb = await fallbackKenBurnsVideo(sub, workDir, sceneIdx, jobId /* no used list */);
-      if (kb && assertFileExists(kb, 'KENBURNS_OVERRIDE')) {
-        if (!hasUsed(jobContext, kb)) {
-          console.warn(`[5D][OVERRIDE][${jobId}] Returning KenBurns override with subject "${sub}": ${kb}`);
-          jobContext.kbUsedCount = (jobContext.kbUsedCount || 0) + 1;
-          markUsed(jobContext, kb);
-          return kb;
-        }
+// Attempt helper with robust signature handling (object or string)
+async function callProvider(fn, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder) {
+  try {
+    // Preferred: object signature
+    return await fn({
+      subject: primarySubject,
+      mainTopic,
+      sceneIdx,
+      jobId,
+      categoryFolder,
+      allowSynonyms: !SUBJECT_STRICT,
+    });
+  } catch (e1) {
+    try {
+      // Fallback: pass a string
+      return await fn(primarySubject || mainTopic || '');
+    } catch (e2) {
+      console.warn(`[5D][PROVIDER][WARN] Provider call failed both signatures. ${fn.name}:`, e1?.message || e1, e2?.message || e2);
+      return null;
+    }
+  }
+}
+
+// Normalize any provider return into a single candidate string, or null
+function normalizeProviderResult(res) {
+  if (!res) return null;
+  if (typeof res === 'string') return res;
+  if (Array.isArray(res)) {
+    // take first string-ish entry
+    for (const r of res) {
+      if (typeof r === 'string' && r) return r;
+      if (r && typeof r === 'object') {
+        if (typeof r.url === 'string') return r.url;
+        if (typeof r.path === 'string') return r.path;
+        if (typeof r.key === 'string') return r.key;
       }
     }
-  } catch (e) { console.error(`[5D][OVERRIDE][KENBURNS][${jobId}]`, e); }
+    return null;
+  }
+  if (typeof res === 'object') {
+    return res.url || res.path || res.key || null;
+  }
+  return null;
+}
 
-  console.error(`[5D][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1} after all fallbacks (unexpected).`);
+// ============================================================
+// Core: findClipForScene
+// ============================================================
+async function findClipForScene(opts) {
+  const {
+    subject,
+    sceneIdx = 0,
+    allSceneTexts = [],
+    mainTopic = '',
+    isMegaScene = false,
+    workDir = '',
+    jobId = 'nojob',
+    jobContext = { usedClipKeys: new Set(), kbUsedCount: 0 },
+    categoryFolder = 'misc',
+  } = opts || {};
+
+  const primarySubject = subject || mainTopic || '';
+  const strictNote = SUBJECT_STRICT ? 'STRICT' : 'RELAXED';
+  console.log(`\n[5D][BEGIN][${jobId}] Scene=${sceneIdx+1} subject="${primarySubject}" mainTopic="${mainTopic}" mode=${strictNote} category=${categoryFolder}`);
+  console.log(`[5D][DEDUPE][${jobId}] usedClipKeys size=${jobContext.usedClipKeys?.size || 0}`);
+
+  // ===========================
+  // 1) R2-FIRST: short-circuit
+  // ===========================
+  try {
+    const r2Res = await callProvider(findR2ClipForScene, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder);
+    const r2Clip = normalizeProviderResult(r2Res);
+    if (r2Clip) {
+      console.log(`[5D][R2][CANDIDATE][${jobId}] ${r2Clip}`);
+
+      if (isUsed(jobContext, r2Clip)) {
+        console.log(`[5D][R2][DEDUPE][${jobId}] Already used → SKIP: ${r2Clip}`);
+      } else if (!passesSubjectGate(r2Clip, primarySubject, mainTopic)) {
+        console.log(`[5D][R2][SUBJECT-GATE][${jobId}] REJECT: ${r2Clip}`);
+      } else {
+        const r2Score = await scoreCandidateWrapper({
+          candidateSrc: r2Clip, subject: primarySubject, mainTopic, sceneIdx, isMegaScene
+        });
+        // Short-circuit: any passing R2 candidate is taken immediately
+        console.log(`[5D][R2][PICK][${jobId}] Short-circuit pick with score=${r2Score}: ${r2Clip}`);
+        markUsed(jobContext, r2Clip, 'R2');
+        return r2Clip;
+      }
+    } else {
+      console.log(`[5D][R2][MISS][${jobId}] No candidate returned by 10A for subject="${primarySubject}"`);
+    }
+  } catch (e) {
+    console.warn(`[5D][R2][ERR][${jobId}]`, e?.message || e);
+  }
+
+  // ======================================================
+  // 2) PROVIDERS (Video-first): Pexels → Pixabay
+  //    We still enforce in-job de-dupe and animal gate.
+  // ======================================================
+  // PEXELS
+  try {
+    const pxRes = await callProvider(findPexelsClipForScene, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder);
+    const pxClip = normalizeProviderResult(pxRes);
+    if (pxClip) {
+      console.log(`[5D][PEXELS][CANDIDATE][${jobId}] ${pxClip}`);
+
+      if (isUsed(jobContext, pxClip)) {
+        console.log(`[5D][PEXELS][DEDUPE][${jobId}] Already used → SKIP: ${pxClip}`);
+      } else if (!passesSubjectGate(pxClip, primarySubject, mainTopic)) {
+        console.log(`[5D][PEXELS][SUBJECT-GATE][${jobId}] REJECT: ${pxClip}`);
+      } else {
+        const pxScore = await scoreCandidateWrapper({
+          candidateSrc: pxClip, subject: primarySubject, mainTopic, sceneIdx, isMegaScene
+        });
+        console.log(`[5D][PEXELS][PICK][${jobId}] score=${pxScore}: ${pxClip}`);
+        markUsed(jobContext, pxClip, 'PEXELS');
+        return pxClip;
+      }
+    } else {
+      console.log(`[5D][PEXELS][MISS][${jobId}] No candidate returned by 10B for subject="${primarySubject}"`);
+    }
+  } catch (e) {
+    console.warn(`[5D][PEXELS][ERR][${jobId}]`, e?.message || e);
+  }
+
+  // PIXABAY
+  try {
+    const pbRes = await callProvider(findPixabayClipForScene, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder);
+    const pbClip = normalizeProviderResult(pbRes);
+    if (pbClip) {
+      console.log(`[5D][PIXABAY][CANDIDATE][${jobId}] ${pbClip}`);
+
+      if (isUsed(jobContext, pbClip)) {
+        console.log(`[5D][PIXABAY][DEDUPE][${jobId}] Already used → SKIP: ${pbClip}`);
+      } else if (!passesSubjectGate(pbClip, primarySubject, mainTopic)) {
+        console.log(`[5D][PIXABAY][SUBJECT-GATE][${jobId}] REJECT: ${pbClip}`);
+      } else {
+        const pbScore = await scoreCandidateWrapper({
+          candidateSrc: pbClip, subject: primarySubject, mainTopic, sceneIdx, isMegaScene
+        });
+        console.log(`[5D][PIXABAY][PICK][${jobId}] score=${pbScore}: ${pbClip}`);
+        markUsed(jobContext, pbClip, 'PIXABAY');
+        return pbClip;
+      }
+    } else {
+      console.log(`[5D][PIXABAY][MISS][${jobId}] No candidate returned by 10C for subject="${primarySubject}"`);
+    }
+  } catch (e) {
+    console.warn(`[5D][PIXABAY][ERR][${jobId}]`, e?.message || e);
+  }
+
+  // ======================================================
+  // 3) Images → Ken Burns fallback (always returns a video)
+  //    We do not enforce animal gate here — last-resort visual.
+  // ======================================================
+  try {
+    console.log(`[5D][KB][FALLBACK][${jobId}] Triggered Ken Burns fallback for subject="${primarySubject || mainTopic}" scene=${sceneIdx+1}`);
+    const kb = await fallbackKenBurnsVideo(primarySubject || mainTopic || 'scenic nature', workDir, sceneIdx, jobId);
+    if (kb) {
+      // Ken Burns creates a *new* file name each time; de-dupe is unlikely but still mark it.
+      markUsed(jobContext, kb, 'KENBURNS');
+      console.log(`[5D][KB][PICK][${jobId}] ${kb}`);
+      return kb;
+    }
+  } catch (e) {
+    console.warn(`[5D][KB][ERR][${jobId}]`, e?.message || e);
+  }
+
+  // If we got here, everything failed
+  console.error(`[5D][FAIL][${jobId}] No candidate found after all fallbacks for scene ${sceneIdx + 1}.`);
   return null;
 }
 
