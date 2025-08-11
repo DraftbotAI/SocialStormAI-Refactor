@@ -4,7 +4,7 @@
 // Never loops forever. Max logs at each fallback step.
 // ===========================================================
 
-const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
+const { findR2ClipForScene, findTopNR2ClipsForSubject } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
 const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
 const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
@@ -135,62 +135,55 @@ async function findClipForScene({
     prioritizedSubjects = [searchSubject, mainTopic];
   }
 
+  // Ensure jobContext.r2Pools exists for R2-first pooling
+  if (!jobContext.r2Pools) jobContext.r2Pools = {};
+
   // Try all prioritized subjects, loose mode
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // === 1. Try R2, loose mode ===
-    async function findDedupedR2ClipLoose(searchPhrase, usedClipsArr) {
-      try {
-        const r2Files = await findR2ClipForScene.getAllFiles
-          ? await findR2ClipForScene.getAllFiles()
-          : [];
-        let found = null;
-        // a) Strict match first
-        for (const fname of r2Files) {
-          if (usedClipsArr.includes(fname)) continue;
-          if (strictSubjectMatch(fname, searchPhrase)) {
-            found = fname;
-            console.log(`[5D][R2][${jobId}] STRICT MATCH: "${fname}"`);
-            break;
-          }
-        }
-        // b) Loose match: any major word or substring
-        if (!found) {
-          for (const fname of r2Files) {
-            if (usedClipsArr.includes(fname)) continue;
-            if (looseSubjectMatch(fname, searchPhrase)) {
-              found = fname;
-              console.log(`[5D][R2][${jobId}] LOOSE MATCH: "${fname}"`);
-              break;
-            }
-          }
-        }
-        // c) Any unused file as last resort
-        if (!found && r2Files.length) {
-          for (const fname of r2Files) {
-            if (usedClipsArr.includes(fname)) continue;
-            found = fname;
-            console.log(`[5D][R2][${jobId}] FALLBACK: Picking random available: "${fname}"`);
-            break;
-          }
-        }
-        if (found && assertFileExists(found, 'R2_RESULT')) return found;
-        return null;
-      } catch (err) {
-        console.error(`[5D][R2][ERR][${jobId}] Error during R2 matching:`, err);
-        return null;
+    // === R2-FIRST using a subject-scoped pool (small change) ===
+    try {
+      const poolKey = normalize(subjectOption);
+      if (!jobContext.r2Pools[poolKey] || jobContext.r2Pools[poolKey].length === 0) {
+        console.log(`[5D][R2POOL][${jobId}] Pool empty for "${subjectOption}". Fetching top-N from R2...`);
+        const pool = await findTopNR2ClipsForSubject(subjectOption, workDir, {
+          N: 4,
+          usedClips,
+          jobId,
+          minScore: -999,
+          maxConcurrency: 3,
+        });
+        jobContext.r2Pools[poolKey] = Array.isArray(pool) ? pool.slice() : [];
+        console.log(`[5D][R2POOL][${jobId}] Pool populated for "${subjectOption}": ${jobContext.r2Pools[poolKey].length} items`);
       }
-    }
 
-    let r2Result = null;
-    if (findR2ClipForScene.getAllFiles) {
-      r2Result = await findDedupedR2ClipLoose(subjectOption, usedClips);
-      if (r2Result) {
-        console.log(`[5D][PICK][${jobId}] R2 subject match: ${r2Result}`);
-        return r2Result;
+      // Shift one good local path from the pool
+      while (jobContext.r2Pools[poolKey] && jobContext.r2Pools[poolKey].length) {
+        const next = jobContext.r2Pools[poolKey].shift(); // { key, path, score }
+        if (!next || !next.path) continue;
+
+        // Skip if already used (compare by path + basename)
+        const base = path.basename(next.path.toLowerCase());
+        const already = usedClips.some(u => {
+          const uLower = String(u || '').toLowerCase();
+          return uLower === next.path.toLowerCase() || path.basename(uLower) === base;
+        });
+        if (already) {
+          console.log(`[5D][R2POOL][${jobId}] Skipping already-used: ${next.path}`);
+          continue;
+        }
+
+        if (assertFileExists(next.path, 'R2_POOL_RESULT')) {
+          console.log(`[5D][PICK][${jobId}] R2 pool pick: ${next.path} (score=${next.score})`);
+          return next.path;
+        } else {
+          console.warn(`[5D][R2POOL][${jobId}] Pool item missing/invalid, continuing: ${next.path}`);
+        }
       }
-      console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
+      console.log(`[5D][R2POOL][${jobId}] No usable items in pool for "${subjectOption}". Proceeding to providers.`);
+    } catch (e) {
+      console.error(`[5D][R2POOL][ERR][${jobId}]`, e);
     }
 
     // --- Try Pexels, Pixabay, Unsplash with loose match ---
@@ -206,12 +199,12 @@ async function findClipForScene({
         if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, src.label + '_RESULT')) {
           // Loose match: accept if ANY major word from subject appears in filename/tags
           let valid = false;
-          if (result.meta && Array.isArray(result.meta.tags)) {
+          if (result && result.meta && Array.isArray(result.meta.tags)) {
             valid = result.meta.tags.some(tag => getMajorWords(subjectOption).some(word => tag.toLowerCase().includes(word)));
           } else if (typeof candidatePath === 'string') {
             valid = looseSubjectMatch(candidatePath, subjectOption);
           }
-          // **KEY IMPROVEMENT**: accept first available even if not a perfect tag match
+          // Existing behavior preserved: accept even if imperfect (prevents empty scenes)
           if (valid || true) {
             console.log(`[5D][PICK][${jobId}] ${src.label} subject match: ${candidatePath}`);
             if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
@@ -261,6 +254,7 @@ async function findClipForScene({
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
       for (const fname of r2Files) {
+        // Note: these are keys, not local files; keep behavior but validate only if present locally
         if (!usedClips.includes(fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
           console.warn(`[5D][FINALFALLBACK][${jobId}] ABSOLUTE fallback, picking any available R2: ${fname}`);
           return fname;
