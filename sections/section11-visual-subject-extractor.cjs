@@ -4,20 +4,20 @@
 //   Given a script line + the overall main topic, return the TOP 4
 //   VISUAL-ONLY subjects we should try to show for that scene.
 //
-// Hard rules:
-//   - Subjects must be LITERAL, FILMABLE visuals (no metaphors).
-//   - STRICT SPECIES/OBJECT: Do NOT swap lookalikes (e.g., manatee ≠ dolphin).
-//   - Prefer variations/angles of the SAME subject before drifting.
-//   - If a line is abstract, FALL BACK to the main topic variations.
+// Strategy (Stopword-first, AI fallback):
+//   1) Use section10n-stopword-subject-extractor to get a literal subject.
+//   2) Expand into concrete, filmable variants (angles/details).
+//   3) If we still can't form 4 strong items, optionally call GPT.
+//   4) Enforce strict species/object if configured.
+//   5) Deterministic cleanup + de-dup + padding.
 //
 // Output:
 //   Array<string> of length 4:
 //     [ primary, contextual, alternate, general_fallback ]
 //
 // Notes:
-//   - Deterministic cleanup + de-duplication.
-//   - API failure-safe: high-quality local fallback generator.
 //   - MAX LOGGING for full traceability.
+//   - Safe when OPENAI_API_KEY is absent.
 // ===========================================================
 
 'use strict';
@@ -25,24 +25,24 @@
 const path = require('path');
 const fs = require('fs');
 
-// Prefer ChatGPTAPI if present in env (project has used this)
+const { extractSubjectByStopwords, extractSubjectByStopwordsDetailed } =
+  require('./section10n-stopword-subject-extractor.cjs');
+
+// Prefer ChatGPTAPI if present in env (optional)
 let ChatGPTAPI = null;
 try {
   ChatGPTAPI = require('chatgpt').ChatGPTAPI;
-} catch (e) {
-  // Optional: will fall back to OpenAI SDK if available
-}
+} catch (_) { /* optional */ }
 
+// Optional OpenAI SDK (fallback)
 let OpenAI = null;
 try {
   OpenAI = require('openai');
-} catch (e) {
-  // optional
-}
+} catch (_) { /* optional */ }
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_API_TOKEN || '';
 if (!OPENAI_API_KEY) {
-  console.warn('[11][WARN] OPENAI_API_KEY not set. Will use LOCAL fallback only.');
+  console.warn('[11][WARN] OPENAI_API_KEY not set. AI fallback disabled (stopword-only mode).');
 }
 
 // ===== Config =====
@@ -70,7 +70,6 @@ function uniqueOrdered(list) {
 }
 
 function looksNonVisual(line) {
-  // crude heuristic for abstract lines
   const l = norm(line);
   const abstract = ['imagine', 'think', 'believe', 'history shows', 'legend', 'you know', 'they say', 'fact is'];
   return abstract.some(w => l.includes(w));
@@ -85,31 +84,28 @@ function canonicalizeTopic(mainTopicRaw) {
     bannedNear: [],
     typeHint: null, // 'animal', 'landmark', 'object', ...
   };
-  
+
   if (main.includes('manatee') || main === 'sea cow' || main.includes('sea cow')) {
     out.canonical = 'manatee';
     out.aliases = ['manatee', 'sea cow', 'west indian manatee', 'florida manatee', 'trichechus manatus'];
     out.bannedNear = [
-      // common false positives in marine stock
       'dolphin','porpoise','whale','orca','shark','stingray','ray','manta',
       'seal','sea lion','otter','turtle','jellyfish','octopus','squid',
     ];
     out.typeHint = 'animal';
     return out;
   }
-  
+
   // Add more special cases as needed (Eiffel Tower, Trevi Fountain, etc.)
-  // Generic default:
-  out.aliases = [main];
+  out.aliases = [main].filter(Boolean);
   out.typeHint = null;
   return out;
 }
 
-// ===== Local fallback generator (high quality) =====
+// ===== Local variation generator =====
 function localSubjectVariationsForTopic(topic) {
   const t = canonicalizeTopic(topic);
   const base = t.canonical || topic || 'subject';
-  // Provide camera/behavior variations; keep literal + filmable
   if (t.canonical === 'manatee') {
     return uniqueOrdered([
       'manatee swimming underwater (side profile)',
@@ -120,22 +116,55 @@ function localSubjectVariationsForTopic(topic) {
       'manatee tail and slow propulsion underwater',
     ]).slice(0, MAX_ITEMS);
   }
-  // Generic variations for unknown topics
   return uniqueOrdered([
     `${base} close-up`,
     `${base} wide shot`,
+    `${base} detail of texture or feature`,
     `${base} from a different angle`,
-    `${base} with minimal background`,
     `${base} in motion`,
   ]).slice(0, MAX_ITEMS);
 }
 
-// ===== Prompt builder =====
+// ===== Stopword-first expansion =====
+function buildFromStopwords(line, mainTopic) {
+  const detail = extractSubjectByStopwordsDetailed(line, mainTopic);
+  const primary = detail.primary && String(detail.primary).trim();
+  console.log('[11][STOPWORDS][CANDS]', detail.candidates);
+  console.log(`[11][STOPWORDS][PRIMARY] "${primary}" (conf=${detail.confidence?.toFixed?.(2) ?? 'n/a'} src=${detail.debug?.source || 'n/a'})`);
+
+  if (!primary) return [];
+
+  // Build concrete, filmable variants around the primary
+  const variations = uniqueOrdered([
+    primary,
+    `${primary} close-up`,
+    `${primary} wide shot`,
+    `${primary} detail (sculpture/texture/feature)`,
+    `${primary} from a different angle`,
+  ]);
+
+  // Add one alternate from candidates if it differs materially
+  const alt = (detail.candidates || []).find(c => normalizeForCompare(c) !== normalizeForCompare(primary));
+  if (alt) variations.push(alt);
+
+  // Pad with main topic variations if still short
+  while (variations.length < MAX_ITEMS && mainTopic) {
+    const pads = localSubjectVariationsForTopic(mainTopic);
+    for (const p of pads) {
+      if (variations.length >= MAX_ITEMS) break;
+      if (!variations.find(x => normalizeForCompare(x) === normalizeForCompare(p))) variations.push(p);
+    }
+    break;
+  }
+
+  return variations.slice(0, MAX_ITEMS);
+}
+
+// ===== Prompt builder (for AI fallback only) =====
 function buildPrompt(line, mainTopic) {
   const topic = canonicalizeTopic(mainTopic);
   const disallow = STRICT_SPECIES ? `NEVER substitute related species/objects (banned examples: ${topic.bannedNear.join(', ') || 'n/a'}).` : '';
-  
-  // We require that results CENTER the exact main topic (or its explicit aliases).
+
   const mustContain = STRICT_SPECIES
     ? `Every item must explicitly mention ${topic.aliases.join(' or ')}.`
     : `Prefer items that explicitly mention ${topic.aliases.join(' or ')}.`;
@@ -173,7 +202,7 @@ function buildPrompt(line, mainTopic) {
   return { prompt: final, topic };
 }
 
-// ===== Model callers =====
+// ===== Model callers (fallback) =====
 async function callChatGPTAPI(prompt) {
   if (!ChatGPTAPI || !OPENAI_API_KEY) return null;
   const api = new ChatGPTAPI({ apiKey: OPENAI_API_KEY });
@@ -242,7 +271,6 @@ function enforceStrictness(items, topic) {
     const ok = allowedTokens.some(tok => low.includes(tok));
     if (ok) keep.push(it);
   }
-  // If strict filtering removes all, fall back to local variations
   return keep.length ? keep : localSubjectVariationsForTopic(topic.canonical);
 }
 
@@ -257,8 +285,7 @@ function padToFour(items, topic) {
       }
     }
     if (out.length >= MAX_ITEMS) break;
-    // emergency fill with topic itself
-    out.push(topic.canonical);
+    out.push(topic.canonical || 'subject');
   }
   return out.slice(0, MAX_ITEMS);
 }
@@ -272,35 +299,37 @@ async function extractVisualSubjects(line, mainTopic) {
   const main = String(mainTopic || '').trim();
   console.log(`[11][INPUT] line="${lineStr}" mainTopic="${main}"`);
 
+  const topic = canonicalizeTopic(main);
   if (!lineStr) {
     console.warn('[11][WARN] Blank line. Returning local variations.');
     return localSubjectVariationsForTopic(main);
   }
 
-  const { prompt, topic } = buildPrompt(lineStr, main);
-  console.log('[11][PROMPT]\n' + prompt);
+  // 1) Stopword-first suggestion
+  let items = buildFromStopwords(lineStr, main);
+  items = uniqueOrdered(items);
 
-  // 1) Try chatgpt package
-  let raw = await callChatGPTAPI(prompt);
+  // Safety: if the line is abstract, bias toward main topic variations
+  if (looksNonVisual(lineStr)) {
+    const local = localSubjectVariationsForTopic(topic.canonical);
+    items = uniqueOrdered([...local.slice(0, 2), ...items]).slice(0, MAX_ITEMS);
+  }
 
-  // 2) Fallback to OpenAI SDK
-  if (!raw) raw = await callOpenAIChat(prompt);
+  // 2) If we still don’t have 4, try AI as fallback (only if API key present)
+  if (items.length < MAX_ITEMS && OPENAI_API_KEY) {
+    const { prompt } = buildPrompt(lineStr, main);
+    console.log('[11][PROMPT]\n' + prompt);
+    let raw = await callChatGPTAPI(prompt);
+    if (!raw) raw = await callOpenAIChat(prompt);
+    const aiItems = parseNumberedList(raw);
+    console.log('[11][PARSED_AI]', aiItems);
+    items = uniqueOrdered([...items, ...aiItems]);
+  }
 
-  // 3) Parse
-  let items = parseNumberedList(raw);
-  console.log('[11][PARSED]', items);
-
-  // 4) Strict filter + de-dup + pad
+  // 3) Strict filter + pad
   items = enforceStrictness(items, topic);
   items = uniqueOrdered(items);
   items = padToFour(items, topic);
-
-  // Special non-visual line safety net
-  if (looksNonVisual(lineStr)) {
-    const local = localSubjectVariationsForTopic(topic.canonical);
-    // Merge local first to ensure camera stays on topic
-    items = uniqueOrdered([...local.slice(0, 2), ...items]).slice(0, MAX_ITEMS);
-  }
 
   console.log('[11][RESULT]', items);
   return items;

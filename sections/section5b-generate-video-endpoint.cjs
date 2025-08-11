@@ -2,9 +2,12 @@
 // SECTION 5B: GENERATE VIDEO ENDPOINT (Job Controller)
 // The /api/generate-video route handler. Full job orchestration.
 // MAX LOGGING EVERYWHERE, User-friendly status messages!
-// PRO+: Audio and muxed video caching, parallelized scene jobs
-// 2025-08: R2-first pipeline safe; proper localization of clips;
-//          single usedClips per job; no accidental provider repeats.
+//
+// 2025-08 updates:
+//  - R2-first pipeline
+//  - Stopwords→AI scene subject flow (via Section 11)
+//  - De-dupe handled ONLY within current video (jobContext), not across jobs
+//  - Bulletproof scene normalization, caching, and quality checks
 // ============================================================
 
 const { v4: uuidv4 } = require('uuid');
@@ -18,7 +21,7 @@ const { s3Client, PutObjectCommand, GetObjectCommand } = require('./section1-set
 const {
   bulletproofScenes,
   splitScriptToScenes,
-  extractVisualSubject
+  extractVisualSubject, // (kept for compatibility)
 } = require('./section5c-script-scene-utils.cjs');
 
 const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
@@ -177,19 +180,20 @@ function getFallbackSubjects(fullSubject, mainTopic) {
 function registerGenerateVideoEndpoint(app, deps) {
   console.log('[5B][BOOT] Called registerGenerateVideoEndpoint...');
   if (!app) throw new Error('[5B][FATAL] No app passed in!');
-  if (!deps) throw new Error('[5B][FATAL] No dependencies passed in!');
+  if (!deps) throw new Error('[5B][FATAL] No dependencies passed in!]');
 
   const {
     splitScriptToScenes: depSplitScriptToScenes,
-    findClipForScene: depFindClipForScene,
+    findClipForScene: depFindClipForScene, // optional override
     createSceneAudio,
-    createMegaSceneAudio,
-    getAudioDuration, getVideoInfo, standardizeVideo,
+    createMegaSceneAudio, // unused but kept for compatibility
+    getAudioDuration,     // optional in deps
+    getVideoInfo, standardizeVideo,
     progress, voices, POLLY_VOICE_IDS,
   } = deps;
 
-  if (typeof createSceneAudio !== "function" || typeof createMegaSceneAudio !== "function")
-    throw new Error('[5B][FATAL] Audio generation helpers missing!');
+  if (typeof createSceneAudio !== "function")
+    throw new Error('[5B][FATAL] createSceneAudio helper missing!');
   if (typeof depSplitScriptToScenes !== "function")
     throw new Error('[5B][FATAL] splitScriptToScenes missing from deps!');
 
@@ -209,7 +213,7 @@ function registerGenerateVideoEndpoint(app, deps) {
     // --- MAIN VIDEO JOB HANDLER ---
     (async () => {
       const workDir = path.join(__dirname, '..', 'jobs', jobId);
-      const jobContext = { sceneClipMetaList: [] };
+      const jobContext = { sceneClipMetaList: [], kbUsedCount: 0, clipsToIngest: [] };
 
       try {
         fs.mkdirSync(workDir, { recursive: true });
@@ -236,9 +240,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           }
           return null;
         });
-        // === END BULLETPROOF NORMALIZATION ===
 
-        // LOG AFTER NORMALIZATION
         console.log(`[5B][SCENES][NORM][${jobId}]`, JSON.stringify(scenes, null, 2));
 
         scenes = scenes.filter(s =>
@@ -251,8 +253,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         const categoryFolder = getCategoryFolder(mainTopic);
         jobContext.categoryFolder = categoryFolder;
 
-        // 🔒 One usedClips array for the entire job (passed through 5D→10A)
-        const usedClips = [];
         const sceneFiles = [];
 
         // === HOOK SCENE ===
@@ -271,7 +271,6 @@ function registerGenerateVideoEndpoint(app, deps) {
             allSceneTexts,
             mainTopic,
             isMegaScene: false,
-            usedClips,
             workDir,
             jobId,
             jobContext,
@@ -282,7 +281,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
         if (!hookClipPath) {
           const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
-          hookClipPath = await fallbackKenBurnsVideo(scenes[0].visualSubject || hookText || mainTopic, workDir, 0, jobId, usedClips);
+          hookClipPath = await fallbackKenBurnsVideo(scenes[0].visualSubject || hookText || mainTopic, workDir, 0, jobId);
         }
         if (!hookClipPath) throw new Error(`[5B][HOOK][${jobId}] Failed to obtain hook clip`);
 
@@ -309,7 +308,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           source: hookClipPath.includes('pexels') ? 'pexels' : hookClipPath.includes('pixabay') ? 'pixabay' : 'r2',
           category: categoryFolder
         });
-        console.log(`[5B][USED][${jobId}] size=${usedClips.length} after hook`);
 
         // === MEGA SCENE (Scene 2) ===
         const scene2 = scenes[1];
@@ -329,7 +327,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           const extracted = await extractVisualSubjects(megaText, mainTopic);
           candidateSubjects = Array.isArray(extracted) ? extracted : [];
         } catch (e) {
-          console.warn(`[5B][MEGA][WARN] GPT subject extract failed, falling back:`, e);
+          console.warn(`[5B][MEGA][WARN] Subject extract failed, falling back:`, e);
         }
         if (!candidateSubjects.length) candidateSubjects = [megaText, mainTopic].filter(Boolean);
 
@@ -341,7 +339,6 @@ function registerGenerateVideoEndpoint(app, deps) {
             allSceneTexts,
             mainTopic,
             isMegaScene: true,
-            usedClips,
             workDir,
             jobId,
             megaSubject: subj,
@@ -354,7 +351,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
           const fallbacks = getFallbackSubjects(megaText, mainTopic);
           for (const subj of fallbacks) {
-            megaClipPath = await fallbackKenBurnsVideo(subj, workDir, 1, jobId, usedClips);
+            megaClipPath = await fallbackKenBurnsVideo(subj, workDir, 1, jobId);
             if (megaClipPath) break;
           }
         }
@@ -382,7 +379,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           source: megaClipPath.includes('pexels') ? 'pexels' : megaClipPath.includes('pixabay') ? 'pixabay' : 'r2',
           category: categoryFolder
         });
-        console.log(`[5B][USED][${jobId}] size=${usedClips.length} after mega`);
 
         // === Remaining Scenes ===
         for (let i = 2; i < scenes.length; i++) {
@@ -403,7 +399,6 @@ function registerGenerateVideoEndpoint(app, deps) {
               allSceneTexts,
               mainTopic,
               isMegaScene: false,
-              usedClips,
               workDir,
               jobId,
               jobContext,
@@ -450,7 +445,6 @@ function registerGenerateVideoEndpoint(app, deps) {
           });
 
           sceneFiles[sceneIdx] = videoCachePath;
-          console.log(`[5B][USED][${jobId}] size=${usedClips.length} after scene ${sceneIdx + 1}`);
         }
 
         // === Standardize & Concat ===
@@ -576,7 +570,6 @@ async function uploadToR2(finalPath, r2FinalName, jobId) {
     Body: fileData,
     ContentType: 'video/mp4'
   }));
-  // Always return the custom public domain if available!
   const urlBase = process.env.R2_PUBLIC_CUSTOM_DOMAIN || 'https://videos.socialstormai.com';
   const url = `${urlBase.replace(/\/$/, '')}/${key}`;
   console.log(`[5B][R2][UPLOAD][OK] Final uploaded: ${url}`);
