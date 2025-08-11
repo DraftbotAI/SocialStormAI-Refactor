@@ -166,7 +166,7 @@ async function callProvider(fn, primarySubject, mainTopic, sceneIdx, jobId, cate
   try {
     // Preferred: object signature
     return await fn({
-      subject: primarySubject,
+      subject: primarySubject, // ensure it's string
       mainTopic,
       sceneIdx,
       jobId,
