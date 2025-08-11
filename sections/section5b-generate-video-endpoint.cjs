@@ -195,7 +195,7 @@ function registerGenerateVideoEndpoint(app, deps) {
     splitScriptToScenes: depSplitScriptToScenes,
     findClipForScene: depFindClipForScene, // optional override
     createSceneAudio,
-    createMegaSceneAudio, // unused but kept for compatibility
+    createMegaSceneAudio, // unused but kept for compat
     getAudioDuration,     // optional in deps
     getVideoInfo, standardizeVideo,
     progress, voices, POLLY_VOICE_IDS,
@@ -206,6 +206,7 @@ function registerGenerateVideoEndpoint(app, deps) {
   if (typeof getVideoInfo !== "function" || typeof standardizeVideo !== "function")
     throw new Error('[5B][FATAL] Video helpers missing from Section 5F/5G!');
   if (!progress) throw new Error('[5B][FATAL] No progress tracker (deps.progress)!');
+    const cleanupJob = deps.cleanupJob;
   const split = typeof depSplitScriptToScenes === 'function' ? depSplitScriptToScenes : splitScriptToScenes;
   const findClip = typeof depFindClipForScene === 'function' ? depFindClipForScene : findClipForScene;
 
