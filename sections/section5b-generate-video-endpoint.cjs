@@ -444,7 +444,7 @@ async function generateVideoHandler(req, res) {
     const stitchedFixed = await ensureAudioStream(stitchedPath, workDir, jobId);
 
     // === Optional music (post-stitch) ===
-    const mood = pickMusicForMood(scenes.map(s => s.texts?.join(' ') || '').join(' '));
+    const mood = await pickMusicForMood(scenes.map(s => s.texts?.join(' ') || '').join(' ')); // <-- FIX: await
     const withMusic = await overlayMusic(stitchedFixed, mood, workDir, jobId);
 
     // === Optional outro ===
