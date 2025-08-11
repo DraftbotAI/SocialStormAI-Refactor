@@ -10,6 +10,8 @@
 //  - Bulletproof scene normalization, caching, and quality checks
 // ============================================================
 
+'use strict';
+
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
@@ -18,7 +20,12 @@ const https = require('https');
 const ffmpegPath = require('ffmpeg-static');
 const { execFile } = require('child_process');
 
-const { s3Client, PutObjectCommand, GetObjectCommand } = require('./section1-setup.cjs');
+const {
+  s3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  progress, // progress tracker exported from Section 1
+} = require('./section1-setup.cjs');
 
 const {
   bulletproofScenes,
@@ -61,7 +68,7 @@ async function getDurationSafe(filePath) {
     if (typeof d === 'number' && isFinite(d) && d > 0) return d;
     throw new Error('getDuration returned invalid: ' + d);
   } catch (err) {
-    console.warn('[5B][DUR][FALLBACK] getDuration failed, using ffmpeg parse:', err && err.message || err);
+    console.warn('[5B][DUR][FALLBACK] getDuration failed, using ffmpeg parse:', (err && err.message) || err);
     return await probeDurationViaFfmpeg(filePath);
   }
 }
@@ -70,14 +77,16 @@ function parseDurationFromStderr(stderr) {
   // Example: Duration: 00:00:05.04, start: 0.000000, bitrate: ...
   const m = String(stderr || '').match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
   if (!m) return 0;
-  const h = parseInt(m[1],10)||0, mnt = parseInt(m[2],10)||0, s = parseFloat(m[3])||0;
-  return h*3600 + mnt*60 + s;
+  const h = parseInt(m[1], 10) || 0;
+  const mnt = parseInt(m[2], 10) || 0;
+  const s = parseFloat(m[3]) || 0;
+  return h * 3600 + mnt * 60 + s;
 }
 
 async function probeDurationViaFfmpeg(filePath) {
   return await new Promise((resolve) => {
     const args = ['-i', filePath];
-    execFile(ffmpegPath, args, { windowsHide: true }, (error, stdout, stderr) => {
+    execFile(ffmpegPath, args, { windowsHide: true }, (_error, stdout, stderr) => {
       const dur = parseDurationFromStderr(stderr || stdout);
       if (!dur || !isFinite(dur)) {
         console.error('[5B][DUR][FALLBACK][ERR] Unable to parse duration for', filePath);
@@ -177,7 +186,7 @@ async function generateVideoHandler(req, res) {
         jobId,
         jobContext: {},
         categoryFolder
-      })
+      });
     } catch (e) {
       console.error(`[5B][CLIP][ERR][${jobId}] findClipForScene failed for HOOK:`, e);
     }
@@ -265,7 +274,7 @@ async function generateVideoHandler(req, res) {
       const sceneIdx = i;
 
       let sceneSubject = scene.visualSubject || (Array.isArray(scene.texts) && scene.texts[0]) || allSceneTexts[sceneIdx];
-      const GENERIC_SUBJECTS = ['face','person','man','woman','it','thing','someone','something','body','eyes'];
+      const GENERIC_SUBJECTS = ['face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes'];
       if (GENERIC_SUBJECTS.includes((sceneSubject || '').toLowerCase())) {
         sceneSubject = mainTopic;
       }
@@ -288,39 +297,41 @@ async function generateVideoHandler(req, res) {
       }
       if (!clipPath) {
         console.error(`[5B][ERR][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1}. Failing this job.`);
-        progress[jobId] = { percent: 100, status: `No clip found for scene ${sceneIdx + 1}. Try a clearer topic.` };
+        if (progress) {
+          progress[jobId] = { percent: 100, status: `No clip found for scene ${sceneIdx + 1}. Try a clearer topic.` };
+        }
         return res.status(500).json({ ok: false, error: `No clip found for scene ${sceneIdx + 1}` });
       }
 
       const localClipPath = isHttpUrl(clipPath)
-        ? path.join(workDir, `scene${sceneIdx+1}-source.mp4`)
+        ? path.join(workDir, `scene${sceneIdx + 1}-source.mp4`)
         : clipPath;
 
       if (isHttpUrl(clipPath)) {
         await downloadHttpToFile(clipPath, localClipPath, jobId);
       }
-      if (!assertFileExists(localClipPath, `SCENE${sceneIdx+1}_LOCAL`)) {
-        throw new Error(`Scene ${sceneIdx+1} clip localization failed`);
+      if (!assertFileExists(localClipPath, `SCENE${sceneIdx + 1}_LOCAL`)) {
+        throw new Error(`Scene ${sceneIdx + 1} clip localization failed`);
       }
 
-      const audioCachePath = path.join(audioCacheDir, `${hashForCache((scene.texts?.[0]||'') + voice)}-scene${sceneIdx+1}.mp3`);
+      const audioCachePath = path.join(audioCacheDir, `${hashForCache((scene.texts?.[0] || '') + voice)}-scene${sceneIdx + 1}.mp3`);
       if (!fs.existsSync(audioCachePath)) {
-        console.log(`[5B][AUDIO][SCENE${sceneIdx+1}][${jobId}] Generating narration...`);
+        console.log(`[5B][AUDIO][SCENE${sceneIdx + 1}][${jobId}] Generating narration...`);
         // (audio gen occurs elsewhere; omitted here)
       }
-      if (!assertFileExists(audioCachePath, `AUDIO_SCENE_${sceneIdx+1}`)) throw new Error('Scene audio generation failed');
+      if (!assertFileExists(audioCachePath, `AUDIO_SCENE_${sceneIdx + 1}`)) throw new Error('Scene audio generation failed');
 
       const narrationDuration = await getDurationSafe(audioCachePath);
-      const trimmedVideoPath = path.join(workDir, `scene${sceneIdx+1}-trimmed.mp4`);
+      const trimmedVideoPath = path.join(workDir, `scene${sceneIdx + 1}-trimmed.mp4`);
       await trimForNarration(localClipPath, trimmedVideoPath, narrationDuration);
-      if (!assertFileExists(trimmedVideoPath, `SCENE${sceneIdx+1}_TRIMMED`, 4096)) {
-        throw new Error(`Scene ${sceneIdx+1} trim failed`);
+      if (!assertFileExists(trimmedVideoPath, `SCENE${sceneIdx + 1}_TRIMMED`, 4096)) {
+        throw new Error(`Scene ${sceneIdx + 1} trim failed`);
       }
 
-      const muxedPath = path.join(workDir, `scene${sceneIdx+1}-muxed.mp4`);
+      const muxedPath = path.join(workDir, `scene${sceneIdx + 1}-muxed.mp4`);
       await muxVideoWithNarration(trimmedVideoPath, audioCachePath, muxedPath);
-      if (!assertFileExists(muxedPath, `SCENE${sceneIdx+1}_MUXED`, 4096)) {
-        throw new Error(`Scene ${sceneIdx+1} mux failed`);
+      if (!assertFileExists(muxedPath, `SCENE${sceneIdx + 1}_MUXED`, 4096)) {
+        throw new Error(`Scene ${sceneIdx + 1} mux failed`);
       }
       stagedClips.push(muxedPath);
     }
@@ -357,11 +368,38 @@ async function generateVideoHandler(req, res) {
 
   } catch (err) {
     console.error(`[5B][FATAL][JOB][${jobId}]`, err);
-    return res.status(500).json({ ok: false, error: String(err && err.message || err) });
+    try {
+      return res.status(500).json({ ok: false, error: String((err && err.message) || err) });
+    } catch (_) {}
   } finally {
     try { await cleanupJob(jobId); } catch (e) { console.warn('[5B][CLEANUP][WARN]', e); }
     console.log(`\n========== [5B][JOB][END] ${jobId} ==========\n`);
   }
 }
 
-module.exports = { generateVideoHandler };
+// ===== Register function expected by server.cjs =====
+function registerGenerateVideoEndpoint(app) {
+  console.log('========== [SECTION5B][START] Registering /api/generate-video ==========');
+  if (!app || typeof app.post !== 'function') {
+    console.error('[SECTION5B][ERR] Express app not provided to registerGenerateVideoEndpoint.');
+    throw new Error('registerGenerateVideoEndpoint requires a valid Express app');
+  }
+  // Wrap to ensure unhandled rejections are logged
+  app.post('/api/generate-video', (req, res) => {
+    Promise
+      .resolve(generateVideoHandler(req, res))
+      .catch(err => {
+        console.error('[SECTION5B][UNCAUGHT][/api/generate-video]', err);
+        try { res.status(500).json({ ok: false, error: String((err && err.message) || err) }); }
+        catch (_) {}
+      });
+  });
+  console.log('[SECTION5B][SUCCESS] /api/generate-video endpoint registered.');
+}
+
+// ------- Exports (support BOTH import styles) -------
+// Default export = function (so `require(...)` is callable)
+module.exports = registerGenerateVideoEndpoint;
+// Also expose named exports for destructuring
+module.exports.registerGenerateVideoEndpoint = registerGenerateVideoEndpoint;
+module.exports.generateVideoHandler = generateVideoHandler;

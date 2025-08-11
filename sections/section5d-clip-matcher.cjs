@@ -1,12 +1,14 @@
 // ============================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (R2-first, De-dupe, Strict Species Gate)
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (R2-first, Per-Job De-dupe, Strict Species Gate)
 // Always returns the best available visual: R2 video → Pexels video → Pixabay video → Ken Burns fallback.
-// Within-job de-dupe enforced via jobContext.usedClipKeys (Set). No cross-job dedupe.
+// Within-job de-dupe is enforced via an internal usedByJob map keyed by jobId (no cross-job dedupe).
 // R2-first short-circuit: if R2 yields a non-duplicate that passes the subject gate, we pick it immediately.
 // Strict species gate for animals (exact only) unless SS_SUBJECT_STRICT=0, which allows synonyms via 10G scoring.
 // MAX LOGGING. No recursion. No infinite loops.
 // Exports: findClipForScene(opts)
 // ============================================================
+
+'use strict';
 
 const path = require('path');
 const fs = require('fs');
@@ -25,6 +27,35 @@ const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs')
 // ENV / MODE FLAGS
 // =============================
 const SUBJECT_STRICT = String(process.env.SS_SUBJECT_STRICT || '1') !== '0'; // default strict
+
+// =============================
+// Per-job de-dupe storage
+// =============================
+// We keep a per-job Set of normalized clip keys. This guarantees no dupes per generated video.
+// We also cap memory by pruning oldest jobs when the map grows beyond a threshold.
+const usedByJob = new Map(); // jobId -> { set: Set<string>, t: number }
+
+function getUsedSet(jobId) {
+  const id = String(jobId || 'nojob');
+  let entry = usedByJob.get(id);
+  if (!entry) {
+    entry = { set: new Set(), t: Date.now() };
+    usedByJob.set(id, entry);
+    // Light pruning to prevent growth in long-lived processes
+    if (usedByJob.size > 50) {
+      let oldestKey = null;
+      let oldestTs = Infinity;
+      for (const [k, v] of usedByJob.entries()) {
+        if (v.t < oldestTs) { oldestTs = v.t; oldestKey = k; }
+      }
+      if (oldestKey) {
+        console.log('[5D][DEDUPE][GC] Pruning oldest job:', oldestKey);
+        usedByJob.delete(oldestKey);
+      }
+    }
+  }
+  return entry.set;
+}
 
 // =============================
 // Small utilities
@@ -67,18 +98,18 @@ function normalizeClipKey(src) {
   return variants;
 }
 
-function markUsed(jobContext, src, tag = '') {
+function markUsed(jobId, src, tag = '') {
+  const usedSet = getUsedSet(jobId);
   const variants = normalizeClipKey(src);
-  for (const v of variants) jobContext.usedClipKeys.add(v);
-  console.log(`[5D][DEDUPE][ADD] ${tag} added ${variants.size} keys for: ${src}`);
+  for (const v of variants) usedSet.add(v);
+  console.log(`[5D][DEDUPE][ADD][${jobId}] ${tag} added ${variants.size} keys for: ${src} | total=${usedSet.size}`);
 }
 
-function isUsed(jobContext, src) {
+function isUsed(jobId, src) {
+  const usedSet = getUsedSet(jobId);
   const variants = normalizeClipKey(src);
   for (const v of variants) {
-    if (jobContext.usedClipKeys.has(v)) {
-      return true;
-    }
+    if (usedSet.has(v)) return true;
   }
   return false;
 }
@@ -161,26 +192,39 @@ async function scoreCandidateWrapper({ candidateSrc, subject, mainTopic, sceneId
   }
 }
 
-// Attempt helper with robust signature handling (object or string)
-async function callProvider(fn, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder) {
+// Provider caller with signature auto-detect
+async function callProvider(fn, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder, workDir) {
+  const ctx = {
+    subject: String(primarySubject || ''),
+    mainTopic,
+    sceneIdx,
+    jobId,
+    categoryFolder,
+    allowSynonyms: !SUBJECT_STRICT,
+    workDir,
+  };
+
   try {
-    // Preferred: object signature
-    return await fn({
-      subject: String(primarySubject),
-      mainTopic,
-      sceneIdx,
-      jobId,
-      categoryFolder,
-      allowSynonyms: !SUBJECT_STRICT,
-    });
-  } catch (e1) {
-    try {
-      // Fallback: pass a string
-      return await fn(primarySubject || mainTopic || '');
-    } catch (e2) {
-      console.warn(`[5D][PROVIDER][WARN] Provider call failed both signatures. ${fn.name}:`, e1?.message || e1, e2?.message || e2);
-      return null;
+    // Case 1: object-style signature (e.g., 10A R2 helper expects ctx)
+    if (fn.length <= 1) {
+      return await fn(ctx);
     }
+    // Case 2: positional-style for 10B/10C: (subject, workDir, sceneIdx, jobId)
+    if (fn.length >= 4) {
+      return await fn(ctx.subject, workDir, sceneIdx, jobId);
+    }
+    // Case 3: fallback variants
+    if (fn.length === 3) {
+      return await fn(ctx.subject, sceneIdx, jobId);
+    }
+    if (fn.length === 2) {
+      return await fn(ctx.subject, sceneIdx);
+    }
+    // Last resort: string only
+    return await fn(ctx.subject);
+  } catch (e) {
+    console.warn(`[5D][PROVIDER][WARN] Provider call failed. ${fn.name}:`, e?.message || e);
+    return null;
   }
 }
 
@@ -189,7 +233,6 @@ function normalizeProviderResult(res) {
   if (!res) return null;
   if (typeof res === 'string') return res;
   if (Array.isArray(res)) {
-    // take first string-ish entry
     for (const r of res) {
       if (typeof r === 'string' && r) return r;
       if (r && typeof r === 'object') {
@@ -218,25 +261,29 @@ async function findClipForScene(opts) {
     isMegaScene = false,
     workDir = '',
     jobId = 'nojob',
-    jobContext = { usedClipKeys: new Set(), kbUsedCount: 0 },
+    // jobContext kept for backward-compatibility but NOT required anymore
+    jobContext = undefined,
     categoryFolder = 'misc',
   } = opts || {};
 
+  // Ensure per-job dedupe set exists
+  const usedSet = getUsedSet(jobId);
+
   const primarySubject = subject || mainTopic || '';
   const strictNote = SUBJECT_STRICT ? 'STRICT' : 'RELAXED';
-  console.log(`\n[5D][BEGIN][${jobId}] Scene=${sceneIdx+1} subject="${primarySubject}" mainTopic="${mainTopic}" mode=${strictNote} category=${categoryFolder}`);
-  console.log(`[5D][DEDUPE][${jobId}] usedClipKeys size=${jobContext.usedClipKeys?.size || 0}`);
+  console.log(`\n[5D][BEGIN][${jobId}] Scene=${sceneIdx + 1} subject="${primarySubject}" mainTopic="${mainTopic}" mode=${strictNote} category=${categoryFolder}`);
+  console.log(`[5D][DEDUPE][${jobId}] usedSet size=${usedSet.size}`);
 
   // ===========================
   // 1) R2-FIRST: short-circuit
   // ===========================
   try {
-    const r2Res = await callProvider(findR2ClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder);
+    const r2Res = await callProvider(findR2ClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, workDir);
     const r2Clip = normalizeProviderResult(r2Res);
     if (r2Clip) {
       console.log(`[5D][R2][CANDIDATE][${jobId}] ${r2Clip}`);
 
-      if (isUsed(jobContext, r2Clip)) {
+      if (isUsed(jobId, r2Clip)) {
         console.log(`[5D][R2][DEDUPE][${jobId}] Already used → SKIP: ${r2Clip}`);
       } else if (!passesSubjectGate(r2Clip, primarySubject, mainTopic)) {
         console.log(`[5D][R2][SUBJECT-GATE][${jobId}] REJECT: ${r2Clip}`);
@@ -246,7 +293,7 @@ async function findClipForScene(opts) {
         });
         // Short-circuit: any passing R2 candidate is taken immediately
         console.log(`[5D][R2][PICK][${jobId}] Short-circuit pick with score=${r2Score}: ${r2Clip}`);
-        markUsed(jobContext, r2Clip, 'R2');
+        markUsed(jobId, r2Clip, 'R2');
         return r2Clip;
       }
     } else {
@@ -262,12 +309,12 @@ async function findClipForScene(opts) {
   // ======================================================
   // PEXELS
   try {
-    const pxRes = await callProvider(findPexelsClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder);
+    const pxRes = await callProvider(findPexelsClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, workDir);
     const pxClip = normalizeProviderResult(pxRes);
     if (pxClip) {
       console.log(`[5D][PEXELS][CANDIDATE][${jobId}] ${pxClip}`);
 
-      if (isUsed(jobContext, pxClip)) {
+      if (isUsed(jobId, pxClip)) {
         console.log(`[5D][PEXELS][DEDUPE][${jobId}] Already used → SKIP: ${pxClip}`);
       } else if (!passesSubjectGate(pxClip, primarySubject, mainTopic)) {
         console.log(`[5D][PEXELS][SUBJECT-GATE][${jobId}] REJECT: ${pxClip}`);
@@ -276,7 +323,7 @@ async function findClipForScene(opts) {
           candidateSrc: pxClip, subject: primarySubject, mainTopic, sceneIdx, isMegaScene
         });
         console.log(`[5D][PEXELS][PICK][${jobId}] score=${pxScore}: ${pxClip}`);
-        markUsed(jobContext, pxClip, 'PEXELS');
+        markUsed(jobId, pxClip, 'PEXELS');
         return pxClip;
       }
     } else {
@@ -288,12 +335,12 @@ async function findClipForScene(opts) {
 
   // PIXABAY
   try {
-    const pbRes = await callProvider(findPixabayClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder);
+    const pbRes = await callProvider(findPixabayClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, workDir);
     const pbClip = normalizeProviderResult(pbRes);
     if (pbClip) {
       console.log(`[5D][PIXABAY][CANDIDATE][${jobId}] ${pbClip}`);
 
-      if (isUsed(jobContext, pbClip)) {
+      if (isUsed(jobId, pbClip)) {
         console.log(`[5D][PIXABAY][DEDUPE][${jobId}] Already used → SKIP: ${pbClip}`);
       } else if (!passesSubjectGate(pbClip, primarySubject, mainTopic)) {
         console.log(`[5D][PIXABAY][SUBJECT-GATE][${jobId}] REJECT: ${pbClip}`);
@@ -302,7 +349,7 @@ async function findClipForScene(opts) {
           candidateSrc: pbClip, subject: primarySubject, mainTopic, sceneIdx, isMegaScene
         });
         console.log(`[5D][PIXABAY][PICK][${jobId}] score=${pbScore}: ${pbClip}`);
-        markUsed(jobContext, pbClip, 'PIXABAY');
+        markUsed(jobId, pbClip, 'PIXABAY');
         return pbClip;
       }
     } else {
@@ -317,11 +364,11 @@ async function findClipForScene(opts) {
   //    We do not enforce animal gate here — last-resort visual.
   // ======================================================
   try {
-    console.log(`[5D][KB][FALLBACK][${jobId}] Triggered Ken Burns fallback for subject="${primarySubject || mainTopic}" scene=${sceneIdx+1}`);
+    console.log(`[5D][KB][FALLBACK][${jobId}] Triggered Ken Burns fallback for subject="${primarySubject || mainTopic}" scene=${sceneIdx + 1}`);
     const kb = await fallbackKenBurnsVideo(String(primarySubject || mainTopic || 'scenic nature'), workDir, sceneIdx, jobId);
     if (kb) {
       // Ken Burns creates a *new* file name each time; de-dupe is unlikely but still mark it.
-      markUsed(jobContext, kb, 'KENBURNS');
+      markUsed(jobId, kb, 'KENBURNS');
       console.log(`[5D][KB][PICK][${jobId}] ${kb}`);
       return kb;
     }
