@@ -14,6 +14,7 @@ const sharp = require('sharp');
 
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 const PIXABAY_API_KEY = process.env.PIXABAY_API_KEY;
+const UNSPLASH_ACCESS_KEY = process.env.UNSPLASH_ACCESS_KEY;
 
 console.log('[10D][INIT] Ken Burns image video helper loaded.');
 
@@ -40,7 +41,6 @@ function isValidFile(fp, jobId) {
 function cleanQuery(str) {
   if (!str) return '';
   return str.replace(/[^\w\s]/gi, '').replace(/\s+/g, ' ').trim();
-  if (typeof str !== 'string') throw new Error(`[10D][KENBURNS][FATAL] cleanQuery requires string: ${typeof str}`);
 }
 function getKeywords(str) {
   return String(str).toLowerCase().replace(/[^a-z0-9\s-]/g, '').split(/[\s\-]+/).filter(w => w.length > 2);
@@ -54,7 +54,7 @@ function strictSubjectPresent(fields, subject) {
 }
 
 // --- SCORING: Scores images for fallback Ken Burns ---
-function scoreImage(candidate, subject, extra = {}) {
+function scoreImage(candidate, subject, usedClips = [], extra = {}) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
@@ -99,6 +99,7 @@ function scoreImage(candidate, subject, extra = {}) {
   if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8;
 
   // Penalize used/dup
+  if (usedClips && candidate.url && usedClips.some(u => u.includes(candidate.url) || candidate.url.includes(u))) score -= 60;
   // Bonus for Unsplash editorial/high download count (if present)
   if (candidate.downloads && candidate.downloads > 10000) score += 4;
   // Bonus for newer image
@@ -360,6 +361,11 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
     // --- Try all sources and score them ---
     let candidates = [];
 
+    // Unsplash
+    if (UNSPLASH_ACCESS_KEY) {
+      const url = await findImageInUnsplash(subject, usedClips);
+      if (url) candidates.push({ url, api: 'unsplash', score: 100 });
+    }
     // Pexels
     if (PEXELS_API_KEY) {
       const url = await findImageInPexels(subject, usedClips);
@@ -422,7 +428,9 @@ async function fallbackKenBurnsVideo(subject, workDir, sceneIdx, jobId, usedClip
 
 module.exports = {
   fallbackKenBurnsVideo,
+  findImageInPexels,
   findImageInPixabay,
+  findImageInUnsplash,
   downloadRemoteFileToLocal,
   makeKenBurnsVideoFromImage,
   staticImageToVideo,

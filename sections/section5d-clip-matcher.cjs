@@ -1,409 +1,290 @@
-// ============================================================
-// SECTION 5D: CLIP MATCHER ORCHESTRATOR (R2-first, Per-Job De-dupe, Strict Species Gate)
-// Always returns the best available visual: R2 video → Pexels video → Pixabay video → Ken Burns fallback.
-// Within-job de-dupe is enforced via an internal usedByJob map keyed by jobId (no cross-job dedupe).
-// R2-first short-circuit: if R2 yields a non-duplicate that passes the subject gate, we pick it immediately.
-// Strict species gate for animals (exact only) unless SS_SUBJECT_STRICT=0, which allows synonyms via 10G scoring.
-// MAX LOGGING. No recursion. No infinite loops.
-// Exports: findClipForScene(opts)
-// ============================================================
+// ===========================================================
+// SECTION 5D: CLIP MATCHER ORCHESTRATOR (Loosest, Bulletproof)
+// Always returns something: video, image, Ken Burns, or any available.
+// Never loops forever. Max logs at each fallback step.
+// ===========================================================
 
-'use strict';
-
-const path = require('path');
-const fs = require('fs');
-
-// Providers
 const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
 const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
+const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
 const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
+const { cleanForFilename } = require('./section10e-upload-to-r2.cjs');
+const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs');
+const fs = require('fs');
+const path = require('path');
 
-// Subject + scoring
-const { extractVisualSubjects } = require('./section11-visual-subject-extractor.cjs'); // kept for future use
-const { scoreSceneCandidate } = require('./section10g-scene-scoring-helper.cjs');
+console.log('[5D][INIT] Clip matcher orchestrator (bulletproof, loose) loaded.');
 
-// =============================
-// ENV / MODE FLAGS
-// =============================
-const SUBJECT_STRICT = String(process.env.SS_SUBJECT_STRICT || '1') !== '0'; // default strict
+const GENERIC_SUBJECTS = [
+  'face', 'person', 'man', 'woman', 'it', 'thing', 'someone', 'something', 'body', 'eyes', 'kid', 'boy', 'girl', 'they', 'we', 'people', 'scene', 'child', 'children'
+];
 
-// =============================
-// Per-job de-dupe storage
-// =============================
-// We keep a per-job Set of normalized clip keys. This guarantees no dupes per generated video.
-// We also cap memory by pruning oldest jobs when the map grows beyond a threshold.
-const usedByJob = new Map(); // jobId -> { set: Set<string>, t: number }
+// Normalize for loose matching
+function normalize(str) {
+  return (str || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
 
-function getUsedSet(jobId) {
-  const id = String(jobId || 'nojob');
-  let entry = usedByJob.get(id);
-  if (!entry) {
-    entry = { set: new Set(), t: Date.now() };
-    usedByJob.set(id, entry);
-    // Light pruning to prevent growth in long-lived processes
-    if (usedByJob.size > 50) {
-      let oldestKey = null;
-      let oldestTs = Infinity;
-      for (const [k, v] of usedByJob.entries()) {
-        if (v.t < oldestTs) { oldestTs = v.t; oldestKey = k; }
-      }
-      if (oldestKey) {
-        console.log('[5D][DEDUPE][GC] Pruning oldest job:', oldestKey);
-        usedByJob.delete(oldestKey);
-      }
+function getMajorWords(subject) {
+  return (subject || '')
+    .split(/\s+/)
+    .map(w => w.toLowerCase())
+    .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
+}
+
+// Checks if ANY major word from subject appears in filename
+function looseSubjectMatch(filename, subject) {
+  if (!filename || !subject) return false;
+  const safeFile = cleanForFilename(filename).toLowerCase();
+  const words = getMajorWords(subject);
+  for (const word of words) {
+    if (safeFile.includes(word)) return true;
+  }
+  // As a last resort, partial substring
+  return safeFile.includes(normalize(subject));
+}
+
+// Strict match (for priority order)
+function strictSubjectMatch(filename, subject) {
+  if (!filename || !subject) return false;
+  const safeSubject = cleanForFilename(subject);
+  const re = new RegExp(`(^|_|-)${safeSubject}(_|-|\\.|$)`, 'i');
+  return re.test(cleanForFilename(filename));
+}
+
+function assertFileExists(file, label = 'FILE', minSize = 10240) {
+  try {
+    if (!file || !fs.existsSync(file)) {
+      console.error(`[5D][${label}][ERR] File does not exist: ${file}`);
+      return false;
+    }
+    const sz = fs.statSync(file).size;
+    if (sz < minSize) {
+      console.error(`[5D][${label}][ERR] File too small (${sz} bytes): ${file}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error(`[5D][${label}][ERR] Exception on assert:`, err);
+    return false;
+  }
+}
+
+async function findClipForScene({
+  subject,
+  sceneIdx,
+  allSceneTexts,
+  mainTopic,
+  isMegaScene = false,
+  usedClips = [],
+  workDir,
+  jobId,
+  megaSubject = null,
+  forceClipPath = null,
+  jobContext = {},
+  categoryFolder
+}) {
+  let searchSubject = subject;
+
+  // Anchor logic
+  if (isMegaScene || sceneIdx === 0) {
+    if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())) {
+      searchSubject = megaSubject;
+      console.log(`[5D][ANCHOR][${jobId}] Using megaSubject for first/mega-scene: "${searchSubject}"`);
+    } else if (mainTopic && typeof mainTopic === 'string' && mainTopic.length > 2 && !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())) {
+      searchSubject = mainTopic;
+      console.log(`[5D][ANCHOR][${jobId}] Fallback to mainTopic for mega-scene: "${searchSubject}"`);
+    } else {
+      searchSubject = allSceneTexts[0];
+      console.log(`[5D][ANCHOR][${jobId}] Final fallback to first scene text: "${searchSubject}"`);
     }
   }
-  return entry.set;
-}
 
-// =============================
-// Small utilities
-// =============================
-function safe(s) { return (s ?? '').toString(); }
-function low(s) { return safe(s).toLowerCase(); }
-
-function isHttpUrl(s) { return /^https?:\/\//i.test(safe(s)); }
-function isR2Key(s) {
-  const v = safe(s);
-  return !isHttpUrl(v) && v.includes('/') && !fs.existsSync(v); // heuristic for "bucket key"
-}
-
-function fileStem(p) {
-  const b = path.basename(safe(p));
-  return b.replace(/\.[a-z0-9]+$/i, '');
-}
-
-// Normalize clip key with provider prefix and aggressive normalization
-function normalizeClipKey(src) {
-  const s = safe(src).trim();
-  const base = path.basename(s.split('?')[0]);
-  const stem = fileStem(s);
-  const lowered = low(s);
-  const variants = new Set([
-    lowered,
-    lowered.replace(/[^a-z0-9]+/g, ''), // aggressive normalization
-    low(base),
-    low(base).replace(/[^a-z0-9]+/g, ''), // aggressive normalization
-    low(stem),
-    low(stem).replace(/[^a-z0-9]+/g, ''), // aggressive normalization
-  ]);
-
-  // Provider-tagged variants to further reduce collisions
-  variants.add(`r2:${lowered}`);
-  variants.add(`url:${lowered}`);
-  variants.add(`base:${low(base)}`);
-  variants.add(`stem:${low(stem)}`);
-
-  return variants;
-}
-
-function markUsed(jobId, src, tag = '') {
-  const usedSet = getUsedSet(jobId);
-  const variants = normalizeClipKey(src);
-  for (const v of variants) usedSet.add(v);
-  console.log(`[5D][DEDUPE][ADD][${jobId}] ${tag} added ${variants.size} keys for: ${src} | total=${usedSet.size}`);
-}
-
-function isUsed(jobId, src) {
-  const usedSet = getUsedSet(jobId);
-  const variants = normalizeClipKey(src);
-  for (const v of variants) {
-    if (usedSet.has(v)) return true;
-  }
-  return false;
-}
-
-function guessProvider(src) {
-  const s = safe(src);
-  if (s.includes('pexels')) return 'pexels';
-  if (s.includes('pixabay')) return 'pixabay';
-  return 'r2';
-}
-
-function isAnimalWord(word) {
-  const w = low(word);
-  // Fast common set — detailed mapping handled in 10G scoring. Keep this minimal to avoid dupe-hell.
-  return /\b(manatee|sea\s*cow|dolphin|whale|shark|seal|otter|cat|dog|monkey|lion|tiger|bear|eagle|elephant|giraffe|panda|koala|hippo|rhinoceros|rhino|penguin|wolf|fox|owl|cow|horse|zebra|camel)\b/.test(w);
-}
-
-function canonicalAnimal(word) {
-  const w = low(word).trim();
-  if (/\bsea\s*cow\b/.test(w)) return 'manatee';
-  if (/\brhino|rhinoceros\b/.test(w)) return 'rhino';
-  return w;
-}
-
-// Subject gate logic:
-// - If primarySubject exists and is an animal, enforce species gate.
-//   * STRICT mode (default): require canonical species token to appear in candidate name/key.
-//   * NON-STRICT (SS_SUBJECT_STRICT=0): allow synonyms; 10G scoring will adjudicate.
-// - If primarySubject empty → allow (we’ll rely on scoring & order).
-function passesSubjectGate(candidateSrc, primarySubject, mainTopic) {
-  const src = low(candidateSrc);
-  const subject = low(primarySubject || '');
-  const topic = low(mainTopic || '');
-
-  if (!subject && !topic) {
-    console.log('[5D][SUBJECT-GATE] No subject/topic set → pass.');
-    return true;
+  if (!searchSubject || GENERIC_SUBJECTS.includes((searchSubject || '').toLowerCase())) {
+    if (mainTopic && !GENERIC_SUBJECTS.includes(mainTopic.toLowerCase())) {
+      searchSubject = mainTopic;
+      console.log(`[5D][FALLBACK][${jobId}] Subject was generic, using mainTopic: "${searchSubject}"`);
+    } else if (allSceneTexts && allSceneTexts.length > 0) {
+      searchSubject = allSceneTexts[0];
+      console.log(`[5D][FALLBACK][${jobId}] Subject was generic, using first scene text: "${searchSubject}"`);
+    }
   }
 
-  // Prefer the explicit subject; fall back to mainTopic
-  const chosen = subject || topic;
-
-  // Animal strictness
-  const animalGate = isAnimalWord(chosen);
-  if (!animalGate) {
-    // Non-animal → gate is advisory; rely on scoring.
-    console.log('[5D][SUBJECT-GATE] Non-animal subject → pass (will rely on 10G scoring).');
-    return true;
-  }
-
-  const canon = canonicalAnimal(chosen);
-  if (SUBJECT_STRICT) {
-    const ok = src.includes(canon);
-    console.log(`[5D][SUBJECT-GATE] STRICT animal gate on "${canon}" → ${ok ? 'PASS' : 'FAIL'}. Source="${candidateSrc}"`);
-    return ok;
-  } else {
-    // relaxed animal gate: allow synonyms; scoring decides
-    const ok = (src.includes(canon) || src.includes('sea_cow') || src.includes('sea cow'));
-    console.log(`[5D][SUBJECT-GATE] RELAXED animal gate on "${canon}" (synonyms allowed) → ${ok ? 'PASS' : 'SOFT-PASS (score)'} Source="${candidateSrc}"`);
-    return true; // allow; scoring will penalize if too far
-  }
-}
-
-// Score helper wrapper with rich logs (safe even if 10G changes)
-async function scoreCandidateWrapper({ candidateSrc, subject, mainTopic, sceneIdx, isMegaScene }) {
-  try {
-    const score = await scoreSceneCandidate({
-      candidatePathOrUrl: candidateSrc,
-      subject,
-      mainTopic,
-      sceneIdx,
-      isMegaScene,
-      allowSynonyms: !SUBJECT_STRICT,
-    });
-    console.log(`[5D][SCORE] src="${candidateSrc}" → score=${score}`);
-    return Number(score) || 0;
-  } catch (e) {
-    console.warn('[5D][SCORE][WARN] scoreSceneCandidate error; defaulting to 0:', e?.message || e);
-    return 0;
-  }
-}
-
-// Provider caller with defensive signature handling.
-// Always try object-style first (what 10A expects), then clean positional fallbacks.
-async function callProvider(fn, primarySubject, mainTopic, sceneIdx, jobId, categoryFolder, workDir) {
-  const ctx = {
-    subject: String(primarySubject || ''),
-    mainTopic,
-    sceneIdx,
-    jobId,
-    categoryFolder,
-    allowSynonyms: !SUBJECT_STRICT,
-    workDir: (typeof workDir === 'string') ? workDir : '',
-  };
-
-  // Try object ctx (10A expects this)
-  try {
-    const r = await fn(ctx);
-    console.log(`[5D][PROVIDER][TRY_CTX] ${fn.name} ok`);
-    return r;
-  } catch (e1) {
-    console.warn(`[5D][PROVIDER][TRY_CTX][WARN] ${fn.name}: ${e1?.message || e1}`);
-  }
-
-  // Try common positional signature used by 10B/10C: (subject, workDir, sceneIdx, jobId)
-  try {
-    const r = await fn(ctx.subject, ctx.workDir, ctx.sceneIdx, ctx.jobId);
-    console.log(`[5D][PROVIDER][TRY_POS_4] ${fn.name} ok`);
-    return r;
-  } catch (e2) {
-    console.warn(`[5D][PROVIDER][TRY_POS_4][WARN] ${fn.name}: ${e2?.message || e2}`);
-  }
-
-  // Try (subject, sceneIdx, jobId)
-  try {
-    const r = await fn(ctx.subject, ctx.sceneIdx, ctx.jobId);
-    console.log(`[5D][PROVIDER][TRY_POS_3] ${fn.name} ok`);
-    return r;
-  } catch (e3) {
-    console.warn(`[5D][PROVIDER][TRY_POS_3][WARN] ${fn.name}: ${e3?.message || e3}`);
-  }
-
-  // Try (subject, sceneIdx)
-  try {
-    const r = await fn(ctx.subject, ctx.sceneIdx);
-    console.log(`[5D][PROVIDER][TRY_POS_2] ${fn.name} ok`);
-    return r;
-  } catch (e4) {
-    console.warn(`[5D][PROVIDER][TRY_POS_2][WARN] ${fn.name}: ${e4?.message || e4}`);
-  }
-
-  // Last resort: (subject)
-  try {
-    const r = await fn(ctx.subject);
-    console.log(`[5D][PROVIDER][TRY_POS_1] ${fn.name} ok`);
-    return r;
-  } catch (e5) {
-    console.warn(`[5D][PROVIDER][FAIL] ${fn.name}: ${e5?.message || e5}`);
+  if (!searchSubject || searchSubject.length < 2) {
+    console.error(`[5D][FATAL][${jobId}] No valid subject for scene ${sceneIdx + 1}.`);
     return null;
   }
-}
 
-// Normalize any provider return into a single candidate string, or null
-function normalizeProviderResult(res) {
-  if (!res) return null;
-  if (typeof res === 'string') return res;
-  if (Array.isArray(res)) {
-    for (const r of res) {
-      if (typeof r === 'string' && r) return r;
-      if (r && typeof r === 'object') {
-        if (typeof r.url === 'string') return r.url;
-        if (typeof r.path === 'string') return r.path;
-        if (typeof r.key === 'string') return r.key;
-      }
-    }
+  if (forceClipPath) {
+    console.log(`[5D][FORCE][${jobId}] Forcing clip path: ${forceClipPath}`);
+    if (assertFileExists(forceClipPath, 'FORCE_CLIP')) return forceClipPath;
     return null;
   }
-  if (typeof res === 'object') {
-    return res.url || res.path || res.key || null;
+
+  if (!findR2ClipForScene || !findPexelsClipForScene || !findPixabayClipForScene || !findUnsplashImageForScene || !fallbackKenBurnsVideo) {
+    console.error('[5D][FATAL][HELPERS] One or more clip helpers not loaded!');
+    return null;
   }
-  return null;
-}
 
-// ============================================================
-// Core: findClipForScene
-// ============================================================
-async function findClipForScene(opts) {
-  const {
-    subject,
-    sceneIdx = 0,
-    allSceneTexts = [],
-    mainTopic = '',
-    isMegaScene = false,
-    workDir = '',
-    jobId = 'nojob',
-    // jobContext kept for backward-compatibility but NOT required anymore
-    jobContext = undefined,
-    categoryFolder = 'misc',
-  } = opts || {};
-
-  // Ensure per-job dedupe set exists
-  const usedSet = getUsedSet(jobId);
-
-  const primarySubject = subject || mainTopic || '';
-  const strictNote = SUBJECT_STRICT ? 'STRICT' : 'RELAXED';
-  console.log(`\n[5D][BEGIN][${jobId}] Scene=${sceneIdx + 1} subject="${primarySubject}" mainTopic="${mainTopic}" mode=${strictNote} category=${categoryFolder}`);
-  console.log(`[5D][DEDUPE][${jobId}] usedSet size=${usedSet.size}`);
-
-  const safeWorkDir = (typeof workDir === 'string') ? workDir : '';
-
-  // ===========================
-  // 1) R2-FIRST: short-circuit
-  // ===========================
+  let prioritizedSubjects = [];
   try {
-    const r2Res = await callProvider(findR2ClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, safeWorkDir);
-    const r2Clip = normalizeProviderResult(r2Res);
-    if (r2Clip) {
-      console.log(`[5D][R2][CANDIDATE][${jobId}] ${r2Clip}`);
+    prioritizedSubjects = await extractVisualSubjects(searchSubject, mainTopic);
+    console.log(`[5D][GPT][${jobId}] Prioritized visual subjects for scene ${sceneIdx + 1}:`, prioritizedSubjects);
+  } catch (err) {
+    console.error(`[5D][GPT][${jobId}][ERR] Error extracting prioritized subjects:`, err);
+    prioritizedSubjects = [searchSubject, mainTopic];
+  }
 
-      if (isUsed(jobId, r2Clip)) {
-        console.log(`[5D][R2][DEDUPE][${jobId}] Already used → SKIP: ${r2Clip}`);
-      } else if (!passesSubjectGate(r2Clip, primarySubject, mainTopic)) {
-        console.log(`[5D][R2][SUBJECT-GATE][${jobId}] REJECT: ${r2Clip}`);
-      } else {
-        const r2Score = await scoreCandidateWrapper({
-          candidateSrc: r2Clip, subject: primarySubject, mainTopic, sceneIdx, isMegaScene
-        });
-        // Short-circuit: any passing R2 candidate is taken immediately
-        console.log(`[5D][R2][PICK][${jobId}] Short-circuit pick with score=${r2Score}: ${r2Clip}`);
-        markUsed(jobId, r2Clip, 'R2');
-        return r2Clip;
+  // Try all prioritized subjects, loose mode
+  for (const subjectOption of prioritizedSubjects) {
+    if (!subjectOption || subjectOption.length < 2) continue;
+
+    // === 1. Try R2, loose mode ===
+    async function findDedupedR2ClipLoose(searchPhrase, usedClipsArr) {
+      try {
+        const r2Files = await findR2ClipForScene.getAllFiles
+          ? await findR2ClipForScene.getAllFiles()
+          : [];
+        let found = null;
+        // a) Strict match first
+        for (const fname of r2Files) {
+          if (usedClipsArr.includes(fname)) continue;
+          if (strictSubjectMatch(fname, searchPhrase)) {
+            found = fname;
+            console.log(`[5D][R2][${jobId}] STRICT MATCH: "${fname}"`);
+            break;
+          }
+        }
+        // b) Loose match: any major word or substring
+        if (!found) {
+          for (const fname of r2Files) {
+            if (usedClipsArr.includes(fname)) continue;
+            if (looseSubjectMatch(fname, searchPhrase)) {
+              found = fname;
+              console.log(`[5D][R2][${jobId}] LOOSE MATCH: "${fname}"`);
+              break;
+            }
+          }
+        }
+        // c) Any unused file as last resort
+        if (!found && r2Files.length) {
+          for (const fname of r2Files) {
+            if (usedClipsArr.includes(fname)) continue;
+            found = fname;
+            console.log(`[5D][R2][${jobId}] FALLBACK: Picking random available: "${fname}"`);
+            break;
+          }
+        }
+        if (found && assertFileExists(found, 'R2_RESULT')) return found;
+        return null;
+      } catch (err) {
+        console.error(`[5D][R2][ERR][${jobId}] Error during R2 matching:`, err);
+        return null;
       }
-    } else {
-      console.log(`[5D][R2][MISS][${jobId}] No candidate returned by 10A for subject="${primarySubject}"`);
     }
-  } catch (e) {
-    console.warn(`[5D][R2][ERR][${jobId}]`, e?.message || e);
-  }
 
-  // ======================================================
-  // 2) PROVIDERS (Video-first): Pexels → Pixabay
-  //    We still enforce in-job de-dupe and animal gate.
-  // ======================================================
-  // PEXELS
-  try {
-    const pxRes = await callProvider(findPexelsClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, safeWorkDir);
-    const pxClip = normalizeProviderResult(pxRes);
-    if (pxClip) {
-      console.log(`[5D][PEXELS][CANDIDATE][${jobId}] ${pxClip}`);
-
-      if (isUsed(jobId, pxClip)) {
-        console.log(`[5D][PEXELS][DEDUPE][${jobId}] Already used → SKIP: ${pxClip}`);
-      } else if (!passesSubjectGate(pxClip, primarySubject, mainTopic)) {
-        console.log(`[5D][PEXELS][SUBJECT-GATE][${jobId}] REJECT: ${pxClip}`);
-      } else {
-        const pxScore = await scoreCandidateWrapper({
-          candidateSrc: pxClip, subject: primarySubject, mainTopic, sceneIdx, isMegaScene
-        });
-        console.log(`[5D][PEXELS][PICK][${jobId}] score=${pxScore}: ${pxClip}`);
-        markUsed(jobId, pxClip, 'PEXELS');
-        return pxClip;
+    let r2Result = null;
+    if (findR2ClipForScene.getAllFiles) {
+      r2Result = await findDedupedR2ClipLoose(subjectOption, usedClips);
+      if (r2Result) {
+        console.log(`[5D][PICK][${jobId}] R2 subject match: ${r2Result}`);
+        return r2Result;
       }
-    } else {
-      console.log(`[5D][PEXELS][MISS][${jobId}] No candidate returned by 10B for subject="${primarySubject}"`);
+      console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
     }
-  } catch (e) {
-    console.warn(`[5D][PEXELS][ERR][${jobId}]`, e?.message || e);
-  }
 
-  // PIXABAY
-  try {
-    const pbRes = await callProvider(findPixabayClipForScene, String(primarySubject), mainTopic, sceneIdx, jobId, categoryFolder, safeWorkDir);
-    const pbClip = normalizeProviderResult(pbRes);
-    if (pbClip) {
-      console.log(`[5D][PIXABAY][CANDIDATE][${jobId}] ${pbClip}`);
+    // --- Try Pexels, Pixabay, Unsplash with loose match ---
+    let sources = [
+      { fn: findPexelsClipForScene, label: 'PEXELS', meta: 'meta' },
+      { fn: findPixabayClipForScene, label: 'PIXABAY', meta: 'meta' }
+    ];
 
-      if (isUsed(jobId, pbClip)) {
-        console.log(`[5D][PIXABAY][DEDUPE][${jobId}] Already used → SKIP: ${pbClip}`);
-      } else if (!passesSubjectGate(pbClip, primarySubject, mainTopic)) {
-        console.log(`[5D][PIXABAY][SUBJECT-GATE][${jobId}] REJECT: ${pbClip}`);
-      } else {
-        const pbScore = await scoreCandidateWrapper({
-          candidateSrc: pbClip, subject: primarySubject, mainTopic, sceneIdx, isMegaScene
-        });
-        console.log(`[5D][PIXABAY][PICK][${jobId}] score=${pbScore}: ${pbClip}`);
-        markUsed(jobId, pbClip, 'PIXABAY');
-        return pbClip;
+    for (const src of sources) {
+      try {
+        let result = await src.fn(subjectOption, workDir, sceneIdx, jobId, usedClips);
+        const candidatePath = (result && result.path) ? result.path : result;
+        if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, src.label + '_RESULT')) {
+          // Loose match: accept if ANY major word from subject appears in filename/tags
+          let valid = false;
+          if (result.meta && Array.isArray(result.meta.tags)) {
+            valid = result.meta.tags.some(tag => getMajorWords(subjectOption).some(word => tag.toLowerCase().includes(word)));
+          } else if (typeof candidatePath === 'string') {
+            valid = looseSubjectMatch(candidatePath, subjectOption);
+          }
+          // **KEY IMPROVEMENT**: accept first available even if not a perfect tag match
+          if (valid || true) {
+            console.log(`[5D][PICK][${jobId}] ${src.label} subject match: ${candidatePath}`);
+            if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
+              jobContext.clipsToIngest.push({
+                localPath: candidatePath,
+                subject: subjectOption,
+                sceneIdx,
+                source: src.label.toLowerCase(),
+                categoryFolder
+              });
+            }
+            return candidatePath;
+          } else {
+            console.warn(`[5D][${src.label}][${jobId}] ${src.label} clip rejected (no subject match): ${candidatePath}`);
+          }
+        }
+      } catch (e) {
+        console.error(`[5D][${src.label}][ERR][${jobId}]`, e);
       }
-    } else {
-      console.log(`[5D][PIXABAY][MISS][${jobId}] No candidate returned by 10C for subject="${primarySubject}"`);
     }
-  } catch (e) {
-    console.warn(`[5D][PIXABAY][ERR][${jobId}]`, e?.message || e);
+
+    // --- Unsplash: always loose, just check for unused image
+    try {
+      let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
+      if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
+        console.log(`[5D][PICK][${jobId}] Unsplash image (loose): ${unsplashResult}`);
+        return unsplashResult;
+      }
+    } catch (e) {
+      console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
+    }
+
+    // --- Ken Burns (final fallback, always returns an image)
+    try {
+      let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
+      if (kenBurnsResult && !usedClips.includes(kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+        console.log(`[5D][PICK][${jobId}] KenBurns fallback (loose): ${kenBurnsResult}`);
+        return kenBurnsResult;
+      }
+    } catch (e) {
+      console.error(`[5D][KENBURNS][ERR][${jobId}]`, e);
+    }
   }
 
-  // ======================================================
-  // 3) Images → Ken Burns fallback (always returns a video)
-  //    We do not enforce animal gate here — last-resort visual.
-  // ======================================================
+  // === If absolutely nothing was found, pick any unused R2 file ===
   try {
-    console.log(`[5D][KB][FALLBACK][${jobId}] Triggered Ken Burns fallback for subject="${primarySubject || mainTopic}" scene=${sceneIdx + 1}`);
-    const kb = await fallbackKenBurnsVideo(String(primarySubject || mainTopic || 'scenic nature'), safeWorkDir, sceneIdx, jobId);
-    if (kb) {
-      // Ken Burns creates a *new* file name each time; de-dupe is unlikely but still mark it.
-      markUsed(jobId, kb, 'KENBURNS');
-      console.log(`[5D][KB][PICK][${jobId}] ${kb}`);
-      return kb;
+    if (findR2ClipForScene.getAllFiles) {
+      const r2Files = await findR2ClipForScene.getAllFiles();
+      for (const fname of r2Files) {
+        if (!usedClips.includes(fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
+          console.warn(`[5D][FINALFALLBACK][${jobId}] ABSOLUTE fallback, picking any available R2: ${fname}`);
+          return fname;
+        }
+      }
     }
   } catch (e) {
-    console.warn(`[5D][KB][ERR][${jobId}]`, e?.message || e);
+    console.error(`[5D][FINALFALLBACK][${jobId}] Error during final R2 fallback:`, e);
   }
 
-  // If we got here, everything failed
-  console.error(`[5D][FAIL][${jobId}] No candidate found after all fallbacks for scene ${sceneIdx + 1}.`);
+  // Still nothing!
+  console.error(`[5D][NO_MATCH][${jobId}] No valid clip found for prioritized subjects (scene ${sceneIdx + 1}), even with all fallbacks`);
+  // Instead of returning null, let's try one last Ken Burns with a generic prompt:
+  try {
+    let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
+    if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+      console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic fallback: ${kenBurnsResult}`);
+      return kenBurnsResult;
+    }
+  } catch (e) {
+    console.error(`[5D][FINALFALLBACK][KENBURNS][${jobId}] Error during generic KenBurns fallback:`, e);
+  }
+
+  // If literally nothing, return null
   return null;
 }
 

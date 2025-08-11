@@ -1,415 +1,250 @@
 // ===========================================================
-// SECTION 11: GPT & NLP VISUAL SUBJECT EXTRACTOR (STRICT, TOPIC-AWARE)
-// Purpose:
-//   Given a script line + the overall main topic, return the TOP 4
-//   VISUAL-ONLY subjects we should try to show for that scene.
-//
-// Strategy (NLP-first, Stopword-fallback, AI-enhancement):
-//   1) Use NLP (compromise.js) to find the grammatical subject, verb, and adjectives.
-//   2) If NLP fails, use section10n-stopword-subject-extractor to get a literal subject.
-//   3) Expand into concrete, filmable variants (angles/details).
-//   4) If we still can't form 4 strong items, optionally call GPT for enhancement.
-//   5) Enforce strict species/object if configured.
-//   6) Deterministic cleanup + de-dup + padding.
-//
-// Output:
-//   Array<Object> of length 4, where each object is:
-//     { subject: string, action: string, descriptor: string, full_query: string }
-//
-// Notes:
-//   - MAX LOGGING for full traceability.
-//   - Safe when OPENAI_API_KEY is absent.
-// ===========================================================
+// SECTION 11: GPT VISUAL SUBJECT EXTRACTOR (PROD VERSION)
+// Returns the top 4 visual subject candidates for any script line.
+// Order: Exact > Contextual > Symbolic > General Fallback
+// Bulletproof: Handles blank, weird, or failed GPT cases.
+// Super max logging, deterministic, no silent failures.
+// ============================================================
 
-'use strict';
-
+const { ChatGPTAPI } = require('chatgpt'); // You can swap this to your preferred OpenAI SDK
 const path = require('path');
 const fs = require('fs');
-const { extractSubjectByStopwordsDetailed } =
-  require('./section10n-stopword-subject-extractor.cjs');
 
-// NEW: NLP Library for grammatical analysis.
-// Make sure to install it in your project: npm install compromise
-let nlp = null;
-try {
-  nlp = require('compromise');
-  console.log('[11][INIT] NLP library (compromise) loaded successfully.');
-} catch (_) {
-  console.warn('[11][WARN] `compromise` library not found. NLP subject extraction will be disabled. Run `npm install compromise`.');
-}
+const apiKey = process.env.OPENAI_API_KEY;
+if (!apiKey) throw new Error('[11][FATAL] OPENAI_API_KEY not set in env!');
 
+const gpt = new ChatGPTAPI({ apiKey });
 
-// Prefer ChatGPTAPI if present in env (optional)
-let ChatGPTAPI = null;
-try {
-  ChatGPTAPI = require('chatgpt').ChatGPTAPI;
-} catch (_) { /* optional */ }
+console.log('[11][INIT] Visual Subject Extractor module loaded');
 
-// Optional OpenAI SDK (fallback)
-let OpenAI = null;
-try {
-  OpenAI = require('openai');
-} catch (_) { /* optional */ }
-
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_API_TOKEN ||
-  '';
-if (!OPENAI_API_KEY) {
-  console.warn('[11][WARN] OPENAI_API_KEY not set. AI fallback disabled (NLP/stopword-only mode).');
-}
-
-// ===== Config =====
-const MODEL = process.env.SS_SUBJECT_MODEL || 'gpt-4.1-mini';
-const TIMEOUT_MS = Number(process.env.SS_SUBJECT_TIMEOUT_MS || 16000);
-const STRICT_SPECIES = String(process.env.SS_SUBJECT_STRICT || '1') === '1'; // keep exact species/object
-const MAX_ITEMS = 4;
-console.log(`[11][INIT] Visual Subject Extractor loaded. model=${MODEL} strict=${STRICT_SPECIES} timeout=${TIMEOUT_MS}ms`);
-
-// ===== Utilities =====
-function norm(s) { return String(s || '').toLowerCase().trim(); }
-function normalizeForCompare(s) { return norm(s).replace(/[^a-z0-9]+/g, ''); }
-function titleCase(s = '') {
-  return s.split(/\s+/).map(w => w ? (w[0].toUpperCase() + w.slice(1)) : w).join(' ').trim();
-}
-
-function uniqueOrdered(list) {
-  const seen = new Set();
-  const out = [];
-  for (const item of list) {
-    // NEW: Compare based on the full_query for uniqueness
-    const key = normalizeForCompare(item.full_query);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out;
-}
-
-function looksNonVisual(line) {
-  const l = norm(line);
-  const abstract = ['imagine', 'think', 'believe', 'history shows', 'legend', 'you know', 'they say', 'fact is'];
-  return abstract.some(w => l.includes(w));
-}
-
-// ===== Canonicalizer for main topics =====
-function canonicalizeTopic(mainTopicRaw) {
-  const main = norm(mainTopicRaw);
-  const out = {
-    canonical: main,
-    aliases: [],
-    bannedNear: [],
-    typeHint: null, // 'animal', 'landmark', 'object', ...
-  };
-  if (main.includes('manatee') || main === 'sea cow' || main.includes('sea cow')) {
-    out.canonical = 'manatee';
-    out.aliases = ['manatee', 'sea cow', 'west indian manatee', 'florida manatee', 'trichechus manatus'];
-    out.bannedNear = [
-      'dolphin','porpoise','whale','orca','shark','stingray','ray','manta',
-      'seal','sea lion','otter','turtle','jellyfish','octopus','squid',
-    ];
-    out.typeHint = 'animal';
-    return out;
-  }
-
-  // Add more special cases as needed (Eiffel Tower, Trevi Fountain, etc.)
-  out.aliases = [main].filter(Boolean);
-  out.typeHint = null;
-  return out;
-}
-
-// ===== Local variation generator =====
-function localSubjectVariationsForTopic(topic) {
-  const t = canonicalizeTopic(topic);
-  const base = t.canonical || topic || 'subject';
-  
-  // NEW: Output structured objects
-  if (t.canonical === 'manatee') {
-    return [
-      { subject: 'manatee', action: 'swimming', descriptor: 'underwater side profile', full_query: 'manatee swimming underwater (side profile)' },
-      { subject: 'manatee', action: 'eating', descriptor: 'in shallow water', full_query: 'manatee eating seagrass in shallow water' },
-      { subject: 'manatee', action: 'swimming', descriptor: 'mother with calf', full_query: 'mother manatee with calf (gentle swim)' },
-      { subject: 'manatee', action: 'close-up', descriptor: 'face and whiskers', full_query: 'close-up of manatee face and whiskers' },
-    ];
-  }
-  return [
-      { subject: base, action: 'close-up', descriptor: '', full_query: `${base} close-up` },
-      { subject: base, action: 'wide shot', descriptor: '', full_query: `${base} wide shot` },
-      { subject: base, action: 'detail', descriptor: 'texture or feature', full_query: `${base} detail of texture or feature` },
-      { subject: base, action: 'from a different angle', descriptor: '', full_query: `${base} from a different angle` },
-  ];
-}
-
-// NEW: Function to extract subject using grammatical analysis
-function extractSubjectWithNLP(line) {
-    if (!nlp) return null; // Guard if compromise library is not found
-
-    const doc = nlp(line);
-    const verbs = doc.verbs();
-    if (!verbs.found) return null;
-
-    const mainVerb = verbs.first();
-    const subject = mainVerb.subjects().first();
-    
-    if (subject.found) {
-        const subjectText = subject.text('normal');
-        const verbText = mainVerb.text('normal');
-        
-        // Find adjectives attached to the subject
-        const adjectives = subject.adjectives().out('array');
-        
-        const descriptor = adjectives.join(' ');
-        const full_query = `${descriptor} ${subjectText} ${verbText}`.replace(/\s+/g, ' ').trim();
-        
-        console.log(`[11][NLP] Found Subject: "${subjectText}", Verb: "${verbText}", Descriptor: "${descriptor}"`);
-        
-        return {
-            subject: titleCase(subjectText),
-            action: verbText,
-            descriptor: descriptor,
-            full_query: titleCase(full_query)
-        };
-    }
-    return null;
-}
-
-
-// ===== Stopword-first expansion =====
-function buildFromStopwords(line, mainTopic) {
-  // NEW: Attempt NLP extraction first
-  const nlpResult = extractSubjectWithNLP(line);
-  if (nlpResult) {
-      console.log('[11][NLP][SUCCESS] Using NLP-derived subject as primary.');
-      const variations = [
-          nlpResult,
-          { subject: nlpResult.subject, action: 'close-up', descriptor: '', full_query: `${nlpResult.subject} close-up` },
-          { subject: nlpResult.subject, action: 'wide shot', descriptor: '', full_query: `${nlpResult.subject} wide shot` },
-          { subject: nlpResult.subject, action: nlpResult.action, descriptor: '', full_query: `${nlpResult.subject} ${nlpResult.action}` },
-      ];
-      return uniqueOrdered(variations);
-  }
-
-  // Fallback to original stopword logic if NLP fails
-  console.log('[11][NLP][FALLBACK] NLP did not find a subject, using stopword-based extractor.');
-  const detail = extractSubjectByStopwordsDetailed(line, mainTopic);
-  const primary = detail.primary && String(detail.primary).trim();
-  console.log('[11][STOPWORDS][CANDS]', detail.candidates);
-  console.log(`[11][STOPWORDS][PRIMARY] "${primary}" (conf=${detail.confidence?.toFixed?.(2) ?? 'n/a'} src=${detail.debug?.source || 'n/a'})`);
-
-  if (!primary) return [];
-
-  // NEW: Build structured objects from the stopword result
-  const variations = uniqueOrdered([
-    { subject: primary, action: '', descriptor: '', full_query: primary },
-    { subject: primary, action: 'close-up', descriptor: '', full_query: `${primary} close-up` },
-    { subject: primary, action: 'wide shot', descriptor: '', full_query: `${primary} wide shot` },
-    { subject: primary, action: 'from a different angle', descriptor: '', full_query: `${primary} from a different angle` },
-  ]);
-
-  // Add one alternate from candidates if it differs materially
-  const alt = (detail.candidates || []).find(c => normalizeForCompare(c) !== normalizeForCompare(primary));
-  if (alt) {
-    variations.push({ subject: alt, action: '', descriptor: '', full_query: alt });
-  }
-  
-  return variations.slice(0, MAX_ITEMS);
-}
-
-// ===== Prompt builder (for AI fallback only) =====
-function buildPrompt(line, mainTopic) {
-  const topic = canonicalizeTopic(mainTopic);
-  const disallow = STRICT_SPECIES ? `NEVER substitute related species/objects (banned examples: ${topic.bannedNear.join(', ') || 'n/a'}).` : '';
-    const mustContain = STRICT_SPECIES
-    ? `Every item must explicitly mention ${topic.aliases.join(' or ')}.`
-    : `Prefer items that explicitly mention ${topic.aliases.join(' or ')}.`;
-  
-  // NEW: Updated instructions for the AI model
-  const instructions = [
-    `You are a world-class short-form video editor.`,
-    `TASK: For the given script line, list the 4 BEST visual subjects to show.`,
-    `Focus the camera on the exact main topic: "${topic.canonical}".`,
-    mustContain,
-    disallow,
-    `IMPORTANT: Your primary visual should be the noun performing the main action. For the sentence 'The powerful lion roared at the timid mouse', the subject is 'lion', not 'mouse'. Prioritize the actor performing the verb.`,
-    `First, think step-by-step to identify the core action and subject. Second, list the 4 visuals.`,
-    `Only return visuals that can be literally filmed.`,
-    `Avoid metaphors, jokes, emotions, or abstract ideas.`,
-    `If the line is not visual, fall back to variations of the main topic.`,
-    `Keep it concise and concrete.`,
-    `Return EXACTLY ${MAX_ITEMS} items as a plain numbered list (no extra text).`,
-  ].filter(Boolean).join('\n');
-
-  const examples = [
-    `Line: "They’re gentle giants that graze all day."`,
-    `Main Topic: manatee`,
-      `Answer:`,
-      `1) manatee eating seagrass in shallow water`,
-      `2) mother manatee with calf swimming slowly`,
-      `3) close-up of a manatee face and whiskers`,
-      `4) group of manatees resting near a spring`,
-    ].join('\n');
-  const user = [
-    `Line: "${line}"`,
-    `Main Topic: ${topic.canonical}`,
-    `Answer:`,
-  ].join('\n');
-  const final = `${instructions}\n\n${examples}\n\n${user}`;
-  return { prompt: final, topic };
-}
-
-// ===== Model callers (fallback) =====
-async function callChatGPTAPI(prompt) {
-  if (!ChatGPTAPI || !OPENAI_API_KEY) return null;
-  const api = new ChatGPTAPI({ apiKey: OPENAI_API_KEY });
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  try {
-    console.log('[11][GPT][chatgpt] sending prompt...');
-    const res = await api.sendMessage(prompt, {
-      timeoutMs: TIMEOUT_MS - 500,
-    });
-    clearTimeout(t);
-    const text = res?.text || '';
-    console.log('[11][GPT][chatgpt][RAW]', text);
-    return text;
-  } catch (e) {
-    clearTimeout(t);
-    console.warn('[11][GPT][chatgpt][WARN]', e?.message || e);
-    return null;
-  }
-}
-
-async function callOpenAIChat(prompt) {
-  if (!OpenAI || !OPENAI_API_KEY) return null;
-  try {
-    console.log('[11][GPT][openai] sending prompt...');
-    const client = new OpenAI.OpenAI({ apiKey: OPENAI_API_KEY });
-    const res = await client.chat.completions.create({
-      model: MODEL,
-      temperature: 0.2,
-      messages: [
-        { role: 'system', content: 'You output numbered lists only.' },
-        { role: 'user', content: prompt },
-      ],
-      timeout: TIMEOUT_MS,
-    });
-    const text = res?.choices?.[0]?.message?.content || '';
-    console.log('[11][GPT][openai][RAW]', text);
-    return text;
-  } catch (e) {
-    console.warn('[11][GPT][openai][WARN]', e?.message || e);
-    return null;
-  }
-}
-
-function parseNumberedList(text) {
-  if (!text) return [];
-  const lines = String(text).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const items = [];
-  for (const l of lines) {
-    const m = l.match(/^\s*(?:\d+[\)\.:-]\s*)?(.*)$/);
-    if (!m) continue;
-    const val = m[1].trim();
-    if (!val) continue;
-    // NEW: Convert parsed strings to the structured object format
-    items.push({
-        subject: titleCase(val),
-        action: '',
-        descriptor: '',
-        full_query: titleCase(val)
-    });
-  }
-  return items;
-}
-
-function enforceStrictness(items, topic) {
-  if (!items || !items.length) return [];
-  if (!STRICT_SPECIES) return items;
-  const allowedTokens = topic.aliases.map(norm);
-  const keep = [];
-  for (const it of items) {
-    // NEW: Check against the full_query
-    const low = norm(it.full_query);
-    const ok = allowedTokens.some(tok => low.includes(tok));
-    if (ok) keep.push(it);
-  }
-  return keep.length ? keep : localSubjectVariationsForTopic(topic.canonical);
-}
-
-function padToFour(items, topic) {
-  const out = [...items];
-  while (out.length < MAX_ITEMS) {
-    const fallbackList = localSubjectVariationsForTopic(topic.canonical);
-    for (const cand of fallbackList) {
-      if (out.length >= MAX_ITEMS) break;
-      // NEW: Compare full_query for uniqueness before padding
-      if (!out.find(x => normalizeForCompare(x.full_query) === normalizeForCompare(cand.full_query))) {
-        out.push(cand);
-      }
-    }
-    if (out.length >= MAX_ITEMS) break;
-    // Final generic fallback
-    out.push({ subject: topic.canonical || 'subject', action: '', descriptor: '', full_query: topic.canonical || 'subject'});
-  }
-  return out.slice(0, MAX_ITEMS);
-}
-
-/**
- * MAIN EXPORT:
- * extractVisualSubjects(line: string, mainTopic: string): Promise<Object[]>
- */
 async function extractVisualSubjects(line, mainTopic) {
-  const lineStr = String(line || '').trim();
-  const main = String(mainTopic || '').trim();
-  console.log(`[11][INPUT] line="${lineStr}" mainTopic="${main}"`);
+  try {
+    console.log(`[11][INPUT] Script line: "${line}"`);
+    console.log(`[11][INPUT] Main topic: "${mainTopic}"`);
 
-  const topic = canonicalizeTopic(main);
-  if (!lineStr) {
-    console.warn('[11][WARN] Blank line. Returning local variations.');
-    return localSubjectVariationsForTopic(main);
+    if (!line || typeof line !== 'string' || !line.trim()) {
+      console.warn('[11][WARN] Blank/invalid line. Returning main topic as fallback.');
+      return [mainTopic, mainTopic, mainTopic, mainTopic];
+    }
+
+    // === The prompt ===
+    const prompt = `
+You are a world-class viral video editor for TikTok, Reels, and Shorts. For each line of a script, your ONLY job is to pick the 4 best possible VISUAL subjects to show in that scene.
+
+RULES:
+- Only return objects, places, people, or actions that can be LITERALLY SHOWN ON SCREEN.
+- Ignore all metaphors, jokes, emotions, abstract concepts, or invisible things.
+- If a line is not visually showable, use the main topic as fallback.
+- Each answer should be concrete, visual, and unambiguous.
+- No duplicate items, no vague generalities.
+
+Return **EXACTLY** 4, in order: primary, context, fallback, general.
+Output ONLY a numbered list. No intro, no explanation, no extra info.
+
+EXAMPLES:
+
+Line: "You’ll never believe what’s hidden inside the Statue of Liberty’s basement..."
+Main topic: "Statue of Liberty"
+1. Statue of Liberty
+2. Statue of Liberty basement
+3. Underground storage room
+4. Old artifacts in storage
+
+Line: "The Eiffel Tower isn't just for views—it's a labyrinth of secrets"
+Main topic: "Eiffel Tower"
+1. Eiffel Tower
+2. Aerial view of the Eiffel Tower
+3. Paris skyline from the tower
+4. Close-up of Eiffel Tower structure
+
+Line: "First, chop the onions and garlic."
+Main topic: "Cooking"
+1. Chopped onions
+2. Garlic cloves
+3. Chef chopping vegetables
+4. Cutting board with vegetables
+
+Line: "Now sauté everything until golden brown."
+Main topic: "Cooking"
+1. Sauté pan on stove
+2. Onions and garlic in pan
+3. Wooden spatula stirring food
+4. Pan with golden-brown food
+
+Line: "Steph Curry pulls up from deep."
+Main topic: "NBA basketball"
+1. Steph Curry shooting a 3-pointer
+2. Golden State Warriors court
+3. Crowd watching basketball game
+4. Basketball in mid-air
+
+Line: "Check your credit card statement for these charges."
+Main topic: "Personal finance"
+1. Credit card statement paper
+2. Hand holding credit card
+3. Online banking screen
+4. Calculator and bills on table
+
+Line: "Always wear sunscreen, even on cloudy days."
+Main topic: "Skin care"
+1. Person applying sunscreen to face
+2. Sunscreen bottle
+3. Sun shining behind clouds
+4. Close-up of skin
+
+Line: "Let's hike to the top of Angel's Landing."
+Main topic: "Travel"
+1. Angel's Landing mountain
+2. People hiking on a trail
+3. Panoramic view from summit
+4. National park landscape
+
+Line: "Tie the scarf with a simple knot for a classic look."
+Main topic: "Fashion"
+1. Person tying a scarf
+2. Close-up of scarf knot
+3. Scarf draped on mannequin
+4. Various scarf styles
+
+Line: "Plug the HDMI cable into your laptop and TV."
+Main topic: "Tech tutorial"
+1. HDMI cable
+2. Hand plugging cable into laptop
+3. Laptop and TV side-by-side
+4. HDMI ports on devices
+
+Line: "Fold the paper in half and crease firmly."
+Main topic: "DIY crafts"
+1. Hands folding paper
+2. Paper being creased
+3. Close-up of origami fold
+4. Stack of folded papers
+
+Line: "Whisk the eggs and sugar until fluffy."
+Main topic: "Baking"
+1. Whisk in bowl with eggs and sugar
+2. Fluffy egg mixture
+3. Hand whisking ingredients
+4. Baking setup on kitchen counter
+
+Line: "Decorate the Christmas tree with lights."
+Main topic: "Christmas"
+1. Christmas tree with lights
+2. Person hanging ornaments
+3. Box of decorations
+4. Living room decorated for holidays
+
+Line: "Do 10 pushups to finish strong."
+Main topic: "Home workout"
+1. Person doing pushups
+2. Fitness mat on floor
+3. Trainer demonstrating exercise
+4. Close-up of hands on mat
+
+Line: "Pour the coffee and enjoy your morning."
+Main topic: "Morning routine"
+1. Coffee being poured into mug
+2. Steaming cup of coffee
+3. Breakfast table setup
+4. Sunlight through kitchen window
+
+Line: "Click the subscribe button to stay updated."
+Main topic: "YouTube channel"
+1. Mouse cursor on subscribe button
+2. YouTube page on laptop
+3. Notification bell icon
+4. Person watching video on phone
+
+Line: "Slice the avocado and remove the pit."
+Main topic: "Healthy eating"
+1. Sliced avocado
+2. Knife removing avocado pit
+3. Cutting board with avocado halves
+4. Bowl of fresh avocado slices
+
+Line: "The puppy wags its tail when it sees you."
+Main topic: "Cute animals"
+1. Puppy wagging tail
+2. Dog looking up at person
+3. Owner petting puppy
+4. Dog park scene
+
+Line: "Pour the cement and smooth it out."
+Main topic: "Home improvement"
+1. Wet cement being poured
+2. Worker smoothing cement with trowel
+3. Construction site foundation
+4. Finished smooth cement floor
+
+Line: "Scan the QR code to join."
+Main topic: "Event sign-up"
+1. QR code on screen
+2. Person scanning with phone
+3. Event invitation flyer
+4. Group of people at event
+
+Line: "Add chili flakes for a spicy kick."
+Main topic: "Cooking"
+1. Chili flakes being sprinkled
+2. Spicy dish in bowl
+3. Red chili peppers
+4. Close-up of food with spices
+
+NOW RETURN:
+Line: "${line}"
+Main topic: "${mainTopic}"
+`;
+
+    // ========== MAIN GPT CALL ==========
+    const res = await gpt.sendMessage(prompt);
+
+    // ========== Parse GPT response (numbered list) ==========
+    let list = [];
+    if (res && typeof res.text === 'string') {
+      list = res.text
+        .trim()
+        .split('\n')
+        .map(l => l.replace(/^\d+[\.\)]\s*/, '').replace(/^- /, '').trim())
+        .map(l => l.replace(/[^A-Za-z0-9,\-\'\"\.\!\(\)\:\&\s\/]/g, '')) // strip any emoji or GPT weirdness
+        .filter(Boolean);
+    }
+
+    // ========== Deduplicate, validate, enforce exactly 4 ==========
+    const seen = new Set();
+    let finalList = [];
+    for (let item of list) {
+      if (item && !seen.has(item.toLowerCase()) && item.length > 2) {
+        seen.add(item.toLowerCase());
+        finalList.push(item);
+      }
+      if (finalList.length === 4) break;
+    }
+    // Always return 4 items, padding with mainTopic if needed
+    while (finalList.length < 4) finalList.push(mainTopic);
+    if (finalList.length > 4) finalList = finalList.slice(0, 4);
+
+    console.log('[11][RESULT] Visual subjects:', finalList);
+    return finalList;
+  } catch (err) {
+    console.error('[11][ERROR] GPT visual extraction failed:', err);
+    return [mainTopic, mainTopic, mainTopic, mainTopic]; // Ultimate fallback
   }
-
-  // 1) NLP/Stopword-first suggestion
-  let items = buildFromStopwords(lineStr, main);
-  items = uniqueOrdered(items);
-  
-  // Safety: if the line is abstract, bias toward main topic variations
-  if (looksNonVisual(lineStr)) {
-    const local = localSubjectVariationsForTopic(topic.canonical);
-    items = uniqueOrdered([...local.slice(0, 2), ...items]).slice(0, MAX_ITEMS);
-  }
-
-  // 2) If we still don’t have 4, try AI as fallback (only if API key present)
-  if (items.length < MAX_ITEMS && OPENAI_API_KEY) {
-    const { prompt } = buildPrompt(lineStr, main);
-    console.log('[11][PROMPT]\n' + prompt);
-    let raw = await callChatGPTAPI(prompt);
-    if (!raw) raw = await callOpenAIChat(prompt);
-    const aiItems = parseNumberedList(raw);
-    console.log('[11][PARSED_AI]', aiItems);
-    items = uniqueOrdered([...items, ...aiItems]);
-  }
-
-  // 3) Strict filter + pad
-  items = enforceStrictness(items, topic);
-  items = uniqueOrdered(items);
-  items = padToFour(items, topic);
-
-  console.log('[11][RESULT]', items);
-  return items;
 }
 
-// === CLI test helper ===
+// === UTILITY: Test single line from CLI ===
 if (require.main === module) {
-  (async () => {
-    const testLine = process.argv.slice(2).join(' ') || 'The majestic eagle soars gracefully over the rugged mountains.';
-    const main = 'wildlife';
-    console.log(`\nTesting with line: "${testLine}"`);
-    console.log(`Main topic: "${main}"\n`);
-    const res = await extractVisualSubjects(testLine, main);
-    console.log('\nExtracted subjects:', res);
-  })().catch(err => {
-    console.error('[11][CLI][ERR]', err);
-    process.exit(1);
-  });
+  // Allow quick CLI testing for debugging
+  const testLine = process.argv[2] || 'The pyramids were built over 20 years.';
+  const mainTopic = process.argv[3] || 'Egypt';
+  extractVisualSubjects(testLine, mainTopic)
+    .then(subjects => {
+      console.log('Extracted subjects:', subjects);
+      process.exit(0);
+    })
+    .catch(err => {
+      console.error('Test error:', err);
+      process.exit(1);
+    });
 }
 
-module.exports = { extractVisualSubjects, canonicalizeTopic };
+module.exports = { extractVisualSubjects };
