@@ -319,7 +319,7 @@ function isValidClip(filePath, jobId) {
  * NOTE: This helper does NOT filter or mutate usedClips. 5D enforces within-job de-dupe.
  * @returns {Promise<string|null>} local file path
  */
-async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '', /* usedClips = [] */) {
+async function findR2ClipForScene(subject, workDir, sceneIdx = 0, jobId = '') {
   log('START', 'CTX', 'findR2ClipForScene', { subject, sceneIdx, jobId, workDir });
 
   if (!subject || typeof subject !== 'string') {

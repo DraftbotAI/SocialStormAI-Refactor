@@ -54,7 +54,7 @@ function strictSubjectPresent(fields, subject) {
 }
 
 // --- SCORING: Scores images for fallback Ken Burns ---
-function scoreImage(candidate, subject, usedClips = [], extra = {}) {
+function scoreImage(candidate, subject, extra = {}) {
   let score = 0;
   const cleanedSubject = cleanQuery(subject).toLowerCase();
   const subjectWords = getKeywords(subject);
@@ -99,7 +99,6 @@ function scoreImage(candidate, subject, usedClips = [], extra = {}) {
   if (candidate.width && candidate.height && candidate.height / candidate.width > 1.5) score += 8;
 
   // Penalize used/dup
-  if (usedClips && candidate.url && usedClips.some(u => u.includes(candidate.url) || candidate.url.includes(u))) score -= 60;
   // Bonus for Unsplash editorial/high download count (if present)
   if (candidate.downloads && candidate.downloads > 10000) score += 4;
   // Bonus for newer image
