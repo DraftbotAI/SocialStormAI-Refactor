@@ -160,6 +160,19 @@ function registerGenerateVideoEndpoint(app, deps) {
       const workDir = path.join(__dirname, '..', 'jobs', jobId);
       const jobContext = { sceneClipMetaList: [] };
 
+      // Shared per-job usedClips (same array passed to every scene)
+      const usedClips = [];
+      function pushUsedClip(label, p) {
+        if (!p) return;
+        if (!usedClips.includes(p)) {
+          usedClips.push(p);
+          console.log(`[5B][DUPE][ADD][${jobId}] ${label}: ${p} | usedClipsLen=${usedClips.length}`);
+        } else {
+          console.log(`[5B][DUPE][SKIP][${jobId}] ${label}: already tracked | usedClipsLen=${usedClips.length}`);
+        }
+      }
+      console.log(`[5B][DUPE][INIT][${jobId}] usedClips array created.`);
+
       try {
         fs.mkdirSync(workDir, { recursive: true });
         progress[jobId] = { percent: 2, status: 'Setting up your project...' };
@@ -200,7 +213,6 @@ function registerGenerateVideoEndpoint(app, deps) {
         const categoryFolder = getCategoryFolder(mainTopic);
         jobContext.categoryFolder = categoryFolder;
 
-        const usedClips = [];
         const sceneFiles = [];
 
         // === HOOK SCENE ===
@@ -211,6 +223,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           await deps.createSceneAudio(hookText, voice, audioPathHook, provider);
         assertFileExists(audioPathHook, `AUDIO_HOOK`);
 
+        console.log(`[5B][DUPE][INFO][${jobId}] Before hook lookup, usedClipsLen=${usedClips.length}`);
         // For hook, you could use a branding video, short animation, or a generic visual, but for now use normal clip logic:
         let hookClipPath = null;
         try {
@@ -233,7 +246,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           const { fallbackKenBurnsVideo } = require('./section10d-kenburns-image-helper.cjs');
           hookClipPath = await fallbackKenBurnsVideo(scenes[0].visualSubject || hookText || mainTopic, workDir, 0, jobId, usedClips);
         }
-        usedClips.push(hookClipPath);
+        pushUsedClip('HOOK', hookClipPath);
         const localHookClipPath = path.join(workDir, path.basename(hookClipPath));
         await ensureLocalClipExists(hookClipPath, localHookClipPath);
 
@@ -279,6 +292,7 @@ function registerGenerateVideoEndpoint(app, deps) {
         }
         if (!candidateSubjects.length) candidateSubjects = [megaText, mainTopic];
 
+        console.log(`[5B][DUPE][INFO][${jobId}] Before mega lookup, usedClipsLen=${usedClips.length}`);
         let megaClipPath = null;
         for (let subj of candidateSubjects) {
           megaClipPath = await findClipForScene({
@@ -320,7 +334,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           megaClipPath = await fallbackKenBurnsVideo(candidateSubjects[0] || mainTopic, workDir, 1, jobId, usedClips);
         }
         if (!megaClipPath) throw new Error(`[5B][ERR] No mega-clip found for any subject or fallback for: "${candidateSubjects[0] || mainTopic}"`);
-        usedClips.push(megaClipPath);
+        pushUsedClip('MEGA', megaClipPath);
 
         const localMegaClipPath = path.join(workDir, path.basename(megaClipPath));
         await ensureLocalClipExists(megaClipPath, localMegaClipPath);
@@ -352,6 +366,7 @@ function registerGenerateVideoEndpoint(app, deps) {
           if (GENERIC_SUBJECTS.includes((sceneSubject || '').toLowerCase())) {
             sceneSubject = mainTopic;
           }
+          console.log(`[5B][DUPE][INFO][${jobId}] Before scene ${sceneIdx + 1} lookup, usedClipsLen=${usedClips.length}`);
           let clipPath = null;
           try {
             clipPath = await findClipForScene({
@@ -374,7 +389,7 @@ function registerGenerateVideoEndpoint(app, deps) {
             progress[jobId] = { percent: 100, status: `No clip found for scene ${sceneIdx + 1}. Try a different topic or rephrase your script.`, error: `No clip found for scene ${sceneIdx + 1}` };
             throw new Error(`[5B][ERR][NO_MATCH][${jobId}] No clip found for scene ${sceneIdx + 1}`);
           }
-          usedClips.push(clipPath);
+          pushUsedClip(`SCENE_${sceneIdx + 1}`, clipPath);
 
           const localClipPath = path.join(workDir, path.basename(clipPath));
           await ensureLocalClipExists(clipPath, localClipPath);

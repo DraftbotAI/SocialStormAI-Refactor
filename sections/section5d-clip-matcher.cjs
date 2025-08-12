@@ -4,7 +4,7 @@
 // Never loops forever. Max logs at each fallback step.
 // ===========================================================
 
-const { findR2ClipForScene, findTopNR2ClipsForSubject } = require('./section10a-r2-clip-helper.cjs');
+const { findR2ClipForScene } = require('./section10a-r2-clip-helper.cjs');
 const { findPexelsClipForScene } = require('./section10b-pexels-clip-helper.cjs');
 const { findPixabayClipForScene } = require('./section10c-pixabay-clip-helper.cjs');
 const { findUnsplashImageForScene } = require('./section10f-unsplash-image-helper.cjs');
@@ -30,6 +30,57 @@ function getMajorWords(subject) {
     .split(/\s+/)
     .map(w => w.toLowerCase())
     .filter(w => w.length > 2 && !['the','of','and','in','on','with','to','is','for','at','by','as','a','an'].includes(w));
+}
+
+// Stem for per-video dedupe (basename, no extension, separators→spaces, lowercase)
+function stemFromPath(p) {
+  try {
+    const base = (p || '').split('/').pop() || '';
+    const noExt = base.replace(/\.[a-z0-9]+$/i, '');
+    return noExt.toLowerCase().replace(/[\s_\-\.]+/g, ' ').replace(/\s+/g, ' ').trim();
+  } catch {
+    return '';
+  }
+}
+
+// NEW: derive a stable provider ID from filename when meta.id is missing
+function deriveProviderId(filePath, label = '') {
+  try {
+    const base = (filePath || '').split('/').pop() || '';
+    const lower = base.toLowerCase();
+
+    // Pexels patterns: pexels-<id>, pexels_video_<id>, pexels-<id>-*, etc.
+    let m =
+      lower.match(/pexels[^0-9]*?(\d{4,})/) ||
+      lower.match(/pexels[-_ ]?(video)?[-_ ]?(\d{4,})/);
+    if (m) {
+      const id = String(m[1] || m[2]);
+      console.log(`[5D][ID][DERIVE] (${label}) from filename "${base}" -> ${id}`);
+      return id;
+    }
+
+    // Pixabay patterns: pixabay[-_]video[-_]<id>, pixabay_<id>, etc.
+    m =
+      lower.match(/pixabay[^0-9]*?(\d{4,})/) ||
+      lower.match(/pixabay[-_ ]?(video|vid)?[-_ ]?(\d{4,})/);
+    if (m) {
+      const id = String(m[1] || m[2]);
+      console.log(`[5D][ID][DERIVE] (${label}) from filename "${base}" -> ${id}`);
+      return id;
+    }
+
+    // Generic: longest run of digits (>=4) in basename
+    const nums = lower.match(/\d{4,}/g);
+    if (nums && nums.length) {
+      // choose the longest, then first
+      const id = nums.sort((a, b) => b.length - a.length || a.localeCompare(b))[0];
+      console.log(`[5D][ID][DERIVE] (${label}) generic digits from "${base}" -> ${id}`);
+      return id;
+    }
+  } catch (e) {
+    // ignore
+  }
+  return null;
 }
 
 // Checks if ANY major word from subject appears in filename
@@ -86,6 +137,14 @@ async function findClipForScene({
 }) {
   let searchSubject = subject;
 
+  // Build per-video used stems from passed-in usedClips (current job only)
+  const usedStems = new Set((usedClips || []).map(stemFromPath).filter(Boolean));
+  // Track provider clip IDs per job to avoid repeating the same Pexels/Pixabay asset
+  const usedSourceIds = jobContext && jobContext._usedSourceIds instanceof Set
+    ? jobContext._usedSourceIds
+    : new Set();
+  jobContext._usedSourceIds = usedSourceIds;
+
   // Anchor logic
   if (isMegaScene || sceneIdx === 0) {
     if (megaSubject && typeof megaSubject === 'string' && megaSubject.length > 2 && !GENERIC_SUBJECTS.includes(megaSubject.toLowerCase())) {
@@ -135,58 +194,94 @@ async function findClipForScene({
     prioritizedSubjects = [searchSubject, mainTopic];
   }
 
-  // Ensure jobContext.r2Pools exists for R2-first pooling
-  if (!jobContext.r2Pools) jobContext.r2Pools = {};
-
   // Try all prioritized subjects, loose mode
   for (const subjectOption of prioritizedSubjects) {
     if (!subjectOption || subjectOption.length < 2) continue;
 
-    // === R2-FIRST using a subject-scoped pool (small change) ===
-    try {
-      const poolKey = normalize(subjectOption);
-      if (!jobContext.r2Pools[poolKey] || jobContext.r2Pools[poolKey].length === 0) {
-        console.log(`[5D][R2POOL][${jobId}] Pool empty for "${subjectOption}". Fetching top-N from R2...`);
-        const pool = await findTopNR2ClipsForSubject(subjectOption, workDir, {
-          N: 4,
-          usedClips,
-          jobId,
-          minScore: -999,
-          maxConcurrency: 3,
-        });
-        jobContext.r2Pools[poolKey] = Array.isArray(pool) ? pool.slice() : [];
-        console.log(`[5D][R2POOL][${jobId}] Pool populated for "${subjectOption}": ${jobContext.r2Pools[poolKey].length} items`);
-      }
+    // === 1. Try R2, loose mode ===
+    async function findDedupedR2ClipLoose(searchPhrase, usedClipsArr) {
+      try {
+        const r2Files = await findR2ClipForScene.getAllFiles
+          ? await findR2ClipForScene.getAllFiles()
+          : [];
+        let found = null;
 
-      // Shift one good local path from the pool
-      while (jobContext.r2Pools[poolKey] && jobContext.r2Pools[poolKey].length) {
-        const next = jobContext.r2Pools[poolKey].shift(); // { key, path, score }
-        if (!next || !next.path) continue;
-
-        // Skip if already used (compare by path + basename)
-        const base = path.basename(next.path.toLowerCase());
-        const already = usedClips.some(u => {
-          const uLower = String(u || '').toLowerCase();
-          return uLower === next.path.toLowerCase() || path.basename(uLower) === base;
-        });
-        if (already) {
-          console.log(`[5D][R2POOL][${jobId}] Skipping already-used: ${next.path}`);
-          continue;
+        // a) Strict match first
+        for (const fname of r2Files) {
+          const stem = stemFromPath(fname);
+          if (usedClipsArr.includes(fname)) {
+            console.log(`[5D][R2][${jobId}][SKIP][USED_KEY] ${fname}`);
+            continue;
+          }
+          if (usedStems.has(stem)) {
+            console.log(`[5D][R2][${jobId}][DUPE][SKIP] stem already used: "${stem}" (${fname})`);
+            continue;
+          }
+          if (strictSubjectMatch(fname, searchPhrase)) {
+            found = fname;
+            console.log(`[5D][R2][${jobId}] STRICT MATCH: "${fname}"`);
+            break;
+          }
         }
-
-        if (assertFileExists(next.path, 'R2_POOL_RESULT')) {
-          console.log(`[5D][PICK][${jobId}] R2 pool pick: ${next.path} (score=${next.score})`);
-          return next.path;
-        } else {
-          console.warn(`[5D][R2POOL][${jobId}] Pool item missing/invalid, continuing: ${next.path}`);
+        // b) Loose match: any major word or substring
+        if (!found) {
+          for (const fname of r2Files) {
+            const stem = stemFromPath(fname);
+            if (usedClipsArr.includes(fname)) {
+              console.log(`[5D][R2][${jobId}][SKIP][USED_KEY] ${fname}`);
+              continue;
+            }
+            if (usedStems.has(stem)) {
+              console.log(`[5D][R2][${jobId}][DUPE][SKIP] stem already used: "${stem}" (${fname})`);
+              continue;
+            }
+            if (looseSubjectMatch(fname, searchPhrase)) {
+              found = fname;
+              console.log(`[5D][R2][${jobId}] LOOSE MATCH: "${fname}"`);
+              break;
+            }
+          }
         }
+        // c) Any unused file as last resort
+        if (!found && r2Files.length) {
+          for (const fname of r2Files) {
+            const stem = stemFromPath(fname);
+            if (usedClipsArr.includes(fname)) {
+              console.log(`[5D][R2][${jobId}][SKIP][USED_KEY] ${fname}`);
+              continue;
+            }
+            if (usedStems.has(stem)) {
+              console.log(`[5D][R2][${jobId}][DUPE][SKIP] stem already used: "${stem}" (${fname})`);
+              continue;
+            }
+            found = fname;
+            console.log(`[5D][R2][${jobId}] FALLBACK: Picking available unused: "${fname}"`);
+            break;
+          }
+        }
+        if (found && assertFileExists(found, 'R2_RESULT')) return found;
+        return null;
+      } catch (err) {
+        console.error(`[5D][R2][ERR][${jobId}] Error during R2 matching:`, err);
+        return null;
       }
-      console.log(`[5D][R2POOL][${jobId}] No usable items in pool for "${subjectOption}". Proceeding to providers.`);
-    } catch (e) {
-      console.error(`[5D][R2POOL][ERR][${jobId}]`, e);
     }
 
-    // --- Try Pexels, Pixabay, Unsplash with loose match ---
+    let r2Result = null;
+    if (findR2ClipForScene.getAllFiles) {
+      r2Result = await findDedupedR2ClipLoose(subjectOption, usedClips);
+      if (r2Result) {
+        const stem = stemFromPath(r2Result);
+        usedClips.push(r2Result);
+        usedStems.add(stem);
+        console.log(`[5D][DUPE][ADD][${jobId}] Added stem="${stem}" key="${r2Result}"`);
+        console.log(`[5D][PICK][${jobId}] R2 subject match: ${r2Result}`);
+        return r2Result;
+      }
+      console.log(`[5D][FALLBACK][${jobId}] No R2 found, trying Pexels/Pixabay/Unsplash.`);
+    }
+
+    // --- Try Pexels, Pixabay with loose match ---
     let sources = [
       { fn: findPexelsClipForScene, label: 'PEXELS', meta: 'meta' },
       { fn: findPixabayClipForScene, label: 'PIXABAY', meta: 'meta' }
@@ -196,7 +291,24 @@ async function findClipForScene({
       try {
         let result = await src.fn(subjectOption, workDir, sceneIdx, jobId, usedClips);
         const candidatePath = (result && result.path) ? result.path : result;
-        if (candidatePath && !usedClips.includes(candidatePath) && assertFileExists(candidatePath, src.label + '_RESULT')) {
+
+        // Skip if provider returned an ID we've already used this job
+        let candId = result && result.meta && (result.meta.id || result.meta.sourceId) ? String(result.meta.id || result.meta.sourceId) : null;
+        if (!candId) {
+          // NEW: derive ID from filename if meta missing
+          candId = deriveProviderId(candidatePath, src.label);
+        }
+        if (candId && usedSourceIds.has(candId)) {
+          console.log(`[5D][${src.label}][${jobId}][ID][SKIP] providerId already used: "${candId}" (${candidatePath})`);
+          continue;
+        }
+
+        if (candidatePath && assertFileExists(candidatePath, src.label + '_RESULT')) {
+          const candStem = stemFromPath(candidatePath);
+          if (usedStems.has(candStem)) {
+            console.log(`[5D][${src.label}][${jobId}][DUPE][SKIP] stem already used: "${candStem}" (${candidatePath})`);
+            continue;
+          }
           // Loose match: accept if ANY major word from subject appears in filename/tags
           let valid = false;
           if (result && result.meta && Array.isArray(result.meta.tags)) {
@@ -204,8 +316,15 @@ async function findClipForScene({
           } else if (typeof candidatePath === 'string') {
             valid = looseSubjectMatch(candidatePath, subjectOption);
           }
-          // Existing behavior preserved: accept even if imperfect (prevents empty scenes)
+          // **Loose policy**: accept first available (still respecting de-dupe)
           if (valid || true) {
+            usedClips.push(candidatePath);
+            usedStems.add(candStem);
+            if (candId) {
+              usedSourceIds.add(candId);
+              console.log(`[5D][${src.label}][${jobId}][ID][ADD] providerId="${candId}"`);
+            }
+            console.log(`[5D][DUPE][ADD][${jobId}] Added stem="${candStem}" path="${candidatePath}"`);
             console.log(`[5D][PICK][${jobId}] ${src.label} subject match: ${candidatePath}`);
             if (jobContext && Array.isArray(jobContext.clipsToIngest)) {
               jobContext.clipsToIngest.push({
@@ -229,9 +348,17 @@ async function findClipForScene({
     // --- Unsplash: always loose, just check for unused image
     try {
       let unsplashResult = await findUnsplashImageForScene(subjectOption, workDir, sceneIdx, jobId, usedClips, jobContext);
-      if (unsplashResult && !usedClips.includes(unsplashResult) && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
-        console.log(`[5D][PICK][${jobId}] Unsplash image (loose): ${unsplashResult}`);
-        return unsplashResult;
+      if (unsplashResult && assertFileExists(unsplashResult, 'UNSPLASH_RESULT')) {
+        const candStem = stemFromPath(unsplashResult);
+        if (usedStems.has(candStem)) {
+          console.log(`[5D][UNSPLASH][${jobId}][DUPE][SKIP] stem already used: "${candStem}" (${unsplashResult})`);
+        } else {
+          usedClips.push(unsplashResult);
+          usedStems.add(candStem);
+          console.log(`[5D][DUPE][ADD][${jobId}] Added stem="${candStem}" path="${unsplashResult}"`);
+          console.log(`[5D][PICK][${jobId}] Unsplash image (loose): ${unsplashResult}`);
+          return unsplashResult;
+        }
       }
     } catch (e) {
       console.error(`[5D][UNSPLASH][ERR][${jobId}]`, e);
@@ -240,9 +367,17 @@ async function findClipForScene({
     // --- Ken Burns (final fallback, always returns an image)
     try {
       let kenBurnsResult = await fallbackKenBurnsVideo(subjectOption, workDir, sceneIdx, jobId, usedClips);
-      if (kenBurnsResult && !usedClips.includes(kenBurnsResult) && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
-        console.log(`[5D][PICK][${jobId}] KenBurns fallback (loose): ${kenBurnsResult}`);
-        return kenBurnsResult;
+      if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+        const candStem = stemFromPath(kenBurnsResult);
+        if (usedStems.has(candStem)) {
+          console.log(`[5D][KENBURNS][${jobId}][DUPE][SKIP] stem already used: "${candStem}" (${kenBurnsResult})`);
+        } else {
+          usedClips.push(kenBurnsResult);
+          usedStems.add(candStem);
+          console.log(`[5D][DUPE][ADD][${jobId}] Added stem="${candStem}" path="${kenBurnsResult}"`);
+          console.log(`[5D][PICK][${jobId}] KenBurns fallback (loose): ${kenBurnsResult}`);
+          return kenBurnsResult;
+        }
       }
     } catch (e) {
       console.error(`[5D][KENBURNS][ERR][${jobId}]`, e);
@@ -254,8 +389,18 @@ async function findClipForScene({
     if (findR2ClipForScene.getAllFiles) {
       const r2Files = await findR2ClipForScene.getAllFiles();
       for (const fname of r2Files) {
-        // Note: these are keys, not local files; keep behavior but validate only if present locally
-        if (!usedClips.includes(fname) && assertFileExists(fname, 'R2_ANYFALLBACK')) {
+        const stem = stemFromPath(fname);
+        if (usedClips.includes(fname)) {
+          console.log(`[5D][R2][${jobId}][SKIP][USED_KEY] ${fname}`);
+          continue;
+        }
+        if (usedStems.has(stem)) {
+          console.log(`[5D][R2][${jobId}][DUPE][SKIP] stem already used: "${stem}" (${fname})`);
+          continue;
+        }
+        if (assertFileExists(fname, 'R2_ANYFALLBACK')) {
+          usedClips.push(fname);
+          usedStems.add(stem);
           console.warn(`[5D][FINALFALLBACK][${jobId}] ABSOLUTE fallback, picking any available R2: ${fname}`);
           return fname;
         }
@@ -271,6 +416,12 @@ async function findClipForScene({
   try {
     let kenBurnsResult = await fallbackKenBurnsVideo('landmark', workDir, sceneIdx, jobId, usedClips);
     if (kenBurnsResult && assertFileExists(kenBurnsResult, 'KENBURNS_RESULT')) {
+      const candStem = stemFromPath(kenBurnsResult);
+      if (!usedStems.has(candStem)) {
+        usedClips.push(kenBurnsResult);
+        usedStems.add(candStem);
+        console.log(`[5D][DUPE][ADD][${jobId}] Added stem="${candStem}" path="${kenBurnsResult}"`);
+      }
       console.log(`[5D][FINALFALLBACK][${jobId}] KenBurns generic fallback: ${kenBurnsResult}`);
       return kenBurnsResult;
     }

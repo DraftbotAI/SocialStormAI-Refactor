@@ -4,6 +4,10 @@
    - Exports registerGenerateScriptEndpoint(app, openai)
    - MAX logging everywhere
    - 2024-08: ALWAYS starts script with viral, topic-rich hook
+   - 2025-08: OPTIONAL story-style ending line (ENV: ADD_STORY_ENDING=1)
+   - 2025-08: Hidden SCENE_MAP JSON for subject extraction (ENV: SCRIPT_SCENEMAP=1)
+   - 2025-08: Upgraded metadata quality (Title/Description/Tags) + smart fallbacks
+   - 2025-08: Varied endings (fun/happy/dramatic) — randomized each run
    - Robust OpenAI prompt, post-validation, error-proofed
    =========================================================== */
 
@@ -12,6 +16,13 @@ console.log('\n========== [SECTION4][INIT] /api/generate-script Endpoint =======
 // Usage (in main server file):
 // const registerGenerateScriptEndpoint = require('./sections/section4-generate-script-endpoint.cjs');
 // registerGenerateScriptEndpoint(app, openai);
+
+/** Lightweight stopword list for tag cleaning */
+const SECTION4_STOPWORDS = new Set([
+  'the','a','an','and','or','but','so','because','about','into','onto','with','from','over','under','of','in','on','to','for','by',
+  'is','are','was','were','be','been','being','this','that','these','those','it','its','as','at','if','then','than','there','their',
+  'you','your','yours','we','our','ours','they','them','he','she','his','her','i','me','my','mine','us'
+]);
 
 function registerGenerateScriptEndpoint(app, openai) {
   if (!app || !openai) {
@@ -45,8 +56,13 @@ function registerGenerateScriptEndpoint(app, openai) {
     console.log(`[SECTION4][INPUT] idea = "${idea}"`);
 
     try {
-      // === VIRAL, TOPIC-RICH HOOK PROMPT (REVISED) ===
-      const prompt = `
+      // === Feature flags ===
+      const addEnding = (process.env.ADD_STORY_ENDING ?? '1') !== '0';
+      const enableSceneMap = (process.env.SCRIPT_SCENEMAP ?? '1') !== '0';
+      console.log(`[SECTION4][FLAGS] ADD_STORY_ENDING=${addEnding ? 'ON' : 'OFF'} | SCRIPT_SCENEMAP=${enableSceneMap ? 'ON' : 'OFF'}`);
+
+      // === Build Prompt (with optional SCENE_MAP instructions) ===
+      let prompt = `
 You are a viral YouTube Shorts scriptwriter.
 
 Write an ultra-engaging, narratable script for the topic: "${idea}"
@@ -62,14 +78,15 @@ Write an ultra-engaging, narratable script for the topic: "${idea}"
 
 == STYLE ==
 - Conversational, vivid, friendly, clever.
-- Each line advances the story, keeps the viewer hooked.
+- Balanced tone: humor=medium, drama=medium, info=high.
+- Each line must include one concrete, verifiable idea.
 - Humor only if natural—never forced.
 
-== METADATA ==
-At the end, return:
-Title: [a viral, clickable title — no quotes]
-Description: [1–2 sentence summary of what the video reveals]
-Tags: [Max 5 words, space-separated. No hashtags or commas.]
+== METADATA (HIGH QUALITY) ==
+Return at the end:
+Title: [6–9 words, includes the real topic, curiosity + clarity, no quotes, no emojis]
+Description: [1–2 tight sentences. Lead with the value the viewer gets; include 1–2 concrete terms from the script; no hashtags]
+Tags: [Up to 5 single words, space-separated, lowercase, no commas, no hashtags. Avoid stopwords; prefer specific nouns (e.g., "trevi", "fountain", "rome", "history", "travel")]
 
 == EXAMPLE SCRIPT ==
 Here are the secrets hidden inside the world’s most famous landmarks.
@@ -81,15 +98,40 @@ And in the Leaning Tower of Pisa, centuries-old stairs are marked by the shoes o
 Title: Secrets of Famous Landmarks
 Description: Discover the wildest hidden rooms, lost history, and real secrets inside the world’s iconic landmarks.
 Tags: landmarks secrets travel viral history
+`.trim();
+
+      if (enableSceneMap) {
+        prompt += `
+
+== SCENE MAP (for internal use) ==
+After the metadata above, append a block starting with exactly:
+SCENE_MAP:
+followed by a valid JSON array (no trailing commentary). One object per script line in order (including the first hook line and your final ending line). Use this schema:
+[
+  {"idx":0,"subject":"<primary visual subject for line 0>",
+   "alternates":["alt1","alt2"],
+   "must_tokens":["token1","token2"],
+   "mood":"funny+dramatic+info"}
+  // ...repeat for every line
+]
+- "subject": a concrete, visual noun phrase (e.g., "Trevi Fountain", "manatee", "Eiffel Tower at night").
+- "alternates": 1–3 reasonable substitutes (e.g., "Rome fountain","Italian landmark").
+- "must_tokens": 1–3 essential tokens helpful for filename/tag matching (lowercase, no spaces if possible).
+- "mood": the string "funny+dramatic+info".
+- Ensure JSON is strictly valid.
+`;
+      }
+
+      prompt += `
 
 Now write a script for: "${idea}"
-      `.trim();
+`.trim();
 
-      // === OpenAI v4+ call ===
+      // === OpenAI call ===
       const completion = await openai.chat.completions.create({
         model: "gpt-4-1106-preview",
         temperature: 0.88,
-        max_tokens: 1000,
+        max_tokens: 1200,
         messages: [
           { role: "system", content: prompt }
         ]
@@ -108,19 +150,21 @@ Now write a script for: "${idea}"
       let title = '';
       let description = '';
       let tags = '';
+      let sceneMap = null;
 
       // Parse lines and metadata
       const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-      const titleIdx = lines.findIndex(l => /^title\s*:/i.test(l));
-      const descIdx  = lines.findIndex(l => /^description\s*:/i.test(l));
-      const tagsIdx  = lines.findIndex(l => /^tags?\s*:/i.test(l));
-
-      const metaStart = [titleIdx, descIdx, tagsIdx].filter(x => x > -1).sort((a, b) => a - b)[0] || lines.length;
+      const titleIdx    = lines.findIndex(l => /^title\s*:/i.test(l));
+      const descIdx     = lines.findIndex(l => /^description\s*:/i.test(l));
+      const tagsIdx     = lines.findIndex(l => /^tags?\s*:/i.test(l));
+      const metaStartCandidates = [titleIdx, descIdx, tagsIdx].filter(x => x > -1).sort((a, b) => a - b);
+      const metaStart  = (metaStartCandidates.length ? metaStartCandidates[0] : lines.length);
 
       scriptLines = lines.slice(0, metaStart).filter(l =>
         !/^title\s*:/i.test(l) &&
         !/^description\s*:/i.test(l) &&
-        !/^tags?\s*:/i.test(l)
+        !/^tags?\s*:/i.test(l) &&
+        !/^scene_map\s*:/i.test(l)
       );
 
       // Remove camera/script directions just in case
@@ -133,7 +177,6 @@ Now write a script for: "${idea}"
       // === FORCED HOOK LOGIC: Ensure first line is topic-rich and hooky ===
       if (scriptLines.length > 0) {
         const firstLine = scriptLines[0];
-        // Extract all "big" (4+ letter) words from idea, and use all long subphrases as candidates
         const ideaKeywords = idea
           .toLowerCase()
           .replace(/[^a-z0-9\s]/gi, ' ')
@@ -141,49 +184,192 @@ Now write a script for: "${idea}"
           .filter(w => w.length > 3);
         const firstLineLc = firstLine.toLowerCase();
 
-        // Consider the *entire* idea string as a possible subject too (for multi-word)
         let subjectMentioned = false;
         if (ideaKeywords.length) {
           subjectMentioned = ideaKeywords.some(word => firstLineLc.includes(word));
         }
-        // Also check if the whole "idea" as a phrase (normalized) appears
         if (!subjectMentioned && idea.length > 5) {
           const ideaNorm = idea.toLowerCase().replace(/[^\w\s]/g, '').trim();
           if (ideaNorm && firstLineLc.includes(ideaNorm)) subjectMentioned = true;
         }
-        // If not found, force replace
         if (!subjectMentioned || firstLine.length < 8) {
-          // Generate a viral, topic-rich hook using the *entire* idea
-          let viralHook;
-          if (ideaKeywords.length > 0) {
-            viralHook = `Here are the secrets about ${idea.replace(/^the\s+/i, '').trim()} you never learned in school.`;
-          } else {
-            viralHook = `Here's why ${idea.replace(/^(the|a|an)\s+/i, '').trim()} is blowing up right now.`;
-          }
+          let topic = idea.replace(/^(the|a|an)\s+/i, '').trim();
+          if (!topic) topic = 'this topic';
+          const viralHook = `In 60 seconds, here’s exactly what you’ll learn about ${topic}.`;
           console.warn('[SECTION4][HOOK][ENFORCE] First line did not mention subject, auto-replacing:', firstLine, '→', viralHook);
           scriptLines[0] = viralHook;
+        } else {
+          console.log('[SECTION4][HOOK][INFO] First line already includes subject; keeping generated hook.');
         }
       }
 
-      // Cap at 10 lines (including hook)
-      if (scriptLines.length > 10) scriptLines = scriptLines.slice(0, 10);
+      // === OPTIONAL: Append varied story-style ending line (ENV: ADD_STORY_ENDING) ===
+      if (addEnding) {
+        let topic = idea.replace(/^(the|a|an)\s+/i, '').trim();
+        if (!topic) topic = 'this topic';
 
-      // Extract meta
-      for (const l of lines.slice(metaStart)) {
-        if (/^title\s*:/i.test(l)) title = l.replace(/^title\s*:/i, '').trim();
-        else if (/^description\s*:/i.test(l)) description = l.replace(/^description\s*:/i, '').trim();
-        else if (/^tags?\s*:/i.test(l)) tags = l.replace(/^tags?\s*:/i, '').trim();
+        // Curated endings — fun, happy, punchy, dramatic; randomized each run.
+        const ENDINGS = [
+          `And that’s your quick tour of ${topic}.`,
+          `Short version? ${topic} is way cooler than it looks.`,
+          `Next time you see ${topic}, you’ll spot the hidden details.`,
+          `${topic}, decoded in under a minute—nice.`,
+          `Consider yourself briefed on ${topic}.`,
+          `That’s ${topic} in a nutshell.`,
+          `From now on, ${topic} won’t look the same.`,
+          `Bookmark this—${topic} just got interesting.`,
+          `Okay, ${topic} fan unlocked. On to the next.`,
+          `Boom—${topic}, explained.`,
+          `That’s the quick breakdown of ${topic}.`,
+          `Alright, that’s ${topic}. See you in the next one.`
+        ];
+        const idx = Math.floor(Math.random() * ENDINGS.length);
+        const closing = ENDINGS[idx];
+
+        console.log(`[SECTION4][ENDING][INFO] Appending closing line (index=${idx}): ${closing}`);
+        scriptLines.push(closing);
+      } else {
+        console.log('[SECTION4][ENDING][SKIP] ADD_STORY_ENDING disabled.');
       }
 
-      // === Metadata Fallbacks ===
-      if (!title) title = idea.length < 60 ? idea : idea.slice(0, 57) + "...";
-      if (!description) description = `This video explores: ${idea}`;
-      if (!tags) tags = idea
-        .toLowerCase()
-        .split(/\W+/)
-        .filter(w => w.length > 2)
-        .slice(0, 5)
-        .join(' ');
+      // Cap at 10 lines (including hook and optional ending)
+      if (scriptLines.length > 10) {
+        console.warn('[SECTION4][LIMIT][WARN] Script exceeded 10 lines; trimming to 10.');
+        scriptLines = scriptLines.slice(0, 10);
+      }
+
+      // Extract metadata from model output
+      for (const l of lines.slice(metaStart)) {
+        if (/^title\s*:/i.test(l)) title = l.replace(/^title\s*:/i, '').trim().replace(/^["']|["']$/g, '');
+        else if (/^description\s*:/i.test(l)) description = l.replace(/^description\s*:/i, '').trim();
+        else if (/^tags?\s*:/i.test(l)) tags = l.replace(/^tags?\s*:/i, '').trim().toLowerCase();
+      }
+
+      // === Parse SCENE_MAP JSON (hidden, behind-the-scenes) ===
+      if (enableSceneMap) {
+        try {
+          const smMatch = raw.match(/SCENE_MAP\s*:\s*([\s\S]+)$/i);
+          if (smMatch && smMatch[1]) {
+            const jsonRaw = smMatch[1].trim();
+            sceneMap = JSON.parse(jsonRaw);
+            if (!Array.isArray(sceneMap)) {
+              console.warn('[SECTION4][SCENEMAP][WARN] Parsed SCENE_MAP is not an array; discarding.');
+              sceneMap = null;
+            } else {
+              console.log('[SECTION4][SCENEMAP][INFO] Parsed SCENE_MAP entries:', sceneMap.length);
+              const maxIdx = scriptLines.length - 1;
+              sceneMap = sceneMap
+                .filter(item => typeof item?.idx === 'number' && item.idx >= 0 && item.idx <= maxIdx)
+                .map(item => ({
+                  idx: item.idx,
+                  subject: typeof item.subject === 'string' ? item.subject : '',
+                  alternates: Array.isArray(item.alternates) ? item.alternates.slice(0, 3) : [],
+                  must_tokens: Array.isArray(item.must_tokens) ? item.must_tokens.slice(0, 3) : [],
+                  mood: typeof item.mood === 'string' ? item.mood : 'funny+dramatic+info'
+                }));
+              console.log('[SECTION4][SCENEMAP][INFO] Filtered to script length:', sceneMap.length);
+            }
+          } else {
+            console.log('[SECTION4][SCENEMAP][SKIP] No SCENE_MAP block found in model output.');
+          }
+        } catch (smErr) {
+          console.warn('[SECTION4][SCENEMAP][ERR] Failed to parse SCENE_MAP JSON:', smErr?.message || smErr);
+          sceneMap = null;
+        }
+      }
+
+      // === Metadata Fallbacks & Upgrades ===
+      const topic = (idea || '').replace(/^(the|a|an)\s+/i, '').trim() || 'this topic';
+
+      function buildFallbackTags(limit = 5) {
+        const pool = [idea, ...scriptLines.slice(0, 6)].join(' ').toLowerCase();
+        const words = pool
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .filter(Boolean)
+          .map(w => w.trim());
+        const counts = new Map();
+        for (const w of words) {
+          if (w.length < 4) continue;
+          if (SECTION4_STOPWORDS.has(w)) continue;
+          counts.set(w, (counts.get(w) || 0) + 1);
+        }
+        const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([w]) => w);
+        const uniq = [];
+        for (const w of sorted) {
+          if (!uniq.includes(w)) uniq.push(w);
+          if (uniq.length >= limit) break;
+        }
+        return uniq;
+      }
+
+      function sanitizeTags(input) {
+        let parts = [];
+        if (input) {
+          parts = input.toLowerCase().split(/\s+/).filter(Boolean);
+        }
+        if (!parts.length) parts = buildFallbackTags(5);
+        const out = [];
+        for (const t of parts) {
+          const tok = t.replace(/[^a-z0-9]/g, '');
+          if (!tok) continue;
+          if (tok.length < 3) continue;
+          if (SECTION4_STOPWORDS.has(tok)) continue;
+          if (!out.includes(tok)) out.push(tok);
+          if (out.length >= 5) break;
+        }
+        if (!out.length) out.push('viral');
+        return out.join(' ');
+      }
+
+      function buildFallbackTitle() {
+        const topTags = buildFallbackTags(3);
+        const focus = topic.charAt(0).toUpperCase() + topic.slice(1);
+        if (topTags.length >= 2) {
+          return `${focus}: ${topTags[0]} & ${topTags[1]} You Should Know`;
+        }
+        return `The Real Story of ${focus}`;
+      }
+
+      function buildFallbackDescription(finalTagsStr) {
+        const tks = (finalTagsStr || '').split(/\s+/).filter(Boolean);
+        const hints = tks.slice(0, 2).join(', ');
+        if (hints) {
+          return `In under a minute, get the key facts about ${topic} — including ${hints}.`;
+        }
+        return `In under a minute, get the key facts about ${topic}.`;
+      }
+
+      const originalTitle = title;
+      const originalDesc  = description;
+      const originalTags  = tags;
+
+      if (!title || title.length < 6 || title.toLowerCase() === idea.toLowerCase()) {
+        title = buildFallbackTitle();
+        console.log('[SECTION4][META][TITLE][FALLBACK] Rebuilt title:', title, '| original:', originalTitle);
+      } else {
+        console.log('[SECTION4][META][TITLE][OK]', title);
+      }
+
+      tags = sanitizeTags(tags);
+      if (tags !== originalTags) {
+        console.log('[SECTION4][META][TAGS][SANITIZED]', tags, '| original:', originalTags);
+      } else {
+        console.log('[SECTION4][META][TAGS][OK]', tags);
+      }
+
+      if (!description || description.length < 20) {
+        description = buildFallbackDescription(tags);
+        console.log('[SECTION4][META][DESC][FALLBACK] Rebuilt description:', description, '| original:', originalDesc);
+      } else {
+        const lc = description.toLowerCase();
+        if (!lc.includes(topic.toLowerCase().split(' ')[0])) {
+          description = `${description} This short covers ${topic}.`;
+          console.log('[SECTION4][META][DESC][UPGRADE] Ensured topic mention.');
+        } else {
+          console.log('[SECTION4][META][DESC][OK]', description);
+        }
+      }
 
       if (!scriptLines.length) scriptLines = ['Something went wrong generating the script.'];
 
@@ -191,14 +377,22 @@ Now write a script for: "${idea}"
       console.log('[SECTION4][PARSED] title:', title);
       console.log('[SECTION4][PARSED] description:', description);
       console.log('[SECTION4][PARSED] tags:', tags);
+      if (enableSceneMap) {
+        console.log('[SECTION4][PARSED] sceneMap entries:', sceneMap ? sceneMap.length : 0);
+      }
 
-      res.json({
+      const responsePayload = {
         success: true,
         script: scriptLines.join('\n'),
         title,
         description,
         tags
-      });
+      };
+      if (enableSceneMap && sceneMap) {
+        responsePayload.sceneMap = sceneMap; // backend-only consumer
+      }
+
+      res.json(responsePayload);
 
     } catch (err) {
       // Distinguish between OpenAI errors and general errors
